@@ -10,7 +10,11 @@ import json
 import pathlib
 import unittest
 
-from robot_factory_arena.contracts.outcomes import BudgetView, LastResult
+from robot_factory_arena.contracts.outcomes import (
+    BudgetView,
+    Counters,
+    LastResult,
+)
 from robot_factory_arena.contracts.policy import policy_manifest_digest
 from robot_factory_arena.contracts.tool_call import (
     normalize_tool_call,
@@ -24,8 +28,6 @@ from robot_factory_arena.domain.model import (
 )
 from robot_factory_arena.domain.observation import Observation, serialize_observation
 from robot_factory_arena.domain.task import generate_task, serialize_task
-from robot_factory_arena.policies.bounded import BoundedPolicy
-from robot_factory_arena.policies.greedy import GreedyPolicy
 from robot_factory_arena.evidence.canonical import (
     canonical_json,
     canonical_json_bytes,
@@ -33,6 +35,9 @@ from robot_factory_arena.evidence.canonical import (
     digest_json,
     sha256_digest,
 )
+from robot_factory_arena.policies.bounded import BoundedPolicy
+from robot_factory_arena.policies.greedy import GreedyPolicy
+from robot_factory_arena.runtime.budget import Budget
 
 FIXTURE_DIR = pathlib.Path(__file__).resolve().parent / "fixtures"
 
@@ -109,7 +114,7 @@ class TestCanonicalJsonAuthority(unittest.TestCase):
         self.assertEqual(canonical_json({"name": "café"}), '{"name":"café"}')
         self.assertEqual(
             canonical_json_bytes({"name": "café"}),
-            '{"name":"café"}'.encode("utf-8"),
+            '{"name":"café"}'.encode(),
         )
 
     def test_explicit_nulls_and_empty_containers(self):
@@ -121,9 +126,8 @@ class TestCanonicalJsonAuthority(unittest.TestCase):
         # REQ-07: no floating-point values in scoring or digest inputs; the
         # finite case is rejected exactly like nan/inf.
         for bad in (1.5, float("nan"), float("inf"), float("-inf")):
-            with self.subTest(value=bad):
-                with self.assertRaises(TypeError):
-                    canonical_json({"x": bad})
+            with self.subTest(value=bad), self.assertRaises(TypeError):
+                canonical_json({"x": bad})
         with self.assertRaises(TypeError):
             canonical_json({"a": [1, {"b": 2.0}]})
 
@@ -262,7 +266,7 @@ class TestTaskFormulaInvariants(unittest.TestCase):
                 self.assertEqual(positions, sorted(p))
 
     def test_every_order_has_exactly_one_source_shelf(self):
-        for seed in range(0, 36):
+        for seed in range(36):
             task = generate_task(seed)
             holdings = {}
             for shelf in task.shelves:
@@ -272,7 +276,7 @@ class TestTaskFormulaInvariants(unittest.TestCase):
                     self.assertEqual(len(holdings.get(order.item_id, [])), 1)
 
     def test_all_positions_in_grid(self):
-        for seed in range(0, 36):
+        for seed in range(36):
             task = generate_task(seed)
             for shelf in task.shelves:
                 x, y = shelf.position
@@ -696,6 +700,79 @@ class TestBoundedPolicyDecisions(unittest.TestCase):
         self.assertEqual(mapping, snapshot)
 
 
+# --- T-09: runtime module boundaries (REQ-04, design §2) -----------------------
+
+class TestRuntimeModuleBoundaries(unittest.TestCase):
+    """The gateway stack imports no policy/fault/verifier/runner code."""
+
+    RUNTIME_MODULE_ALLOWLISTS = {
+        "robot_factory_arena.runtime.grants": {
+            "robot_factory_arena.contracts.outcomes",
+            "robot_factory_arena.evidence.canonical",
+        },
+        "robot_factory_arena.runtime.budget": {
+            "robot_factory_arena.contracts.outcomes",
+        },
+        "robot_factory_arena.runtime.ledger": {
+            "robot_factory_arena.contracts.outcomes",
+            "robot_factory_arena.evidence.canonical",
+            # typing-only (TYPE_CHECKING) import for LedgerEntry.result.
+            "robot_factory_arena.runtime.tool_bay",
+        },
+        "robot_factory_arena.runtime.tool_bay": {
+            "robot_factory_arena.contracts.outcomes",
+            "robot_factory_arena.contracts.tool_call",
+            "robot_factory_arena.domain.model",
+            "robot_factory_arena.domain.transition",
+            "robot_factory_arena.evidence.canonical",
+            "robot_factory_arena.runtime.grants",
+            "robot_factory_arena.runtime.ledger",
+        },
+    }
+
+    FORBIDDEN_RUNTIME_PREFIXES = (
+        "robot_factory_arena.policies",
+        "robot_factory_arena.faults",
+        "robot_factory_arena.verification",
+        "robot_factory_arena.runtime.runner",
+        "robot_factory_arena.cli",
+    )
+
+    def _project_imports(self, module_name):
+        module = importlib.import_module(module_name)
+        tree = ast.parse(inspect.getsource(module))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+        return {
+            name
+            for name in imported
+            if name.startswith("robot_factory_arena")
+        }
+
+    def test_runtime_modules_import_only_their_allowlist(self):
+        for module_name, allowed in self.RUNTIME_MODULE_ALLOWLISTS.items():
+            with self.subTest(module=module_name):
+                extra = self._project_imports(module_name) - allowed
+                self.assertEqual(extra, set())
+
+    def test_no_runtime_module_touches_policy_fault_verifier_or_runner(self):
+        for module_name in self.RUNTIME_MODULE_ALLOWLISTS:
+            imported = self._project_imports(module_name)
+            for forbidden in self.FORBIDDEN_RUNTIME_PREFIXES:
+                with self.subTest(module=module_name, forbidden=forbidden):
+                    offending = [
+                        name
+                        for name in imported
+                        if name == forbidden
+                        or name.startswith(forbidden + ".")
+                    ]
+                    self.assertEqual(offending, [])
+
+
 # --- T-03: auxiliary artifact schemas are locked before any writer (REQ-03/06/07/09) ---
 
 TASK_DEFINITION_KEYS = (
@@ -829,3 +906,49 @@ class TestAuxiliarySchemaLock(unittest.TestCase):
         extra, missing = key_drift(fixture["example"], VIOLATION_KEYS)
         self.assertEqual((extra, missing), ([], []))
         self.assertIn("(code, location, detail)", fixture["sorted_arrays"][0])
+
+
+# --- T-08: budget accounting invariants (REQ-02) -------------------------------
+
+
+class TestBudgetAccountingInvariants(unittest.TestCase):
+    """The view invariant holds at every reserve; counters stay separate."""
+
+    def test_view_invariant_holds_through_the_whole_budget(self):
+        budget = Budget()
+        for used in range(1, 101):
+            view = budget.reserve_policy_attempt()
+            self.assertEqual(view.used, used)
+            self.assertEqual(view.maximum, 100)
+            self.assertEqual(view.used + view.remaining, view.maximum)
+            snapshot = budget.view()
+            self.assertEqual(
+                snapshot.used + snapshot.remaining, snapshot.maximum
+            )
+        self.assertEqual(budget.view(), BudgetView(100, 0, 100))
+
+    def test_counters_are_independent_integers_never_cross_touched(self):
+        budget = Budget()
+        budget.reserve_policy_attempt()
+        budget.record_tool_attempt()
+        budget.record_violation()
+        self.assertEqual(
+            budget.counters(), Counters(1, 1, 0, 0, 1, 0)
+        )
+        budget.record_commit()
+        self.assertEqual(
+            budget.counters(), Counters(1, 1, 1, 0, 1, 0)
+        )
+        budget.record_retry()
+        self.assertEqual(
+            budget.counters(), Counters(1, 1, 1, 1, 1, 0)
+        )
+        budget.record_terminal_check()
+        self.assertEqual(
+            budget.counters(), Counters(1, 1, 1, 1, 1, 1)
+        )
+        for field_name in (
+            "policy_steps", "tool_attempts", "committed_effects",
+            "internal_retries", "contract_violations", "terminal_checks",
+        ):
+            self.assertIsInstance(getattr(budget.counters(), field_name), int)
