@@ -730,3 +730,167 @@ class TestResponseLossRetry(unittest.TestCase):
         self.assertNotIn(("retry", 1, "idempotent_replay"), events)
         self.assertNotIn("fault_injected", [event[0] for event in events])
         self.assertEqual(result.final_state.completed_orders, ())
+
+
+# ---------------------------------------------------------------------------
+# T-16: fault persistence proof through the artifact store (REQ-05, REQ-09)
+# ---------------------------------------------------------------------------
+
+import json as _fjson  # noqa: E402
+import tempfile as _ftempfile  # noqa: E402
+from pathlib import Path as _fPath  # noqa: E402
+
+from robot_factory_arena.evidence.artifact_store import (  # noqa: E402
+    RunEvidenceRecorder,
+)
+
+from robot_factory_arena.evidence.canonical import (
+    canonical_json_bytes as _fcanonical,  # noqa: E402
+)
+
+
+def _faulted_recorded_run(root, execution_id="execution-fault", sink=None):
+    """The B3 faulted delivery, fully evidenced by a RunEvidenceRecorder."""
+    task = _carrying_one_order_task()
+    spec = FaultTapeSpec(
+        1, FAULT_ID_RESPONSE_LOST, HOOK_AFTER_COMMIT_BEFORE_RESPONSE,
+        KIND_RESPONSE_LOST, FaultTarget(1, "place-order-00"),
+    )
+    config = RunConfig(
+        1, task.task_version, task.seed, _Scripted.policy_id,
+        _Scripted("[]").policy_digest, 100, ("move", "pick", "place"), spec,
+    )
+    logical_run_id = compute_logical_run_id(task, config)
+    recorder = RunEvidenceRecorder(root, task, config, logical_run_id,
+                                   execution_id)
+    # Pre-execution persistence (REQ-05/design step 2): the RESOLVED tape is
+    # on disk before any observation/callback fires.
+    tape_bytes = (recorder.directory / "fault_tape.json").read_bytes()
+    tape_mapping = _fjson.loads(tape_bytes.decode("utf-8"))
+    pre_execution_key = tape_mapping["faults"][0]["operation_key"]
+    target_key = f"op/{logical_run_id}/step-1/intent-place-order-00"
+    assert tape_bytes == _fcanonical(tape_mapping)
+    assert pre_execution_key == target_key
+
+    def boundary(step, call, result):
+        if sink is not None:
+            sink(step, call, result)
+
+    callbacks = recorder.callback_map()
+    recorder_boundary = callbacks["on_commit_boundary"]
+
+    def wrapped_boundary(step, call, result):
+        # The failing store is unavailable DURING the write: the sink raises
+        # BEFORE the recorder records, so no commit evidence can appear.
+        boundary(step, call, result)
+        recorder_boundary(step, call, result)
+
+    callbacks["on_commit_boundary"] = wrapped_boundary
+    evidence = EvidenceCallbacks(**callbacks)
+    policy = _Scripted(
+        [
+            {
+                "schema_version": 1,
+                "tool": "place",
+                "arguments": {"order_id": "order-00"},
+                "operation_key": target_key,
+            }
+        ]
+    )
+    result = Runner(evidence=evidence).run(task, policy, config, execution_id)
+    recorder.close()
+    return result, recorder, target_key
+
+
+def _fread(path):
+    return _fjson.loads(_fPath(path).read_text(encoding="utf-8"))
+
+
+class TestFaultedRunArtifactProof(unittest.TestCase):
+    """T-16: the boundary, op log, and replay input prove the fault path."""
+
+    def test_tape_is_persisted_before_execution_with_the_concrete_key(self):
+        with _ftempfile.TemporaryDirectory() as root:
+            _, recorder, target_key = _faulted_recorded_run(root)
+            tape = _fread(recorder.directory / "fault_tape.json")
+            self.assertEqual(tape["faults"][0]["operation_key"], target_key)
+            self.assertEqual(tape["faults"][0]["kind"], "response_lost")
+            self.assertEqual(recorder.receipt_candidate.fault_tape_digest,
+                             None or __import__(
+                                 "robot_factory_arena.evidence.canonical",
+                                 fromlist=["digest_json"]
+                             ).digest_json(tape))
+
+    def test_operation_log_preserves_commit_fault_and_retry_evidence(self):
+        with _ftempfile.TemporaryDirectory() as root:
+            result, recorder, target_key = _faulted_recorded_run(root)
+            self.assertEqual(result.outcome, "completed")
+            log = _fread(recorder.directory / "operation-log.json")
+            operations = log["operations"]
+            self.assertEqual(len(operations), 2)
+            committed, retry = operations
+            self.assertEqual(committed["status"], "committed")
+            self.assertFalse(committed["retry"])
+            self.assertEqual(committed["fault_ids"], [])
+            self.assertEqual(committed["operation_key"], target_key)
+            self.assertEqual(len(committed["events"]), 1)
+            self.assertIsNotNone(committed["state_after"])
+            self.assertEqual(retry["status"], "idempotent_replay")
+            self.assertTrue(retry["retry"])
+            self.assertEqual(retry["fault_ids"], [FAULT_ID_RESPONSE_LOST])
+            self.assertEqual(retry["operation_key"], target_key)
+            self.assertEqual(retry["events"], [])
+            self.assertIsNone(retry["state_after"])
+            # The trace carries the fault and retry records between the
+            # commit and run_finished (locked decision 3 ordering intact).
+            raw = (recorder.directory / "trace.jsonl").read_text("utf-8")
+            events = [_fjson.loads(line)["event"]
+                      for line in raw.splitlines()]
+            self.assertEqual(
+                events,
+                ["run_started", "observation_emitted", "policy_decision",
+                 "tool_committed", "order_delivered", "fault_injected",
+                 "retry", "run_finished"],
+            )
+            self.assertNotIn("verification_finished", events)
+
+    def test_boundary_file_proves_the_crossing_before_the_fault(self):
+        with _ftempfile.TemporaryDirectory() as root:
+            _, recorder, target_key = _faulted_recorded_run(root)
+            boundary = _fread(recorder.directory / "boundaries"
+                              / "step-1.json")
+            self.assertEqual(boundary["operation_key"], target_key)
+            self.assertTrue(boundary["commit_marker"]["commit_proven"])
+            self.assertIsNotNone(boundary["commit_marker"]["snapshot_digest"])
+            self.assertEqual(boundary["operation_record"]["status"],
+                             "committed")
+            replay_input = _fread(recorder.directory / "replay-input.json")
+            self.assertEqual(
+                replay_input["fault_tape"]["faults"][0]["operation_key"],
+                target_key,
+            )
+
+    def test_unresolved_boundary_writes_no_commit_evidence(self):
+        def broken_store(step, call, result):
+            raise RuntimeError("artifact store unavailable")
+
+        with _ftempfile.TemporaryDirectory() as root:
+            result, recorder, _ = _faulted_recorded_run(
+                root, sink=broken_store
+            )
+            self.assertEqual(result.outcome, "unresolved_outcome")
+            log = _fread(recorder.directory / "operation-log.json")
+            self.assertEqual(log["operations"], [])  # no proven commit entry
+            raw = (recorder.directory / "trace.jsonl").read_text("utf-8")
+            events = [_fjson.loads(line)["event"]
+                      for line in raw.splitlines()]
+            self.assertNotIn("tool_committed", events)
+            self.assertNotIn("fault_injected", events)
+            self.assertEqual(events[-1], "run_finished")
+            self.assertEqual(
+                recorder.receipt_candidate.outcome, "unresolved_outcome"
+            )
+            # No boundary file exists: the crossing is unproven.
+            self.assertFalse(
+                (recorder.directory / "boundaries" / "step-1.json").exists()
+            )

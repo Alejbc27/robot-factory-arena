@@ -1093,3 +1093,219 @@ class TestToolBayCommitBoundary(unittest.TestCase):
                 state, call, self.grants,
                 on_commit_boundary=lambda c, r: "duplicate_effect",
             )
+
+
+# ---------------------------------------------------------------------------
+# T-14: trace closure ordering — runner emissions support locked decision 3
+# ---------------------------------------------------------------------------
+
+from robot_factory_arena.evidence.canonical import digest_json  # noqa: E402
+from robot_factory_arena.evidence.trace import TraceEvent, TraceWriter  # noqa: E402
+
+
+class _TraceCollector:
+    """Minimal B4-style trace sink over the real EvidenceCallbacks emissions.
+
+    Mirrors the runner's callback stream into a TraceWriter using the T-16
+    recorder's conventions (commits are traced at the commit boundary; the
+    observed committed tool_result adds no second record). Proves that the
+    runner's emission order always ends ``run_finished``-last so the trace
+    can close and compute its digest (locked decision 3).
+    """
+
+    def __init__(self, initial_state_digest, fail_boundary=False):
+        self.initial_state_digest = initial_state_digest
+        self.fail_boundary = fail_boundary
+        self.state_digest = initial_state_digest
+        self.events = []
+        self.writer: TraceWriter | None = None
+        self.closed = False
+
+    def _append(self, event):
+        self.events.append(event.event)
+        self.writer.append(event)
+
+    def callbacks(self) -> dict:
+        """The EvidenceCallbacks keyword map over this collector's methods."""
+        from collections.abc import Callable
+
+        callbacks: dict[str, Callable[..., None]] = dict(
+            on_run_started=self._on_run_started,
+            on_observation=self._on_observation,
+            on_policy_decision=self._on_policy_decision,
+            on_parse_rejected=self._on_parse_rejected,
+            on_tool_result=self._on_tool_result,
+            on_commit_boundary=self._boundary,
+            on_fault_injected=self._on_fault_injected,
+            on_retry=self._on_retry,
+            on_budget_exhausted=self._on_budget_exhausted,
+            on_run_finished=self._on_run_finished,
+        )
+        return callbacks
+
+    def _on_fault_injected(self, step, fault_id, operation_key):
+        self._append(TraceEvent("fault_injected", policy_step=step,
+                                operation_key=operation_key,
+                                payload={"fault_id": fault_id}))
+
+    def _on_retry(self, step, call, result):
+        self._append(TraceEvent("retry", policy_step=step,
+                                operation_key=call.operation_key,
+                                tool=call.tool, arguments=dict(call.arguments),
+                                state_before=self.state_digest,
+                                payload={"status": result.status,
+                                         "reason": result.reason}))
+
+    def _on_run_started(self, logical_run_id, config):
+        self.writer = TraceWriter(logical_run_id)
+        self._append(TraceEvent("run_started", state_after=self.state_digest,
+                                payload={"policy_id": config.policy_id}))
+
+    def _on_observation(self, step, serialized):
+        self._append(TraceEvent("observation_emitted", policy_step=step,
+                                state_before=self.state_digest))
+
+    def _on_policy_decision(self, step, candidate):
+        self._append(TraceEvent("policy_decision", policy_step=step))
+
+    def _on_parse_rejected(self, step, reason, key):
+        self._append(TraceEvent("tool_rejected", policy_step=step,
+                                operation_key=key or None,
+                                payload={"reason": reason}))
+
+    def _boundary(self, step, call, result):
+        if self.fail_boundary:
+            raise RuntimeError("artifact store unavailable")
+        before = self.state_digest
+        after = digest_json(result.state.to_mapping())
+        self._append(TraceEvent(
+            "tool_committed", policy_step=step,
+            operation_key=call.operation_key, tool=call.tool,
+            arguments=dict(call.arguments), state_before=before,
+            state_after=after, payload={"status": "committed"},
+        ))
+        for event in result.events:
+            self._append(TraceEvent(event.event_type, policy_step=step,
+                                    operation_key=event.operation_key,
+                                    state_before=before, state_after=after,
+                                    payload={"data": dict(event.data)}))
+        self.state_digest = after
+
+    def _on_tool_result(self, step, call, result):
+        if result.committed:
+            return  # already traced at the persistence boundary
+        self._append(TraceEvent("tool_rejected", policy_step=step,
+                                operation_key=call.operation_key,
+                                tool=call.tool, arguments=dict(call.arguments),
+                                state_before=self.state_digest,
+                                payload={"status": result.status,
+                                         "reason": result.reason}))
+
+    def _on_budget_exhausted(self, used):
+        self._append(TraceEvent("budget_exhausted",
+                                payload={"policy_steps_used": used}))
+
+    def digest(self) -> str:
+        """The closed trace digest; the writer exists after run_started."""
+        assert self.writer is not None, "run_started must construct the writer"
+        return self.writer.digest()
+
+    def _on_run_finished(self, outcome, counters, final_state):
+        assert self.writer is not None, "run_started must construct the writer"
+        self._append(TraceEvent(
+            "run_finished", state_after=digest_json(final_state.to_mapping()),
+            payload={"outcome": outcome,
+                     "counters": dataclasses.asdict(counters)},
+        ))
+        self.writer.close()
+        self.closed = True
+
+
+class TestTraceClosureOrdering(unittest.TestCase):
+    """T-14: every terminal classification ends run_finished-last (decision 3)."""
+
+    def _run(self, candidates_for=None, fail_boundary=False):
+        """Run one scripted execution; candidates_for(run_id) builds candidates.
+
+        The candidate keys MUST embed the runner-computed logical id (a
+        sentinel id fails grant scope and never reaches the boundary).
+        """
+        task = _carrying_one_order_task()
+        config = _run_config(task)
+        run_id = compute_logical_run_id(task, config)
+        candidates = candidates_for(run_id) if candidates_for is not None else []
+        collector = _TraceCollector(
+            digest_json(task.initial_state.to_mapping()),
+            fail_boundary=fail_boundary,
+        )
+        evidence = EvidenceCallbacks(**collector.callbacks())
+        result = Runner(evidence=evidence).run(
+            task, ScriptedPolicy(candidates), config, "execution-t14"
+        )
+        return result, collector
+
+    def callbacks(self, collector):  # pragma: no cover - clarity helper
+        return EvidenceCallbacks(**collector.callbacks())
+
+    def test_completed_run_closes_with_run_finished_last(self):
+        result, collector = self._run(lambda rid: [_place_candidate(rid, 1)])
+        self.assertEqual(result.outcome, "completed")
+        self.assertTrue(collector.closed)
+        self.assertEqual(collector.events[0], "run_started")
+        self.assertEqual(collector.events[-1], "run_finished")
+        self.assertNotIn("verification_finished", collector.events)
+        digest = collector.digest()  # available after close
+        self.assertEqual(digest, collector.digest())
+
+    def test_safe_abort_run_records_budget_exhausted_before_run_finished(self):
+        result, collector = self._run(lambda rid: [MALFORMED_CANDIDATE] * 100)
+        self.assertEqual(result.outcome, "safe_abort")
+        self.assertTrue(collector.closed)
+        self.assertEqual(collector.events[-2:], ["budget_exhausted",
+                                                "run_finished"])
+        self.assertEqual(collector.events[0], "run_started")
+
+    def test_unresolved_boundary_still_closes_with_run_finished_last(self):
+        result, collector = self._run(lambda rid: [_place_candidate(rid, 1)],
+                                      fail_boundary=True)
+        self.assertEqual(result.outcome, "unresolved_outcome")
+        self.assertTrue(collector.closed)
+        # The unprovable commit left no tool_committed record; the run still
+        # finished with the final record and a computable digest.
+        self.assertNotIn("tool_committed", collector.events)
+        self.assertEqual(collector.events[-1], "run_finished")
+        self.assertEqual(collector.digest(), collector.digest())
+
+    def test_faulted_run_order_boundary_fault_retry_finished(self):
+        from robot_factory_arena.faults.model import (
+            FAULT_ID_RESPONSE_LOST,
+            HOOK_AFTER_COMMIT_BEFORE_RESPONSE,
+            KIND_RESPONSE_LOST,
+        )
+        from robot_factory_arena.faults.tape import FaultTapeSpec, FaultTarget
+
+        task = _carrying_one_order_task()
+        spec = FaultTapeSpec(
+            1, FAULT_ID_RESPONSE_LOST, HOOK_AFTER_COMMIT_BEFORE_RESPONSE,
+            KIND_RESPONSE_LOST, FaultTarget(1, "place-order-00"),
+        )
+        config = RunConfig(
+            1, task.task_version, task.seed, "scripted-v0",
+            policy_manifest_digest("scripted-v0"), 100,
+            ("move", "pick", "place"), spec,
+        )
+        run_id = compute_logical_run_id(task, config)
+        collector = _TraceCollector(digest_json(task.initial_state.to_mapping()))
+        evidence = EvidenceCallbacks(**collector.callbacks())
+        result = Runner(evidence=evidence).run(
+            task, ScriptedPolicy([_place_candidate(run_id, 1)]), config,
+            "execution-t14",
+        )
+        self.assertEqual(result.outcome, "completed")
+        self.assertEqual(
+            collector.events,
+            ["run_started", "observation_emitted", "policy_decision",
+             "tool_committed", "order_delivered", "fault_injected", "retry",
+             "run_finished"],
+        )
+        self.assertTrue(collector.closed)

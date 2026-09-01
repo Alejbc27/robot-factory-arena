@@ -1075,3 +1075,299 @@ class TestFaultModuleBoundaries(unittest.TestCase):
                         if name == forbidden or name.startswith(forbidden + ".")
                     ]
                     self.assertEqual(offending, [])
+
+
+# ---------------------------------------------------------------------------
+# T-15: receipt invariants (REQ-03, REQ-06, REQ-07, REQ-09)
+# ---------------------------------------------------------------------------
+
+from robot_factory_arena.contracts.outcomes import (  # noqa: E402
+    OUTCOMES,
+    VerificationResult,
+)
+from robot_factory_arena.evidence.receipt import (  # noqa: E402
+    ReceiptCandidate,
+    ReceiptWriter,
+    verification_finished_record,
+)
+
+_R15_RUN_ID = "lr_" + "0123456789abcdef" * 4
+
+
+def _r15_candidate(**overrides):
+    """ReceiptCandidate stub factory; explicit keys keep types honest."""
+    return ReceiptCandidate(
+        schema_version=overrides.get("schema_version", 1),
+        task_version=overrides.get("task_version", "warehouse-v0"),
+        logical_run_id=overrides.get("logical_run_id", _R15_RUN_ID),
+        execution_id=overrides.get("execution_id", "execution-a"),
+        seed=overrides.get("seed", "17"),
+        config_digest=overrides.get("config_digest", "sha256:" + "a" * 64),
+        policy_id=overrides.get("policy_id", "greedy-v0"),
+        policy_digest=overrides.get("policy_digest", "sha256:" + "b" * 64),
+        budget=overrides.get("budget", 100),
+        grants=overrides.get("grants", ("move", "pick", "place")),
+        fault_tape_digest=overrides.get(
+            "fault_tape_digest", "sha256:" + "c" * 64
+        ),
+        trace_digest=overrides.get("trace_digest", "sha256:" + "d" * 64),
+        final_state_digest=overrides.get(
+            "final_state_digest", "sha256:" + "e" * 64
+        ),
+        operation_log_digest=overrides.get(
+            "operation_log_digest", "sha256:" + "1" * 64
+        ),
+        counters=overrides.get("counters", Counters(1, 1, 1, 0, 0, 2)),
+        outcome=overrides.get("outcome", "completed"),
+    )
+
+
+def _r15_verification():
+    return VerificationResult(
+        valid=True,
+        outcome="completed",
+        verified_score=20,
+        completed_count=1,
+        total_count=5,
+        violations=(),
+        verifier_version="verifier-v0",
+    )
+
+
+class TestReceiptInvariants(unittest.TestCase):
+    """T-15: canonical bytes, determinism, digest hygiene, identity split."""
+
+    def test_written_receipt_is_canonical_json_bytes(self):
+        receipt = ReceiptWriter.write_final(
+            _r15_candidate(), _r15_verification()
+        )
+        self.assertEqual(
+            canonical_json_bytes(receipt),
+            canonical_json_bytes(json.loads(canonical_json_bytes(receipt))),
+        )
+
+    def test_equal_inputs_release_byte_identical_receipts(self):
+        first = ReceiptWriter.write_final(_r15_candidate(), _r15_verification())
+        second = ReceiptWriter.write_final(_r15_candidate(), _r15_verification())
+        self.assertEqual(
+            canonical_json_bytes(first), canonical_json_bytes(second)
+        )
+
+    def test_every_digest_field_is_sha256_format_or_explicit_null(self):
+        receipt = ReceiptWriter.write_final(
+            _r15_candidate(), _r15_verification()
+        )
+        for name in ("config_digest", "policy_digest", "fault_tape_digest",
+                     "trace_digest", "final_state_digest",
+                     "operation_log_digest"):
+            value = receipt[name]
+            if value is None:
+                continue  # explicit null (e.g. no fault tape)
+            self.assertRegex(value, r"^sha256:[0-9a-f]{64}$", name)
+
+    def test_receipt_contains_no_float_values(self):
+        # REQ-07: no floating-point value may enter any digest input or
+        # evidence artifact; the canonical authority would reject them.
+        receipt = ReceiptWriter.write_final(
+            _r15_candidate(), _r15_verification()
+        )
+        with self.assertRaises(TypeError):
+            canonical_json_bytes({**receipt, "verified_score": 20.5})
+
+    def test_execution_id_is_excluded_from_deterministic_fields(self):
+        # REQ-03: execution_id distinguishes physical reruns and must not
+        # enter the deterministic digests: two candidates differing ONLY in
+        # execution_id carry identical digest fields.
+        first = _r15_candidate(execution_id="execution-a").to_mapping()
+        second = _r15_candidate(execution_id="execution-b").to_mapping()
+        self.assertNotEqual(first["execution_id"], second["execution_id"])
+        # The candidate mapping carries exactly the deterministic identity
+        # fields (verifier-owned keys are added later by the writer).
+        deterministic = [k for k in first if k != "execution_id"]
+        self.assertEqual(
+            sorted(deterministic),
+            [
+                "budget", "config_digest", "counters", "fault_tape_digest",
+                "final_state_digest", "grants", "logical_run_id",
+                "operation_log_digest", "outcome", "policy_digest",
+                "policy_id", "schema_version", "seed", "task_version",
+                "trace_digest",
+            ],
+        )
+        for key in deterministic:
+            self.assertEqual(first[key], second[key], key)
+
+    def test_candidate_rejects_identity_drift(self):
+        with self.assertRaises(ValueError):
+            _r15_candidate(seed="017")
+        with self.assertRaises(ValueError):
+            _r15_candidate().__class__(**{
+                **_r15_candidate().to_mapping(),
+                "counters": Counters(1, 1, 1, 0, 0, 2),
+                "task_version": "warehouse-v1",
+                "grants": ("move", "pick", "place"),
+                "logical_run_id": _R15_RUN_ID,
+            })
+        with self.assertRaises(ValueError):
+            ReceiptCandidate(
+                schema_version=2,
+                task_version="warehouse-v0",
+                logical_run_id=_R15_RUN_ID,
+                execution_id="e",
+                seed="17",
+                config_digest="sha256:" + "a" * 64,
+                policy_id="p",
+                policy_digest="sha256:" + "b" * 64,
+                budget=100,
+                grants=("move",),
+                fault_tape_digest=None,
+                trace_digest="sha256:" + "d" * 64,
+                final_state_digest="sha256:" + "e" * 64,
+                operation_log_digest="sha256:" + "1" * 64,
+                counters=Counters(0, 0, 0, 0, 0, 0),
+                outcome="completed",
+            )
+
+    def test_outcome_vocabulary_is_the_closed_four(self):
+        self.assertEqual(
+            OUTCOMES,
+            ("completed", "duplicate_effect", "safe_abort",
+             "unresolved_outcome"),
+        )
+
+    def test_verification_finished_record_is_deterministic_and_guarded(self):
+        record = verification_finished_record(_r15_verification())
+        again = verification_finished_record(_r15_verification())
+        self.assertEqual(record, again)
+        self.assertEqual(record["event"], "verification_finished")
+        with self.assertRaises(TypeError):
+            verification_finished_record({"verified_score": 20})
+
+
+# ---------------------------------------------------------------------------
+# T-16: evidence module boundaries (design §2; runner stays callback-only)
+# ---------------------------------------------------------------------------
+
+class TestEvidenceModuleBoundaries(unittest.TestCase):
+    """Evidence writers stay value-driven: no runtime/policy/verifier code."""
+
+    EVIDENCE_MODULE_ALLOWLISTS = {
+        "robot_factory_arena.evidence.trace": {
+            "robot_factory_arena.contracts.outcomes",
+            "robot_factory_arena.evidence.canonical",
+        },
+        "robot_factory_arena.evidence.receipt": {
+            "robot_factory_arena.contracts.outcomes",
+        },
+        "robot_factory_arena.evidence.artifact_store": {
+            "robot_factory_arena.contracts.outcomes",
+            "robot_factory_arena.contracts.tool_call",
+            "robot_factory_arena.evidence.canonical",
+            "robot_factory_arena.evidence.receipt",
+            "robot_factory_arena.evidence.trace",
+            "robot_factory_arena.faults.model",
+            "robot_factory_arena.faults.tape",
+        },
+        # T-17 adds robot_factory_arena.evidence.replay here with its RED.
+    }
+
+    FORBIDDEN_EVIDENCE_PREFIXES = (
+        "robot_factory_arena.runtime",
+        "robot_factory_arena.policies",
+        "robot_factory_arena.verification",
+        "robot_factory_arena.cli",
+    )
+
+    def test_evidence_modules_import_only_their_allowlist(self):
+        for module_name, allowed in self.EVIDENCE_MODULE_ALLOWLISTS.items():
+            with self.subTest(module=module_name):
+                extra = _module_project_imports(module_name) - allowed
+                self.assertEqual(extra, set())
+
+    def test_evidence_modules_never_touch_runtime_policy_or_verifier(self):
+        for module_name in self.EVIDENCE_MODULE_ALLOWLISTS:
+            imported = _module_project_imports(module_name)
+            for forbidden in self.FORBIDDEN_EVIDENCE_PREFIXES:
+                with self.subTest(module=module_name, forbidden=forbidden):
+                    offending = [
+                        name
+                        for name in imported
+                        if name == forbidden
+                        or name.startswith(forbidden + ".")
+                    ]
+                    self.assertEqual(offending, [])
+
+    def test_trace_and_receipt_stay_domain_and_fault_free(self):
+        # trace/receipt are pure composition layers; only the store may
+        # resolve fault tapes and only replay may re-apply transitions.
+        for module_name in ("robot_factory_arena.evidence.trace",
+                            "robot_factory_arena.evidence.receipt"):
+            imported = _module_project_imports(module_name)
+            for forbidden in ("robot_factory_arena.domain",
+                              "robot_factory_arena.faults"):
+                offending = [
+                    name for name in imported
+                    if name == forbidden or name.startswith(forbidden + ".")
+                ]
+                self.assertEqual(offending, [], (module_name, forbidden))
+
+    def test_evidence_modules_import_no_nondeterminism(self):
+        # REQ-07 checklist: no RNG, wall-clock, or path-randomness sources.
+        for module_name in self.EVIDENCE_MODULE_ALLOWLISTS:
+            module = importlib.import_module(module_name)
+            tree = ast.parse(inspect.getsource(module))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module]
+                else:
+                    continue
+                for name in names:
+                    root = name.split(".")[0]
+                    self.assertNotIn(
+                        root,
+                        {"random", "time", "datetime", "uuid", "secrets"},
+                        (module_name, name),
+                    )
+
+
+# ---------------------------------------------------------------------------
+# T-17: replay joins the evidence module boundaries (policy-free by design)
+# ---------------------------------------------------------------------------
+
+class TestReplayModuleBoundaries(unittest.TestCase):
+    """Replay consumes recorded operations; it never asks a policy."""
+
+    def test_replay_module_imports_only_its_allowlist(self):
+        allowed = {
+            "robot_factory_arena.contracts.outcomes",
+            "robot_factory_arena.contracts.tool_call",
+            "robot_factory_arena.domain.task",
+            "robot_factory_arena.domain.transition",
+            "robot_factory_arena.evidence.canonical",
+        }
+        extra = _module_project_imports(
+            "robot_factory_arena.evidence.replay"
+        ) - allowed
+        self.assertEqual(extra, set())
+
+    def test_replay_module_never_imports_policies_runtime_or_verifier(self):
+        imported = _module_project_imports(
+            "robot_factory_arena.evidence.replay"
+        )
+        for forbidden in ("robot_factory_arena.policies",
+                          "robot_factory_arena.runtime",
+                          "robot_factory_arena.verification",
+                          "robot_factory_arena.cli",
+                          "robot_factory_arena.domain.model",
+                          "robot_factory_arena.faults",
+                          "robot_factory_arena.evidence.artifact_store",
+                          "robot_factory_arena.evidence.receipt",
+                          "robot_factory_arena.evidence.trace"):
+            with self.subTest(forbidden=forbidden):
+                offending = [
+                    name for name in imported
+                    if name == forbidden or name.startswith(forbidden + ".")
+                ]
+                self.assertEqual(offending, [])
