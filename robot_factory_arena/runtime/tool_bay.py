@@ -22,6 +22,7 @@ B3's response-loss integration adds the persistence-boundary callbacks
 around the commit return while consuming this flag for fault bookkeeping.
 """
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from robot_factory_arena.contracts.outcomes import CLOSED_REASONS, RESULT_STATUSES
@@ -42,10 +43,30 @@ COMMITTED = "committed"
 REJECTED = "rejected"
 IDEMPOTENT_REPLAY_STATUS = "idempotent_replay"
 
+# The one ToolBay commit-boundary loss signal (closed-taxonomy reason).
+RESPONSE_LOST = "response_lost"
+
 # Same grammar as contracts.tool_call; used only to extract the run id.
 _OPERATION_KEY_RE = re.compile(
     r"op/(lr_[0-9a-f]{64})/step-(0|[1-9][0-9]*)/intent-([A-Za-z0-9._-]{1,64})"
 )
+
+
+class ResponseLostError(RuntimeError):
+    """The response was lost after the commit crossed its boundary (REQ-05).
+
+    Raised by ``submit`` when the ``on_commit_boundary`` handler returns the
+    ``RESPONSE_LOST`` signal: the after_commit_before_response hook fired
+    after the persistence boundary, so the committed ToolResult is never
+    returned to the caller. The durable first result remains in the ledger —
+    an internal retry with the exact call and key replays it as
+    ``idempotent_replay`` without a second effect.
+    """
+
+    def __init__(self, operation_key: str, reason: str = RESPONSE_LOST):
+        self.operation_key = operation_key
+        self.reason = reason
+        super().__init__(f"{reason}: {operation_key}")
 
 
 @dataclass(frozen=True)
@@ -104,8 +125,18 @@ class ToolBay:
         call: ToolCall,
         grant_set: GrantSet,
         retry: bool = False,
+        on_commit_boundary: Callable[[ToolCall, "ToolResult"], str | None] | None = None,
     ) -> ToolResult:
-        """Dispatch one normalized call; every outcome is deterministic."""
+        """Dispatch one normalized call; every outcome is deterministic.
+
+        ``on_commit_boundary`` (T-13): an optional callable invoked exactly
+        once for a FRESH committed result, after ``store_first`` and before
+        the response is returned — the persistence boundary. It receives
+        ``(call, tool_result)`` and may return None or ``RESPONSE_LOST``;
+        the loss signal raises ``ResponseLostError`` so the committed
+        response is never observed by the caller. Rejections, replays, and
+        conflicts never invoke the boundary.
+        """
         if not isinstance(state, WorldState):
             raise TypeError("state must be a WorldState")
         if not isinstance(call, ToolCall):
@@ -114,6 +145,10 @@ class ToolBay:
             raise TypeError("grant_set must be a GrantSet")
         if not isinstance(retry, bool):
             raise TypeError("retry must be a bool")
+        if on_commit_boundary is not None and not callable(
+            on_commit_boundary
+        ):
+            raise TypeError("on_commit_boundary must be callable or None")
         key = call.operation_key
         key_match = _OPERATION_KEY_RE.fullmatch(key)
         if key_match is None:  # fail-closed; unreachable for constructed calls
@@ -169,6 +204,17 @@ class ToolBay:
                     snapshot_digest,
                 )
             )
+            # Persistence boundary: fires after the durable first result
+            # exists and before the response is observed (REQ-05).
+            if on_commit_boundary is not None:
+                signal = on_commit_boundary(call, result)
+                if signal is not None:
+                    if signal != RESPONSE_LOST:
+                        raise TypeError(
+                            "on_commit_boundary may only return None or "
+                            "'response_lost'"
+                        )
+                    raise ResponseLostError(key)
             return result
         return self._reject_and_store(state, call, outcome.reason)
 

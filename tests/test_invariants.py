@@ -453,10 +453,12 @@ class TestToolCallNormalization(unittest.TestCase):
                 result = normalize_tool_call(self._candidate(tool=tool, arguments=arguments))
                 self.assertTrue(result.ok)
                 self.assertIsNone(result.reason)
-                self.assertIsNotNone(result.tool_call)
-                self.assertEqual(result.tool_call.tool, tool)
-                self.assertEqual(dict(result.tool_call.arguments), arguments)
-                self.assertEqual(result.tool_call.operation_key, self._candidate()["operation_key"])
+                call = result.tool_call
+                if call is None:  # fail-closed; ok implies a normalized call
+                    self.fail("parse reported ok without a ToolCall")
+                self.assertEqual(call.tool, tool)
+                self.assertEqual(dict(call.arguments), arguments)
+                self.assertEqual(call.operation_key, self._candidate()["operation_key"])
 
     def test_malformed_candidates(self):
         malformed = (
@@ -506,9 +508,15 @@ class TestToolCallNormalization(unittest.TestCase):
 
     def test_arguments_exposed_as_immutable_view(self):
         result = normalize_tool_call(self._candidate())
-        self.assertIsNotNone(result.tool_call)
+        call = result.tool_call
+        if call is None:  # fail-closed; ok implies a normalized call
+            self.fail("parse reported ok without a ToolCall")
+
+        def _mutate(mapping):
+            mapping["direction"] = "south"
+
         with self.assertRaises(TypeError):
-            result.tool_call.arguments["direction"] = "south"
+            _mutate(call.arguments)
 
 
 class TestReferencePolicyPurity(unittest.TestCase):
@@ -952,3 +960,118 @@ class TestBudgetAccountingInvariants(unittest.TestCase):
             "internal_retries", "contract_violations", "terminal_checks",
         ):
             self.assertIsInstance(getattr(budget.counters(), field_name), int)
+
+
+# --- T-10/T-12: runner and faults module boundaries (REQ-02, REQ-05, REQ-07) ---
+
+
+def _module_project_imports(module_name):
+    """Project-local imports of one module (AST over its source)."""
+    module = importlib.import_module(module_name)
+    tree = ast.parse(inspect.getsource(module))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    return {name for name in imported if name.startswith("robot_factory_arena")}
+
+
+class TestRunnerModuleBoundaries(unittest.TestCase):
+    """T-10: the runner imports its allowlist only; no policy/verifier/CLI.
+
+    The allowlist is an upper bound for the whole batch: B3's runner may use
+    the faults package (tape resolution and the injector seam) but never the
+    policies package (policies arrive as parameters), never the transition
+    authority directly (ToolBay is the only gateway), and never B4+ evidence
+    writers (B3 writes no evidence).
+    """
+
+    RUNNER_ALLOWLIST = {
+        "robot_factory_arena.contracts.outcomes",
+        "robot_factory_arena.contracts.tool_call",
+        "robot_factory_arena.domain.model",
+        "robot_factory_arena.domain.observation",
+        "robot_factory_arena.domain.task",
+        "robot_factory_arena.evidence.canonical",
+        "robot_factory_arena.faults.injector",
+        "robot_factory_arena.faults.model",
+        "robot_factory_arena.faults.tape",
+        "robot_factory_arena.runtime.budget",
+        "robot_factory_arena.runtime.grants",
+        "robot_factory_arena.runtime.ledger",
+        "robot_factory_arena.runtime.tool_bay",
+    }
+
+    FORBIDDEN_RUNNER_PREFIXES = (
+        "robot_factory_arena.policies",
+        "robot_factory_arena.verification",
+        "robot_factory_arena.cli",
+        "robot_factory_arena.domain.transition",
+        "robot_factory_arena.evidence.trace",
+        "robot_factory_arena.evidence.receipt",
+        "robot_factory_arena.evidence.replay",
+        "robot_factory_arena.evidence.artifact_store",
+        "robot_factory_arena.evidence.report",
+        "robot_factory_arena.runtime.runner",
+    )
+
+    def test_runner_imports_only_its_allowlist(self):
+        imported = _module_project_imports("robot_factory_arena.runtime.runner")
+        extra = imported - self.RUNNER_ALLOWLIST
+        self.assertEqual(extra, set())
+        for forbidden in self.FORBIDDEN_RUNNER_PREFIXES:
+            with self.subTest(forbidden=forbidden):
+                offending = [
+                    name
+                    for name in imported
+                    if name == forbidden or name.startswith(forbidden + ".")
+                ]
+                self.assertEqual(offending, [])
+
+
+class TestFaultModuleBoundaries(unittest.TestCase):
+    """T-12: faults consume frozen constants and contracts; never runtime."""
+
+    FAULT_MODULE_ALLOWLISTS = {
+        "robot_factory_arena.faults.model": {
+            "robot_factory_arena.contracts.outcomes",
+            "robot_factory_arena.evidence.canonical",
+        },
+        "robot_factory_arena.faults.tape": {
+            "robot_factory_arena.contracts.outcomes",
+            "robot_factory_arena.contracts.tool_call",
+            "robot_factory_arena.evidence.canonical",
+            "robot_factory_arena.faults.model",
+        },
+        "robot_factory_arena.faults.injector": {
+            "robot_factory_arena.faults.model",
+        },
+    }
+
+    FORBIDDEN_FAULT_PREFIXES = (
+        "robot_factory_arena.runtime",
+        "robot_factory_arena.policies",
+        "robot_factory_arena.verification",
+        "robot_factory_arena.cli",
+        "robot_factory_arena.domain",
+    )
+
+    def test_fault_modules_import_only_their_allowlist(self):
+        for module_name, allowed in self.FAULT_MODULE_ALLOWLISTS.items():
+            with self.subTest(module=module_name):
+                extra = _module_project_imports(module_name) - allowed
+                self.assertEqual(extra, set())
+
+    def test_fault_modules_never_touch_runtime_policies_or_domain(self):
+        for module_name in self.FAULT_MODULE_ALLOWLISTS:
+            imported = _module_project_imports(module_name)
+            for forbidden in self.FORBIDDEN_FAULT_PREFIXES:
+                with self.subTest(module=module_name, forbidden=forbidden):
+                    offending = [
+                        name
+                        for name in imported
+                        if name == forbidden or name.startswith(forbidden + ".")
+                    ]
+                    self.assertEqual(offending, [])
