@@ -1,0 +1,10 @@
+{
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["."]
+    }
+  ],
+  "include": ["robot_factory_arena", "tests"],
+  "typeCheckingMode": "basic"
+}
