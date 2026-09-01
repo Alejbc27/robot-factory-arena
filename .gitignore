@@ -4,3 +4,6 @@
 # Local Pi and CodeGraph runtime state
 .pi/
 .codegraph/
+
+# macOS
+.DS_Store
