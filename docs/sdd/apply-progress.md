@@ -80,7 +80,6 @@ Single PR, `size:exception` accepted (session decision). B1 = 2,526 changed line
 - Ledger decisions (T-09): keyed only by `operation_key`; same payload → `idempotent_replay` without invoking `apply`; different payload → `operation_key_conflict`, no effect.
 - Grants must be checked before transitions; unsupported tools reject as `unsupported_tool` (ToolBay owns this; `normalize_tool_call` already returns the reason).
 
-
 ## Batch B2 — T-07..T-09 — COMPLETE, gate green
 
 - **Branch:** `feat/v0-evidence-chain`
@@ -151,3 +150,88 @@ Single PR, `size:exception` accepted (session decision). B2 = 2,150 net changed 
 - **Budget:** `Budget()` defaults to the locked maximum 100; `counters()` returns the frozen six-integer snapshot for observations/receipts; `BudgetExhaustedError("budget_exhausted")` is the kill-switch signal the runner maps to `safe_abort` (B3/T-10).
 - B1 sentinel conventions for hand-built evidence (`sha256:e3b0c442…b855`, sentinel run id) remain the reference for fixtures (T-11/T-16).
 
+## Batch B3 — T-10..T-13 — COMPLETE, gate green
+
+- **Branch:** `feat/v0-evidence-chain`
+- **Code commit:** `3059165` — `feat(core): B3 runner lifecycle, fault tapes, and idempotent response-loss retry` (9 files, +2,394/−22)
+- **Delivery path:** single PR with user-accepted `size:exception`; one work-unit commit per the batch instruction (code+tests+fixtures together; docs follow-up commit).
+
+### Test gate (REQ-08)
+
+- Command: `python3 -m unittest discover -s tests -v` (Python 3.14.5)
+- Final result: **Ran 201 tests — OK — 201 pass / 0 failures / 0 errors, exit 0.** (B2 baseline 153 → 201: +48)
+- Per-module counts: test_faults 28, test_runtime_boundaries 52, test_invariants 63, test_golden_trace 9, test_transitions 46, test_rerun_replay / test_adversarial_verifier / test_verifier_dependencies 1 each (B4+ placeholders).
+
+### TDD Cycle Evidence
+
+| Task | RED (observed) | GREEN (observed) | Notes |
+|------|----------------|------------------|-------|
+| T-10 | `ModuleNotFoundError: robot_factory_arena.runtime.runner` (2 loader errors; 120 tests ran) | 166 OK | RunConfig locked-shape enforcement (budget pinned at 100, canonical seed, sorted grants, digest format); initial terminal check completes with 0 attempts; reserve-before-parse (malformed candidate consumes step + violation); grantless/domain rejections vs hygiene accounting; no 101st observation (decide called exactly 100x); step-100 terminal precedence (Counters(100,1,1,0,99,101) completed); policy-initiated key replay = hygiene violation; serialized-observation-only input (+ mutation cannot corrupt the next observation); evidence stream ordering; logical identity deterministic and execution-id-free; runner input validation |
+| T-11 | fixture absent → 6 errors (7 tests ran); then one order-order assertion failure caught during GREEN | 172 OK | `fault_targets.json` frozen in canonical bytes with derivation provenance; re-simulation from SERIALIZED observations only (mirror of the runner loop through `apply`) reproduces all 4 frozen targets; runner-level confirmation via evidence callbacks; determinism; helper-deleted assertion |
+| T-12 | `ImportError: faults.model / faults.injector / resolve_fault_tape` (5 errors; 169 ran) | 191 OK | exact REQ-05 resolved shape {fault_id, operation_key, hook, kind}; semantic spec carries NO operation_key (locked decision 4); two-stage expansion validates against the grammar; identity deterministic/execution-independent; unknown kinds/hooks/ids and ambiguous targets (non-place intents, step 0) rejected; one-shot injector; before_commit never fires in v0; no mutable authority; faults-module AST allowlists (no runtime/policies/domain imports) |
+| T-13 | `ImportError: ResponseLostError` + boundary/runner tests failing (201 loaded, 2 failures + 25 errors pre-fix) | 201 OK | ToolBay boundary fires after store_first (ledger-visible inside the callback) and before return; only fresh commits invoke it; "response_lost" signal → ResponseLostError (committed response never observed) while the ledger entry stays replayable; boundary ordering evidence (persist → fault → retry); retry reuses the EXACT call/key, returns idempotent_replay with reason None and no events; counters Counters(1,2,1,1,0,3) — policy_steps untouched by the retry; exactly one boundary/delivery/event, `completed_orders.count == 1`; step-100 faulted completion precedence (Counters(100,2,1,1,99,102) completed); boundary durability failure → unresolved_outcome, never success, no retry |
+
+Triangulation catch during T-13 GREEN: an autofix had re-indented tool_bay's fresh-commit block inside the `if not parse.ok:` body — syntactically valid, unreachable after its return, so `submit` returned `None` on every commit. Caught by the gate (25 errors) and by the checker's return-path analysis; fixed and covered by all T-13/B2 gateway tests.
+
+### Completed tasks
+
+- **T-10 done** — `runtime/runner.py`: `RunConfig` (exact locked keys; budget locked at 100), `compute_logical_run_id` (lr_+ 64 hex over canonical semantic identity: task_version, seed, config_identity, policy manifest, budget, sorted grants, semantic fault descriptor — no execution id), `EvidenceCallbacks` (10 optional callables; B4 seam), `RunResult` (+ `fault_tape` in T-13), and the lifecycle: free initial + post-result terminal checks, reserve-before-parse, parse-level ledger duty (design flow step 6), protocol-violation accounting, no 101st observation, step-100 precedence, `safe_abort` kill switch (loop guard + defensive BudgetExhaustedError mapping). Done-check verified: fake policy runs success/rejection/budget cases with exact counters; mutable state never crosses the policy boundary; policy never invoked after exhaustion.
+- **T-11 done** — `tests/fixtures/fault_targets.json`: computed constants (step **8**, intent **place-order-00**) for {17, 29} × {greedy-v0, bounded-v0}, derived by temporary script (**deleted**) that fed only serialized observations to the policies and advanced the world via `domain.transition.apply`. Tests re-simulate all four targets and confirm them through the real runner lifecycle. **Discovery: full greedy/bounded runs need 190 policy steps > 100 budget → full-run golden evidence (B4/B6) will be `safe_abort` by design; the faulted delivery at step 8 happens well before exhaustion.** No policy is called by fault resolution (resolver takes only spec + run id; AST-tested).
+- **T-12 done** — `faults/model.py` (constants + frozen `Fault`/`FaultTape`/`FaultDecision`/`FaultContext`), `faults/tape.py` (`FaultTarget`, `FaultTapeSpec`, `resolve_fault_tape` — two-stage semantic→concrete resolution via `expand_operation_key`), `faults/injector.py` (`FaultInjector` — one-shot, response-only, `before_commit` never fires in v0). Unknown kinds/hooks/ids and ambiguous targets rejected at construction. Done-check verified.
+- **T-13 done** — `runtime/tool_bay.py` extended with `on_commit_boundary` (fresh commits only; after `store_first`, before return; returns None or `"response_lost"` → `ResponseLostError`) and `runtime/runner.py` fault integration (boundary handler ordering, exact retry, recovery from proven boundary evidence, unresolved classification). `contracts/outcomes.py` needed NO extension. Done-check verified: faulted fixture completes with one effect, one retry, no duplicate reward, explicit outcome.
+
+### Files changed (9, +2,394/−22)
+
+- New: `runtime/runner.py`, `faults/{model,tape,injector}.py`, `tests/fixtures/fault_targets.json`
+- Extended: `runtime/tool_bay.py` (boundary + ResponseLostError), `tests/{test_faults,test_runtime_boundaries,test_invariants}.py`
+- `contracts/outcomes.py`: untouched (no extension needed)
+
+### Deviations / interpretations (documented in code docstrings)
+
+1. **`contract_violations` = protocol violations** (REQ-02): the seven closed parse/grant/conflict reasons, plus policy-initiated ledger replays (key reuse across distinct policy actions = hygiene violation, REQ-03). Domain-legality rejections (e.g. `robot_not_at_shelf`) consume the reserved step but are not violations. Internal retries are exempt.
+2. **`committed_effects` counts at the PROVEN commit boundary**: the boundary handler persists evidence first, then records the commit — so a boundary durability failure leaves the counter at 0 and classifies `unresolved_outcome` (never success).
+3. **Response-loss model**: ToolBay *raises* `ResponseLostError` — the committed response is genuinely unobservable, not ignored. The post-fault terminal check uses the runner's last observed (pre-commit) state; the retry replays `idempotent_replay` (caller's state, reason None); state recovery adopts the durable boundary record only (design steps 9–10). Every response the runner received stays response-blind; adoption is always evidence-justified.
+4. **`FaultTape.identity` is a derived property** (canonical digest of the resolved mapping), not a stored field — cannot drift; design-sketch deviation documented.
+5. **`FaultTapeSpec`/`FaultTarget` landed with T-10** (in `faults/tape.py`) because RunConfig's locked schema requires the semantic-descriptor type; resolver/injector followed in T-12.
+6. Both fixture seeds coincidentally derive the same target (order-00's source shelf is at (1,2) for q=7 and q=9 alike); the values are genuinely computed per seed and every test re-simulates them.
+
+### B4 handoff — evidence-callback interface shape (trace/artifact writers implement this)
+
+- **Seam:** `EvidenceCallbacks` (frozen dataclass, `runtime/runner.py`), passed as `Runner(evidence=...)`. All fields optional callables; B4 implements the subset it needs. Exact signatures:
+  - `on_run_started(logical_run_id: str, config: RunConfig)`
+  - `on_observation(policy_step: int, serialized_observation: Mapping)`
+  - `on_policy_decision(policy_step: int, candidate: object)` — the raw untrusted candidate
+  - `on_parse_rejected(policy_step: int, reason: str, operation_key: str)` — key is `""` when the candidate had no valid key for the run (B4 synthesizes `tool_rejected` with null tool/arguments)
+  - `on_tool_result(policy_step: int, call: ToolCall, result: ToolResult)` — every OBSERVED gateway result (committed / rejected / policy-initiated replay). **A response-lost result NEVER arrives here** — its durable data arrives via `on_commit_boundary`.
+  - `on_commit_boundary(policy_step: int, call: ToolCall, result: ToolResult)` — the persistence boundary; fires after `store_first`, carries the committed result with its domain events; `result.state` is the post-commit snapshot; `LedgerEntry.committed_snapshot_digest` was precomputed at store time and is reusable.
+  - `on_fault_injected(policy_step: int, fault_id: str, operation_key: str)` — fires AFTER the boundary evidence, only for a resolved tape hit
+  - `on_retry(policy_step: int, call: ToolCall, result: ToolResult)` — the internal retry's `idempotent_replay` result (same step number as the faulted attempt)
+  - `on_budget_exhausted(policy_steps_used: int)`
+  - `on_run_finished(outcome: str, counters: Counters, final_state: WorldState)`
+- **Emission order:** run_started → (observation → decision → [parse_rejected | tool_result | (commit_boundary → fault_injected → retry)])* → [budget_exhausted] → run_finished. Boundary ordering inside a commit: sink persist → proof → `record_commit()` → injector consult.
+- **Identity stability:** `compute_logical_run_id(task, config)` inputs are frozen — {budget, config_identity, fault_tape (semantic mapping or null), grants, policy_digest, policy_id, seed, task_version}; B4 must not change them (digest stability). `RunConfig.to_mapping()` is the locked `config.json` form (semantic spec inside); the RESOLVED tape is `RunResult.fault_tape` (`fault_tape.json` form with concrete keys). The runner already resolves the tape before the first observation.
+- **Outcome contract:** runner produces only `completed` / `safe_abort` / `unresolved_outcome`; `duplicate_effect` stays verifier-owned (B5). Golden full-run evidence will be `safe_abort` (190-step requirement vs 100 budget).
+- **Module boundaries (AST-tested upper bounds):** runner imports ⊆ {contracts.*, domain.{model,observation,task}, evidence.canonical, faults.*, runtime.{budget,grants,ledger,tool_bay}} and is forbidden from policies/verification/cli/`domain.transition`/evidence.{trace,receipt,replay,artifact_store,report} — B4 wires evidence exclusively through the callbacks. Faults modules import only contracts/evidence.canonical/each other.
+- `RESPONSE_LOST` and `ResponseLostError(operation_key, reason)` are exported from `runtime.tool_bay`; B5's `commit_boundary_unproven` verifier classification is foreshadowed by `CommitBoundaryUnprovenError` (runner).
+
+### Workload / PR boundary
+
+Single PR, `size:exception` accepted (session decision). B3 = 2,394 net added lines in one work-unit commit (cumulative branch ≈ B1 2,526 + B2 2,150 + B3 2,394 + docs). Review order suggestion: runner lifecycle + tests → fault fixture + re-simulation → faults modules → boundary/retry integration.
+
+### Structured status / environment notes
+
+- Consumed non-authoritative SDD status (artifact store: `engram`); readiness resolved from the materialized `docs/sdd/{tasks,spec,design}.md` files; B1+B2 handoff constraints honored as hard inputs (ToolResult contract, retry protocol, boundary callback shape, runner-side parse-level ledger duty, BudgetExhaustedError→safe_abort, trace closure deferred to B4).
+- pi-lens: recurring false positives (repo-root import resolution — disproven by direct import and green gates; `spawn python ENOENT` — its runner invokes `python`, REQ-08 locks `python3`). One REAL catch this batch: its return-path analysis surfaced the autofix-induced tool_bay indentation defect (see triangulation note). Authoritative verification remains the documented unittest command.
+- Helper scripts: the T-11 derivation script lived in /tmp and was deleted after freezing the fixture (asserted by `test_documented_derivation_method`).
+
+### Remaining tasks (unchecked)
+
+- [ ] T-14..T-17 (B4 trace/receipt/store/replay), T-18..T-21 (B5 verifier/adversarial/denylist), T-22..T-25 (B6 report/CLI/golden/final gate)
+
+### Notes / risks for B4
+
+- Full-run golden evidence is `safe_abort` at step 100 (policies need 190 steps): T-24/T-25 golden artifacts and rerun equality must account for this; the response-loss fixture (step 8) completes well inside the budget.
+- Observations carry `BudgetView.used` = steps consumed BEFORE the attempt; policies label keys `used+1`. The runner reserves immediately after `policy.decide` returns.
+- Parse-level rejections with a valid key are ledger-stored runner-side (design step 6); B4's operation log should treat them like ToolBay-stored rejections (`on_parse_rejected` provides step/reason/key).
+- The boundary handler wraps the evidence sink: a sink exception becomes `CommitBoundaryUnprovenError` → `unresolved_outcome`. B4's artifact writer must therefore never raise for expected control flow — only genuine durability failures.
+- `Ledger` still exposes only `__len__`/`__contains__`; entry snapshots for the operation log should flow through the boundary/tool-result evidence callbacks (no new Ledger surface added speculatively in B3).
