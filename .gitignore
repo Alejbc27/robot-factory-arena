@@ -1,0 +1,6 @@
+# Local Pi runtime state
+.atl/
+
+# Local Pi and CodeGraph runtime state
+.pi/
+.codegraph/
