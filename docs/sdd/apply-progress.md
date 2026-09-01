@@ -235,3 +235,91 @@ Single PR, `size:exception` accepted (session decision). B3 = 2,394 net added li
 - Parse-level rejections with a valid key are ledger-stored runner-side (design step 6); B4's operation log should treat them like ToolBay-stored rejections (`on_parse_rejected` provides step/reason/key).
 - The boundary handler wraps the evidence sink: a sink exception becomes `CommitBoundaryUnprovenError` → `unresolved_outcome`. B4's artifact writer must therefore never raise for expected control flow — only genuine durability failures.
 - `Ledger` still exposes only `__len__`/`__contains__`; entry snapshots for the operation log should flow through the boundary/tool-result evidence callbacks (no new Ledger surface added speculatively in B3).
+
+## Batch B4 — T-14..T-17 — COMPLETE, gate green
+
+- **Branch:** `feat/v0-evidence-chain`
+- **Code commit:** `a5017e6` — `feat(evidence): B4 hash-chained trace, verified receipt, artifact store, and offline replay` (9 files, +3,452/−3)
+- **Delivery path:** single PR with user-accepted `size:exception`; one work-unit commit for code+tests, docs follow-up commit.
+
+### Test gate (REQ-08)
+
+- Command: `python3 -m unittest discover -s tests -v` (Python 3.14.5)
+- Final result: **Ran 271 tests — OK — 271 pass / 0 failures / 0 errors, exit 0.** (B3 baseline 201 → 271: +70)
+- Per-module counts: test_golden_trace 45, test_invariants 77, test_runtime_boundaries 56, test_faults 32, test_rerun_replay 13, test_transitions 46, test_adversarial_verifier 1 + test_verifier_dependencies 1 (B5 placeholders).
+
+### TDD Cycle Evidence
+
+| Task | RED (observed) | GREEN (observed) | Notes |
+|------|----------------|------------------|-------|
+| T-14 | `ModuleNotFoundError: evidence.trace` (module loader errors; suite could not load the golden module) | 215→219 OK | Exact 13-field REQ-03 record shape (spec wins over the tasks.md "14-field" prose miscount — see deviations); seq/prev chain; event_hash = digest of record minus event_hash; LF-terminated canonical lines; digest only after close and stable; close requires run_finished final; post-run_finished/post-close appends rejected; `verification_finished` never appendable; recursive `execution_id` guard on payloads/arguments. Runner-side closure proven for completed/safe_abort/unresolved via an in-test trace collector (`_TraceCollector`) through real `EvidenceCallbacks` emissions — run_finished always last, faulted order boundary→fault→retry→finished. |
+| T-15 | `ModuleNotFoundError: evidence.receipt` (2 loader errors; 197 ran) | 232 OK | Receipt = exact 19 REQ-03 keys + `verification` block (7 keys); four-outcome enum; distinct logical/execution ids; all digest formats; candidate carries NO score field (runtime claims structurally excluded); released outcome is always the verifier's; invalid verification releases NO receipt (`ReceiptNotReleasedError`); valid-but-scoreless cannot release; float scores rejected at the VerificationResult contract (TypeError); canonical-byte + determinism + execution-id-exclusion invariants; receipt drift (seed/version/schema_version/budget/grants) rejected. |
+| T-16 | `ModuleNotFoundError: evidence.artifact_store` (3 loader errors; 182 ran) | 257 OK | Locked `artifacts/runs/<lr>/<exec>/` layout with the 7 pre-final artifacts, all canonical bytes; trace.jsonl ends run_finished with recorded digest binding; receipt candidate digests == persisted artifact digests; op log matches the locked schema exactly (submission order); replay-input carries identity/ops/null tape; boundary file `boundaries/step-1.json` proves the crossing (marker/snapshot/events/op record) and is storage-only (excluded from digests); path/execution-id independence (byte-identical artifacts across roots/executions); faulted run: tape persisted BEFORE execution with concrete key, ops preserve commit→fault→retry evidence, unresolved sink failure leaves NO commit evidence and never upgrades to success. Evidence-module AST allowlists + no-RNG/time imports. |
+| T-17 | missing `evidence.replay` (14 errors: rerun_replay loader + invariants boundary tests) | 271 OK | Locked ReplayInput enforced (top/nested/op/event/fault-tape key drift, enums, digest formats, run-id-embedded keys, policy steps 1..100 non-decreasing, committed⇔events/state_after, canonical JSON gate rejects floats); policy-free: raising `_RaisingPolicy` never called (`policy` tripwire parameter) + AST allowlist (no policies/runtime/verification/domain.model imports); replay reproduces recorded final digests for completed (seed 18, 92 ops), faulted (seed 18 tape at step 8, 93 ops incl. the no-op retry), and safe_abort (seed 17 full run, ops reaching the budget); seed/config binding, tampered events → `ReplayInconsistentError`; digest mismatch with a receipt is REPORTED (`matches_receipt False`), never upgraded; replay-result.json written canonically through the artifact store. |
+
+### Completed tasks
+
+- **T-14 done** — `evidence/trace.py`: append-only hash-chained JSONL trace; exactly the 13 REQ-03 fields; closure ordering frozen in the writer (`close()` requires `run_finished` last; appends after run_finished/close rejected; `digest()` unavailable before close, stable after); `verification_finished` rejected outright (locked decision 3). Runner wiring is callback-exclusive — `runtime/runner.py` needed NO changes (B3's `EvidenceCallbacks` emission order already ends run_finished-last for all three classifications; proven by tests). Done-check verified.
+- **T-15 done** — `evidence/receipt.py`: frozen scoreless `ReceiptCandidate` (16 validated fields), `ReceiptWriter.write_final` (requires a real `VerificationResult`; invalid ⇒ `ReceiptNotReleasedError`; released outcome = verification's), exact `verification` block with the post-verification `verification_finished` AUXILIARY record — never a trace record. `contracts/outcomes.py` needed NO extension (Counters/VerificationResult/OUTCOMES reused as-is). Done-check verified: no release without a VerificationResult; no trace records after the bound digest.
+- **T-16 done** — `evidence/artifact_store.py`: `ArtifactStore`/`RunArtifactWriter` (atomic temp+flush+fsync+replace + directory fsync per file; per-line fsynced trace appends; boundary files path-addressed and digest-excluded) + `RunEvidenceRecorder`, the full 10-callback `EvidenceCallbacks` implementation: config/task/resolved-tape persisted BEFORE execution, boundary proof persisted FIRST at the commit boundary, locked OperationLog + ReplayInput artifacts at finish, scoreless `ReceiptCandidate` after trace closure. The writer never raises for expected control flow (a sink exception propagates and the runner classifies `unresolved_outcome`). Done-check verified: run directory contains all pre-final artifacts and proves the response-loss boundary without exactly-once claims.
+- **T-17 done** — `evidence/replay.py`: locked-schema `ReplayInput` parsing (fail-closed) + policy-free `replay()` that regenerates the task from recorded identity and re-applies recorded committed ops through `domain.transition.apply`, verifying recorded events/state digests per step; `ReplayResult` with receipt agreement reporting and canonical `replay-result.json` form; consistency contradictions raise `ReplayInconsistentError`. Done-check verified: consumes only declared artifact data, never imports `policies` or asks for a decision, reproduces the faulted run's final state.
+
+### Files changed (9, +3,452/−3)
+
+- New: `evidence/{trace,receipt,artifact_store,replay}.py`
+- Tests: `tests/test_golden_trace.py` (+739), `tests/test_invariants.py` (+296), `tests/test_runtime_boundaries.py` (+216), `tests/test_rerun_replay.py` (+389/−3), `tests/test_faults.py` (+164)
+- `runtime/runner.py`: untouched (B3 callbacks sufficient — zero direct evidence imports; AST allowlist unchanged and green). `contracts/outcomes.py`: untouched.
+
+### Deviations / interpretations (documented in code docstrings + tests)
+
+1. **Trace records have 13 fields, not "14"**: tasks.md prose says "14-field record shape"; the binding spec (REQ-03) and design both enumerate exactly 13 (`schema_version…event_hash`). The spec's field list wins; frozen by `test_record_has_exactly_the_thirteen_req03_fields`.
+2. **Commits are traced at the persistence boundary** (design flow step 8 ordering): `on_commit_boundary` writes boundary proof → op record → `tool_committed` + domain-event trace records, BEFORE the fault/response. The observed committed `on_tool_result` adds no second record. A response-lost commit therefore has no `tool_committed` trace record — its proof is the boundary file + op record (REQ-05 semantics).
+3. **Policy-initiated idempotent replays trace as `tool_rejected`** with payload `{status: "idempotent_replay", reason}`: the closed REQ-03 trace vocabulary has no observed-replay event; the op log carries the exact status. No world effect either way.
+4. **The recorder resolves the fault tape independently** (`resolve_fault_tape(spec, logical_run_id)`) — the same pure function the runner uses — so `fault_tape.json` persists the RESOLVED tape before execution without changing the frozen `on_run_started` signature.
+5. **Retry ops carry the fault evidence** (`fault_ids=[fault_id]`, `retry=true`): the already-persisted boundary record is never rewritten after the fault fires (append-only durability).
+6. **Replay never recomputes scores** (verifier-owned, REQ-06): `receipt_verified_score`/`receipt_outcome` pass through from the receipt; replay reports digest/outcome agreement and classifies `completed`/`safe_abort`/`unresolved_outcome` from recorded evidence only.
+7. **Replay tests record real formula-task runs**: replay regenerates the task from the recorded seed, so hand-built tasks correctly fail the `state_before` binding. Completed-run replay tests use **seed 18** (greedy completes in 92 steps ≤ 100; first delivery step 8, `place-order-00`) — consistent with AMEND-01's deterministic selection rule (expected winner 18). B6/T-24 still owns freezing the fixture; nothing new was frozen here.
+8. **Receipt verification-block `status`** is `"valid"` for every RELEASED receipt (invalid verification releases nothing at all).
+
+### Notes for B5 (verifier contract inputs)
+
+- **Exact receipt `verification` block** (7 keys, released only for valid verification):
+  `{status: "valid", verifier_version, verified_score: int, completed_count, total_count, violations: [{code, location, detail}...] (sorted), verification_finished: {event: "verification_finished", schema_version: 1, payload: {outcome, verified_score, verifier_version, violations_count}}}`. The block is fully derived from `VerificationResult` fields by `ReceiptWriter._verification_block` / `verification_finished_record` — B5 needs no new contract; produce a `VerificationResult(valid=…, outcome∈OUTCOMES, verified_score: int|None (int required when valid), completed_count, total_count, violations: sorted tuple[VerifierViolation], verifier_version)` and call `ReceiptWriter.write_final(candidate, verification)`.
+- **`VerificationArtifacts` composition for `Verifier.verify`** — every field comes from the B4 run directory (parsed canonical bytes; re-verify candidate digests first):
+  - `task` ← `task.json`; `config` ← `config.json` (semantic RunConfig; `config_digest` binds it);
+  - `grants` ← `receipt["grants"]` (sorted capability list) — cross-check `config.json.grants`;
+  - `trace_records` ← parsed `trace.jsonl` (verify `trace_digest` against `receipt.trace_digest` and the per-record chain: seq/prev/event_hash rules in `evidence/trace.py`);
+  - `final_state` ← `final_state.json` (bound by `receipt.final_state_digest`);
+  - `operation_log` ← `operation-log.json` (bound by `receipt.operation_log_digest`; exact locked op shape; `state_before`/`state_after` chain reconstructable independently);
+  - `fault_tape` ← parsed `fault_tape.json` or None (bound by `receipt.fault_tape_digest`; RESOLVED form with concrete keys; semantic spec lives inside `config.json.fault_tape_spec`);
+  - `replay_input` ← `replay-input.json`; `receipt` ← `receipt.json` (None until the verifier releases it — B6 CLI composes `VerificationArtifacts` twice: verify → write receipt → verify bindings again if desired).
+- **Commit-boundary proof for REQ-05 classification**: `boundaries/step-<policy_step>.json` per commit, containing `{schema_version, policy_step, operation_key, tool, arguments, state_snapshot, events, operation_record, commit_marker{commit_proven: true, snapshot_digest}}`. These files are path-addressed storage, excluded from all semantic digests — the verifier should treat a missing/ambiguous boundary for a claimed commit as `commit_boundary_unproven` → `unresolved_outcome`. Note the response-lost commit has NO `tool_committed` trace record by design (see deviation 2) — its proof set is boundary file + op record + the paired `idempotent_replay` retry op with `fault_ids`.
+- **Budget/golden expectations**: full greedy/bounded runs on seeds 17/29 are `safe_abort` (190 steps needed vs 100). The completion demonstrator is seed 18 (92 greedy steps; first delivery step 8 `place-order-00`; first delivery for bounded also step 8) — AMEND-01 candidate list confirms 18 wins for greedy; T-24 freezes it.
+- **Available for reuse**: `TraceWriter` enforces the chain rules (B5 re-derives, never imports it — denylist stays intact); `ReplayInput.from_mapping` is fail-closed for artifact-only input validation; `evidence.canonical` remains the only shared dependency.
+
+### Remaining tasks (unchecked)
+
+- [ ] T-18 Build the independent verifier model and structural invariants
+- [ ] T-19 Implement verifier-owned integer scoring and structured violations
+- [ ] T-20 Complete the artifact release gate and fault ambiguity classifications
+- [ ] T-21 Add the full adversarial suite and import denylist gate
+- [ ] T-22..T-25 (B6 static report, CLI run/rerun/replay, golden fixtures, final gate)
+
+### Workload / PR boundary
+
+Single PR, `size:exception` accepted (session decision). B4 = 3,455 net changed lines in one work-unit commit (cumulative branch ≈ B1 2,526 + B2 2,150 + B3 2,394 + B4 3,455 + docs). Review order suggestion: trace chain + closure tests → receipt release gate + verification block → artifact store layout/recorder ordering + boundary proofs → replay validation/walk + policy-free proofs.
+
+### Structured status / environment notes
+
+- Consumed non-authoritative SDD status (artifact store: `engram`); readiness resolved from the materialized `docs/sdd/{tasks,spec,design}.md` files; B3 handoff constraints honored as hard inputs (callback-exclusive wiring, trace closure, receipt-before-verification, artifact-store non-raising, replay policy-free).
+- pi-lens: the established false-positive patterns recurred throughout the batch (repo-root import resolution — disproven by direct `python3 -c` imports and every green gate; `spawn python ENOENT` — its runner invokes `python`, REQ-08 locks `python3`; type-checker flags on intentional negative tests inside `assertRaises`, frozen-dataclass mutation probes, and duck-typed `**callback_map()` wiring). Its static analysis DID catch three real test defects this batch — a missing `FrozenInstanceError` import, a hand-mis-sorted expected key list, and an unused parameter on a stub helper — all fixed and covered by the green gate. Authoritative verification remains the documented unittest command.
+- Real triangulation catches at GREEN (tests corrected to spec, implementations already correct): pi-lens's autofix initially reordered imports in closure tests and dropped a helper; one mid-session partial-apply was repaired from the authoritative file content. The runner/fault machinery needed zero implementation changes for B4.
+- Engram remains the authoritative artifact store; this file is the session-authoritative progress record per batch instruction. T-14..T-17 completion is recorded here and (best effort) in the Engram apply-progress observation.
+
+### Notes / risks for B5
+
+- `verification/` may import ONLY `evidence.canonical` plus its own modules (denylist: no `runtime`, `policies`, `domain.transition`, runtime scoring); AST denylist tests exist as placeholders (`test_verifier_dependencies`, `test_adversarial_verifier` — 1 discovery test each) and must fail closed once populated.
+- Forged-artifact fixtures must NOT construct Runner/ToolBay/policies: build raw artifact mappings (hand-built or tampered copies of recorded shapes) and feed `Verifier.verify` directly.
+- `Counters` snapshots arrive via `receipt["counters"]` (six ints); cross-check against the op log (tool_attempts = submissions incl. retries, committed_effects = proven boundaries, internal_retries = retry-flagged ops, policy_steps = max non-retry policy_step, terminal_checks = checks, contract_violations = protocol reasons).
+- Tamper vectors to cover per T-20/T-21 map 1:1 to B4's fail-closed paths: edit a trace line (chain/`trace_digest` breaks), swap `final_state.json` (digest binding), flip an op status (replay/verifier inconsistency), drop a boundary file for a committed op (unproven → `unresolved_outcome`), self-report `verified_score` (candidate carries none; only the verifier writes it).
+- Keep `docs/sdd/amendments.md` AMEND-01 in mind: T-24 freezes the completion seed entry in `tests/fixtures/fault_targets.json` (B4's replay tests derive seed 18's target in-test and freeze nothing).
