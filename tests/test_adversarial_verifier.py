@@ -932,6 +932,99 @@ def _append_rejected_submission(base, step, key, tool, arguments, reason):
     return base
 
 
+def _append_parse_rejection(base, step, reason, candidate, operation_key=None):
+    """Append one parse-level rejection exactly as the recorder emits it.
+
+    AMEND-v0-2 evidence shape (artifact_store._on_parse_rejected): the
+    candidate never reached the ToolBay, so the operation record carries
+    ``tool: None`` and ``arguments: None`` while the trace keeps the full
+    observation -> policy_decision -> tool_rejected sequence for audit. The
+    runner counts the reserved policy step, the contract violation, and the
+    free terminal check -- and NO tool attempt (REQ-02: parse-level
+    rejections never reach the ToolBay).
+    """
+    state_digest = digest_json(base["final_state"])
+    operation = {
+        "policy_step": step,
+        "operation_key": operation_key,
+        "tool": None,
+        "arguments": None,
+        "status": "rejected",
+        "reason": reason,
+        "state_before": state_digest,
+        "state_after": None,
+        "events": [],
+        "retry": False,
+        "fault_ids": [],
+    }
+    base["operation_log"]["operations"].append(operation)
+    base["replay_input"]["operations"] = copy.deepcopy(
+        base["operation_log"]["operations"]
+    )
+    records = [r for r in base["trace_records"] if r["event"] != "run_finished"]
+    records.append(
+        {
+            "schema_version": 1,
+            "logical_run_id": RUN_ID,
+            "policy_step": step,
+            "event": "observation_emitted",
+            "operation_key": None,
+            "tool": None,
+            "arguments": None,
+            "state_before": state_digest,
+            "state_after": None,
+            "payload": {"observation_digest": state_digest},
+        }
+    )
+    records.append(
+        {
+            "schema_version": 1,
+            "logical_run_id": RUN_ID,
+            "policy_step": step,
+            "event": "policy_decision",
+            "operation_key": operation_key,
+            "tool": None,
+            "arguments": None,
+            "state_before": None,
+            "state_after": None,
+            "payload": {"candidate": copy.deepcopy(candidate)},
+        }
+    )
+    records.append(
+        {
+            "schema_version": 1,
+            "logical_run_id": RUN_ID,
+            "policy_step": step,
+            "event": "tool_rejected",
+            "operation_key": operation_key,
+            "tool": None,
+            "arguments": None,
+            "state_before": state_digest,
+            "state_after": None,
+            "payload": {"status": "rejected", "reason": reason},
+        }
+    )
+    counters = dict(base["counters"])
+    counters["policy_steps"] = max(counters["policy_steps"], step)
+    counters["contract_violations"] += 1
+    counters["terminal_checks"] += 1
+    base["counters"] = counters
+    records.append(
+        {
+            "schema_version": 1,
+            "logical_run_id": RUN_ID,
+            "policy_step": None,
+            "event": "run_finished",
+            "operation_key": None,
+            "tool": None,
+            "arguments": None,
+            "state_before": None,
+            "state_after": digest_json(base["final_state"]),
+            "payload": {"outcome": "unresolved_outcome", "counters": counters},
+        }
+    )
+    base["trace_records"] = _rechain(records)
+    return base
 # -- per-case tamper builders (dispatched by the frozen fixture names) -------
 
 
@@ -1148,3 +1241,97 @@ class TestNamedRewardHackingFixtures(unittest.TestCase):
                 )
                 self.assertFalse(result.valid)
                 self.assertIsNone(result.verified_score)
+
+
+class TestParseRejectionCounters(unittest.TestCase):
+    """AMEND-v0-2: parse-level rejections must not inflate tool_attempts.
+
+    REQ-02: ``tool_attempts`` counts ToolBay submissions (initial + internal
+    retries, including rejected submissions). Parse-level rejections
+    (``malformed_call``/``unsupported_tool``/``operation_key_invalid``) never
+    reach the ToolBay, so the verifier's derivation must exclude them while
+    the op-log entries stay present and auditable.
+    """
+
+    def _transcript_with_parse_rejections(self):
+        # The legal 8-step prefix plus two mandated parse-level rejections:
+        # step 9 is a malformed candidate (no usable key), step 10 names an
+        # unsupported tool under a structurally valid operation key.
+        base = _base_set()
+        _append_parse_rejection(
+            base,
+            9,
+            "malformed_call",
+            {"arguments": None, "operation_key": None},
+        )
+        _append_parse_rejection(
+            base,
+            10,
+            "unsupported_tool",
+            {
+                "schema_version": 1,
+                "tool": "teleport",
+                "arguments": {"target": "shelf-09"},
+                "operation_key": _key(10, "teleport-shelf-09"),
+            },
+            operation_key=_key(10, "teleport-shelf-09"),
+        )
+        return base
+
+    def test_transcript_with_parse_rejections_verifies_with_exact_counters(self):
+        base = self._transcript_with_parse_rejections()
+        result = Verifier().verify(_artifacts(base))
+        # The honest counters claim 10 reserved steps but only 8 ToolBay
+        # attempts; verification must accept exactly that transcript.
+        self.assertTrue(result.valid, sorted(v.code for v in result.violations))
+        self.assertEqual(result.violations, ())
+        self.assertEqual(result.outcome, "unresolved_outcome")
+        self.assertEqual(result.verified_score, 20)
+        self.assertEqual(base["counters"], {
+            "policy_steps": 10,
+            "tool_attempts": 8,
+            "committed_effects": 8,
+            "internal_retries": 0,
+            "contract_violations": 2,
+            "terminal_checks": 11,
+        })
+        operations = base["operation_log"]["operations"]
+        self.assertEqual(len(operations), 10)
+        # Both parse-level rejections remain present and auditable.
+        rejected = [op for op in operations if op["status"] == "rejected"]
+        self.assertEqual(
+            [(op["policy_step"], op["reason"], op["tool"]) for op in rejected],
+            [(9, "malformed_call", None), (10, "unsupported_tool", None)],
+        )
+        # The rejection steps were still reserved policy steps: the trace
+        # carries their observation/decision/tool_rejected records.
+        events = {
+            (record["policy_step"], record["event"])
+            for record in base["trace_records"]
+        }
+        for step in (9, 10):
+            for event in (
+                "observation_emitted", "policy_decision", "tool_rejected"
+            ):
+                self.assertIn((step, event), events)
+
+    def test_genuine_tool_attempts_mismatch_still_fails_verification(self):
+        # Negative control: with the derivation excluding parse-level
+        # rejections, a run that CLAIMS one attempt too many must still
+        # fail closed at counters.tool_attempts.
+        base = self._transcript_with_parse_rejections()
+        records = [dict(record) for record in base["trace_records"]]
+        for record in records:
+            if record["event"] == "run_finished":
+                claim = dict(record["payload"]["counters"])
+                claim["tool_attempts"] = 9
+                record["payload"] = dict(record["payload"], counters=claim)
+        base["trace_records"] = _rechain(records)
+        result = Verifier().verify(_artifacts(base))
+        self.assertFalse(result.valid)
+        mismatches = [
+            violation for violation in result.violations
+            if violation.code == "artifact_mismatch"
+            and violation.location == "counters.tool_attempts"
+        ]
+        self.assertTrue(mismatches, sorted(v.code for v in result.violations))
