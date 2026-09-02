@@ -48,6 +48,7 @@ _MODULE_ALLOWLISTS = {
         "typing",
     },
     "robot_factory_arena.providers.fake": {
+        "collections.abc",
         "robot_factory_arena.providers.adapter",
     },
 }

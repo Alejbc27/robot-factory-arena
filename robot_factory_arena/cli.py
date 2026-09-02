@@ -158,12 +158,67 @@ def collect_artifact_digests(directory) -> dict:
     return dict(sorted(digests.items()))
 
 
+def _build_llm_policy(provider, model, script_results):
+    """Resolve the Phase 4A LLM policy; providers/llm load LAZILY (replay never
+    imports them — same discipline as the reference policies above)."""
+    from robot_factory_arena.policies.llm import LLMPolicy
+    from robot_factory_arena.providers.fake import FakeProvider
+    from robot_factory_arena.providers.openai import OpenAIProvider
+
+    if provider == "fake":
+        return LLMPolicy(FakeProvider(script=script_results or ()))
+    if provider == "openai":
+        return LLMPolicy(OpenAIProvider(model))
+    raise ValueError(f"unsupported provider: {provider!r}")
+
+
+def _write_llm_sidecars(directory, logical_run_id, execution_id, policy):
+    """Scrubbed external sidecars + static appendix, AFTER the core receipt.
+
+    Fail-closed: a residual secret raises SecretDetectedError before the llm/
+    directory is created; the caller maps it to exit 1 (external-evidence
+    failure, never a changed core outcome).
+    """
+    from robot_factory_arena.policies.llm import (
+        prompt_template_digest,
+        tool_schema_digest,
+    )
+    from robot_factory_arena.providers.evidence import write_provider_artifacts
+    from robot_factory_arena.providers.report import render_llm_report
+
+    write_provider_artifacts(
+        directory,
+        logical_run_id,
+        execution_id,
+        prompt_template_digest(),
+        tool_schema_digest(),
+        policy.decisions,
+        directory / RECEIPT_NAME,
+    )
+    llm_receipt = _read_json(directory / "llm" / "llm-receipt.json")
+    provider_run = _read_json(directory / "llm" / "provider-run.json")
+    core_receipt = _read_json(directory / RECEIPT_NAME)
+    appendix = render_llm_report(core_receipt, llm_receipt, provider_run)
+    atomic_write_bytes(
+        directory / "llm" / "llm-report.html", appendix.encode("utf-8")
+    )
+
+
 def _execute_run(artifacts_root, seed, policy_id, execution_id, fault_step,
-                 fault_intent):
+                 fault_intent, llm=None):
     """The verified-run composition (B5-proven order); returns (code, receipt,
-    verification, directory)."""
+    verification, directory). ``llm`` is None or (provider, model, script)."""
     task = generate_task(seed)
-    policy = _build_policy(policy_id)
+    if llm is not None:
+        from robot_factory_arena.policies.llm import llm_policy_digest
+
+        provider, model, script_results = llm
+        policy = _build_llm_policy(provider, model, script_results)
+        policy_digest = llm_policy_digest(provider, model)
+        policy_id = "llm-v0"
+    else:
+        policy = _build_policy(policy_id)
+        policy_digest = policy_manifest_digest(policy_id)
     fault_spec = None
     if fault_step is not None:
         fault_spec = FaultTapeSpec(
@@ -175,7 +230,7 @@ def _execute_run(artifacts_root, seed, policy_id, execution_id, fault_step,
         )
     config = RunConfig(
         1, task.task_version, task.seed, policy_id,
-        policy_manifest_digest(policy_id), BUDGET, GRANTS, fault_spec,
+        policy_digest, BUDGET, GRANTS, fault_spec,
     )
     logical_run_id = compute_logical_run_id(task, config)
     recorder = RunEvidenceRecorder(
@@ -215,6 +270,26 @@ def _execute_run(artifacts_root, seed, policy_id, execution_id, fault_step,
     atomic_write_bytes(
         recorder.directory / REPORT_NAME, report_html.encode("utf-8")
     )
+
+    if llm is not None:
+        try:
+            _write_llm_sidecars(
+                recorder.directory, receipt["logical_run_id"],
+                execution_id, policy,
+            )
+        except Exception as error:
+            from robot_factory_arena.providers.evidence import (
+                SecretDetectedError,
+            )
+
+            if not isinstance(error, SecretDetectedError):
+                raise
+            print(
+                "external-evidence failure: sidecars not written "
+                f"({error}); the core receipt stands unchanged",
+                file=sys.stderr,
+            )
+            return 1, None, verification, recorder.directory
 
     # Binding re-verification with receipt.json present (T-20-proven order).
     recheck = Verifier().verify(
@@ -279,7 +354,59 @@ def _compare_with_prior_runs(artifacts_root, logical_run_id, execution_id):
     return 0 if agreed else 1
 
 
+def _load_script(path: Path):
+    """Load a fake-provider script: a canonical JSON array of ProviderResult
+    envelopes (validated by construction). Errors surface as exit 2."""
+    from robot_factory_arena.providers.fake import result_from_mapping
+
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(
+            f"cannot read provider script {path}: {error}"
+        ) from error
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("provider script must be a non-empty JSON array")
+    return [result_from_mapping(entry) for entry in entries]
+
+
+def _validate_llm_args(args) -> int | None:
+    """Strict LLM flag validation; None when acceptable, else exit code 2."""
+    provider = getattr(args, "provider", None)
+    model = getattr(args, "model", None)
+    script = getattr(args, "script", None)
+    if provider is None:
+        if model is not None or script is not None:
+            print(
+                "error: --model/--script require --provider", file=sys.stderr
+            )
+            return 2
+        return None
+    if model is None:
+        print("error: --provider requires --model", file=sys.stderr)
+        return 2
+    if provider == "fake" and script is None:
+        print("error: --provider fake requires --script", file=sys.stderr)
+        return 2
+    if provider == "openai" and script is not None:
+        print(
+            "error: --provider openai does not accept --script",
+            file=sys.stderr,
+        )
+        return 2
+    return None
+
+
 def _run_and_report(args, rerun: bool) -> int:
+    invalid = _validate_llm_args(args)
+    if invalid is not None:
+        return invalid
+    llm = None
+    if args.provider is not None:
+        script_results = (
+            _load_script(Path(args.script)) if args.provider == "fake" else None
+        )
+        llm = (args.provider, args.model, script_results)
     if (args.fault_step is None) != (args.fault_intent is None):
         print(
             "error: --fault-step and --fault-intent must be provided together",
@@ -290,7 +417,7 @@ def _run_and_report(args, rerun: bool) -> int:
     verb = "rerun" if rerun else "run"
     code, receipt, verification, directory = _execute_run(
         args.artifacts_root, args.seed, args.policy, execution_id,
-        args.fault_step, args.fault_intent,
+        args.fault_step, args.fault_intent, llm=llm,
     )
     if code != 0 or receipt is None:
         return code
@@ -302,6 +429,8 @@ def _run_and_report(args, rerun: bool) -> int:
     print(f"verified_score: {verification.verified_score}")
     print(f"verifier: valid ({verification.verifier_version})")
     print(f"report: {directory / REPORT_NAME}")
+    if llm is not None:
+        print(f"llm_report: {directory / 'llm' / 'llm-report.html'}")
     if rerun:
         return _compare_with_prior_runs(
             args.artifacts_root, receipt["logical_run_id"], execution_id
@@ -401,6 +530,21 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--fault-intent", default=None,
         help="predeclared intent token, e.g. place-order-00",
+    )
+    parser.add_argument(
+        "--provider", default=None, choices=("fake", "openai"),
+        help="LLM provider policy (default: the selected reference policy)",
+    )
+    parser.add_argument(
+        "--model", default=None,
+        help="pinned model name (required with --provider)",
+    )
+    parser.add_argument(
+        "--script", default=None,
+        help=(
+            "canonical JSON array of ProviderResult envelopes "
+            "(required with --provider fake)"
+        ),
     )
 
 
