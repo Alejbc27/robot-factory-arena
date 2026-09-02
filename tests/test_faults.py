@@ -743,7 +743,6 @@ from pathlib import Path as _fPath  # noqa: E402
 from robot_factory_arena.evidence.artifact_store import (  # noqa: E402
     RunEvidenceRecorder,
 )
-
 from robot_factory_arena.evidence.canonical import (
     canonical_json_bytes as _fcanonical,  # noqa: E402
 )
@@ -894,3 +893,120 @@ class TestFaultedRunArtifactProof(unittest.TestCase):
             self.assertFalse(
                 (recorder.directory / "boundaries" / "step-1.json").exists()
             )
+
+
+import shutil as _fshutil  # noqa: E402
+
+from robot_factory_arena.evidence.receipt import (  # noqa: E402
+    ReceiptNotReleasedError as _fReceiptNotReleasedError,
+)
+from robot_factory_arena.evidence.receipt import (
+    ReceiptWriter as _fReceiptWriter,
+)
+from robot_factory_arena.verification.verifier import (  # noqa: E402
+    Verifier as _vVerifier,
+)
+from robot_factory_arena.verification.verifier import (
+    load_verification_artifacts as _vload,
+)
+
+
+def _faulted_formula_run(root, execution_id="execution-faulted-18"):
+    """A REAL faulted completion: seed-18 formula task, greedy, tape at step 8.
+
+    The B4/AMEND-01 completion demonstrator: greedy finishes all five orders
+    in 92 steps (<= 100), and its first delivery is the step-8
+    ``place-order-00`` the tape targets. Everything on disk is genuine
+    recorder output, so the verifier must accept it end to end.
+    """
+    task = generate_task(18)
+    spec = FaultTapeSpec(
+        1, FAULT_ID_RESPONSE_LOST, HOOK_AFTER_COMMIT_BEFORE_RESPONSE,
+        KIND_RESPONSE_LOST, FaultTarget(8, "place-order-00"),
+    )
+    config = RunConfig(
+        1, task.task_version, task.seed, "greedy-v0",
+        policy_manifest_digest("greedy-v0"), 100,
+        ("move", "pick", "place"), spec,
+    )
+    logical_run_id = compute_logical_run_id(task, config)
+    recorder = RunEvidenceRecorder(root, task, config, logical_run_id,
+                                   execution_id)
+    evidence = EvidenceCallbacks(**recorder.callback_map())
+    result = Runner(evidence=evidence).run(task, GreedyPolicy(), config,
+                                           execution_id)
+    recorder.close()
+    return result, recorder
+
+
+class TestVerifierReleaseGate(unittest.TestCase):
+    """T-20: B4 artifacts -> load_verification_artifacts -> verify -> release.
+
+    The release gate runs against a REAL recorded formula run (seed 18,
+    faulted delivery, completed outcome), not hand-built fixtures: the
+    verifier, the persistence-boundary proofs, and the receipt writer must
+    agree end to end, and invalid evidence must release nothing.
+    """
+
+    def test_faulted_run_verifies_completed_and_releases_the_receipt(self):
+        with _ftempfile.TemporaryDirectory() as root:
+            result, recorder = _faulted_formula_run(root)
+            self.assertEqual(result.outcome, "completed")
+            artifacts = _vload(recorder.directory)
+            verification = _vVerifier().verify(artifacts)
+            self.assertTrue(verification.valid)
+            self.assertEqual(verification.outcome, "completed")
+            self.assertEqual(verification.verified_score, 100)
+            self.assertEqual(verification.completed_count, 5)
+            self.assertEqual(verification.total_count, 5)
+            self.assertEqual(verification.violations, ())
+            receipt = _fReceiptWriter.write_final(
+                recorder.receipt_candidate, verification
+            )
+            self.assertEqual(receipt["outcome"], "completed")
+            self.assertEqual(receipt["verified_score"], 100)
+            block = receipt["verification"]
+            self.assertEqual(block["status"], "valid")
+            self.assertEqual(block["verified_score"], 100)
+            self.assertEqual(block["completed_count"], 5)
+            self.assertEqual(block["total_count"], 5)
+            self.assertEqual(block["violations"], [])
+            self.assertEqual(
+                block["verification_finished"]["event"],
+                "verification_finished",
+            )
+            # Persist the released receipt and re-verify the bindings with
+            # receipt.json present (the B6 CLI composition order).
+            (recorder.directory / "receipt.json").write_bytes(
+                _fcanonical(receipt)
+            )
+            recheck = _vVerifier().verify(_vload(recorder.directory))
+            self.assertTrue(recheck.valid)
+            self.assertEqual(recheck.outcome, "completed")
+            self.assertEqual(recheck.verified_score, 100)
+
+    def test_missing_boundary_proof_is_unresolved_and_releases_nothing(self):
+        with _ftempfile.TemporaryDirectory() as root:
+            _, recorder = _faulted_formula_run(root)
+            _fshutil.rmtree(recorder.directory / "boundaries")
+            verification = _vVerifier().verify(_vload(recorder.directory))
+            self.assertFalse(verification.valid)
+            self.assertEqual(verification.outcome, "unresolved_outcome")
+            self.assertIsNone(verification.verified_score)
+            self.assertIn(
+                "commit_boundary_unproven",
+                [violation.code for violation in verification.violations],
+            )
+            with self.assertRaises(_fReceiptNotReleasedError):
+                _fReceiptWriter.write_final(
+                    recorder.receipt_candidate, verification
+                )
+
+    def test_load_composition_rejects_non_canonical_artifact_bytes(self):
+        with _ftempfile.TemporaryDirectory() as root:
+            _, recorder = _faulted_formula_run(root)
+            target = recorder.directory / "final_state.json"
+            parsed = _fjson.loads(target.read_text("utf-8"))
+            target.write_text(_fjson.dumps(parsed, indent=2), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                _vload(recorder.directory)

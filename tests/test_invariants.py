@@ -3,6 +3,7 @@
 Hosts the T-01 discovery smoke test plus the canonical/serialization,
 schema-lock, formula, and purity invariants filled in by T-02..T-06.
 """
+
 import ast
 import importlib
 import inspect
@@ -132,10 +133,10 @@ class TestCanonicalJsonAuthority(unittest.TestCase):
             canonical_json({"a": [1, {"b": 2.0}]})
 
     def test_bools_ints_and_strings_allowed(self):
-        value = {"flag": True, "n": 0, "big": 10 ** 30, "s": "warehouse-v0"}
+        value = {"flag": True, "n": 0, "big": 10**30, "s": "warehouse-v0"}
         self.assertEqual(
             canonical_json(value),
-            f'{{"big":{10 ** 30},"flag":true,"n":0,"s":"warehouse-v0"}}',
+            f'{{"big":{10**30},"flag":true,"n":0,"s":"warehouse-v0"}}',
         )
 
     def test_non_string_keys_and_unsupported_types_rejected(self):
@@ -170,7 +171,11 @@ class TestCanonicalJsonAuthority(unittest.TestCase):
 # --- T-04: state collection invariants (REQ-03, REQ-04) ------------------------
 
 _TRANSITION_STATES = (
-    "start", "at_shelf", "carrying", "at_base_carrying", "one_completed",
+    "start",
+    "at_shelf",
+    "carrying",
+    "at_base_carrying",
+    "one_completed",
 )
 
 
@@ -255,8 +260,16 @@ class TestTaskFormulaInvariants(unittest.TestCase):
 
     def test_slot_list_is_exactly_the_fixed_p_and_fully_covered(self):
         p = [
-            (1, 2), (3, 2), (5, 2), (7, 2), (9, 2),
-            (1, 5), (3, 5), (5, 5), (7, 5), (9, 5),
+            (1, 2),
+            (3, 2),
+            (5, 2),
+            (7, 2),
+            (9, 2),
+            (1, 5),
+            (3, 5),
+            (5, 5),
+            (7, 5),
+            (9, 5),
         ]
         for seed in (17, 29, 0, 3, 7):
             with self.subTest(seed=seed):
@@ -311,8 +324,9 @@ class TestTaskDefinitionConformance(unittest.TestCase):
 RUN_ID = "lr_" + "0123456789abcdef" * 4
 
 
-def _policy_observation(position, inventory, shelves, orders, completed=(),
-                        used=0, last_result=None):
+def _policy_observation(
+    position, inventory, shelves, orders, completed=(), used=0, last_result=None
+):
     world = WorldState(
         schema_version=1,
         width=10,
@@ -338,14 +352,21 @@ class TestObservationContract(unittest.TestCase):
 
     def test_serialized_observation_has_exactly_the_req03_keys(self):
         mapping = _policy_observation(
-            (0, 0), None,
+            (0, 0),
+            None,
             (ShelfState("shelf-00", (1, 1), "item-00"),),
             (OrderState("order-00", "item-00", 1),),
         )
         self.assertEqual(
             sorted(mapping),
-            ["grants", "last_result", "logical_run_id", "policy_steps",
-             "schema_version", "world_state"],
+            [
+                "grants",
+                "last_result",
+                "logical_run_id",
+                "policy_steps",
+                "schema_version",
+                "world_state",
+            ],
         )
         self.assertEqual(
             mapping["policy_steps"], {"maximum": 100, "remaining": 100, "used": 0}
@@ -356,15 +377,15 @@ class TestObservationContract(unittest.TestCase):
 
     def test_last_result_serializes_status_key_reason(self):
         mapping = _policy_observation(
-            (0, 0), None,
+            (0, 0),
+            None,
             (ShelfState("shelf-00", (1, 1), "item-00"),),
             (OrderState("order-00", "item-00", 1),),
             last_result=LastResult("rejected", "op/x", "missing_grant"),
         )
         self.assertEqual(
             mapping["last_result"],
-            {"operation_key": "op/x", "reason": "missing_grant",
-             "status": "rejected"},
+            {"operation_key": "op/x", "reason": "missing_grant", "status": "rejected"},
         )
 
     def test_grants_must_be_sorted_supported_and_unique(self):
@@ -406,16 +427,12 @@ class TestOperationKeyGrammar(unittest.TestCase):
 
     def test_accepts_valid_key(self):
         self.assertTrue(
-            validate_operation_key(
-                f"op/{RUN_ID}/step-8/intent-place-order-03", RUN_ID
-            )
+            validate_operation_key(f"op/{RUN_ID}/step-8/intent-place-order-03", RUN_ID)
         )
 
     def test_rejects_mismatched_run_id(self):
         other = "lr_" + "f" * 64
-        self.assertFalse(
-            validate_operation_key(f"op/{other}/step-1/intent-a", RUN_ID)
-        )
+        self.assertFalse(validate_operation_key(f"op/{other}/step-1/intent-a", RUN_ID))
 
     def test_rejects_leading_zero_step_and_bad_intents(self):
         for key in (
@@ -450,7 +467,9 @@ class TestToolCallNormalization(unittest.TestCase):
         )
         for tool, arguments in cases:
             with self.subTest(tool=tool):
-                result = normalize_tool_call(self._candidate(tool=tool, arguments=arguments))
+                result = normalize_tool_call(
+                    self._candidate(tool=tool, arguments=arguments)
+                )
                 self.assertTrue(result.ok)
                 self.assertIsNone(result.reason)
                 call = result.tool_call
@@ -464,8 +483,13 @@ class TestToolCallNormalization(unittest.TestCase):
         malformed = (
             "not-a-mapping",
             {"schema_version": 1, "tool": "move"},
-            {"schema_version": 1, "tool": "move", "arguments": {"direction": "north"},
-             "operation_key": f"op/{RUN_ID}/step-1/intent-a", "extra": True},
+            {
+                "schema_version": 1,
+                "tool": "move",
+                "arguments": {"direction": "north"},
+                "operation_key": f"op/{RUN_ID}/step-1/intent-a",
+                "extra": True,
+            },
             self._candidate(schema_version=2),
         )
         for candidate in malformed:
@@ -497,13 +521,17 @@ class TestToolCallNormalization(unittest.TestCase):
                 self.assertEqual(result.reason, "invalid_arguments")
 
     def test_pick_and_place_argument_validation(self):
-        result = normalize_tool_call(self._candidate(
-            tool="pick", arguments={"shelf_id": "shelf-0", "item_id": "item-00"}
-        ))
+        result = normalize_tool_call(
+            self._candidate(
+                tool="pick", arguments={"shelf_id": "shelf-0", "item_id": "item-00"}
+            )
+        )
         self.assertEqual(result.reason, "invalid_arguments")
-        result = normalize_tool_call(self._candidate(
-            tool="place", arguments={"order_id": "order-00", "extra": 1}
-        ))
+        result = normalize_tool_call(
+            self._candidate(
+                tool="place", arguments={"order_id": "order-00", "extra": 1}
+            )
+        )
         self.assertEqual(result.reason, "invalid_arguments")
 
     def test_arguments_exposed_as_immutable_view(self):
@@ -599,7 +627,9 @@ class TestGreedyPolicyDecisions(unittest.TestCase):
             _policy_observation((2, 2), None, shelves, orders, used=3)
         )
         self.assertEqual(call_.tool, "pick")
-        self.assertEqual(dict(call_.arguments), {"shelf_id": "shelf-00", "item_id": "item-00"})
+        self.assertEqual(
+            dict(call_.arguments), {"shelf_id": "shelf-00", "item_id": "item-00"}
+        )
         self.assertEqual(
             call_.operation_key, f"op/{RUN_ID}/step-4/intent-pick-shelf-00"
         )
@@ -628,7 +658,8 @@ class TestGreedyPolicyDecisions(unittest.TestCase):
 
     def test_decide_is_deterministic_and_does_not_mutate_observation(self):
         mapping = _policy_observation(
-            (0, 0), None,
+            (0, 0),
+            None,
             (ShelfState("shelf-00", (1, 1), "item-00"),),
             (OrderState("order-00", "item-00", 1),),
         )
@@ -697,7 +728,8 @@ class TestBoundedPolicyDecisions(unittest.TestCase):
 
     def test_decide_is_deterministic_and_does_not_mutate_observation(self):
         mapping = _policy_observation(
-            (0, 0), None,
+            (0, 0),
+            None,
             (ShelfState("shelf-00", (1, 1), "item-00"),),
             (OrderState("order-00", "item-00", 1),),
         )
@@ -709,6 +741,7 @@ class TestBoundedPolicyDecisions(unittest.TestCase):
 
 
 # --- T-09: runtime module boundaries (REQ-04, design §2) -----------------------
+
 
 class TestRuntimeModuleBoundaries(unittest.TestCase):
     """The gateway stack imports no policy/fault/verifier/runner code."""
@@ -755,11 +788,7 @@ class TestRuntimeModuleBoundaries(unittest.TestCase):
                 imported.update(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported.add(node.module)
-        return {
-            name
-            for name in imported
-            if name.startswith("robot_factory_arena")
-        }
+        return {name for name in imported if name.startswith("robot_factory_arena")}
 
     def test_runtime_modules_import_only_their_allowlist(self):
         for module_name, allowed in self.RUNTIME_MODULE_ALLOWLISTS.items():
@@ -775,8 +804,7 @@ class TestRuntimeModuleBoundaries(unittest.TestCase):
                     offending = [
                         name
                         for name in imported
-                        if name == forbidden
-                        or name.startswith(forbidden + ".")
+                        if name == forbidden or name.startswith(forbidden + ".")
                     ]
                     self.assertEqual(offending, [])
 
@@ -784,45 +812,96 @@ class TestRuntimeModuleBoundaries(unittest.TestCase):
 # --- T-03: auxiliary artifact schemas are locked before any writer (REQ-03/06/07/09) ---
 
 TASK_DEFINITION_KEYS = (
-    "config_identity", "height", "initial_state", "orders", "schema_version",
-    "seed", "shelves", "slot_positions", "task_version", "width",
+    "config_identity",
+    "height",
+    "initial_state",
+    "orders",
+    "schema_version",
+    "seed",
+    "shelves",
+    "slot_positions",
+    "task_version",
+    "width",
 )
 WORLD_STATE_KEYS = (
-    "completed_orders", "height", "orders", "robot", "schema_version",
-    "shelves", "step", "width",
+    "completed_orders",
+    "height",
+    "orders",
+    "robot",
+    "schema_version",
+    "shelves",
+    "step",
+    "width",
 )
 RUN_CONFIG_KEYS = (
-    "budget", "fault_tape_spec", "grants", "policy_digest", "policy_id",
-    "schema_version", "seed", "task_version",
+    "budget",
+    "fault_tape_spec",
+    "grants",
+    "policy_digest",
+    "policy_id",
+    "schema_version",
+    "seed",
+    "task_version",
 )
 FAULT_TAPE_SPEC_KEYS = ("fault_id", "hook", "kind", "schema_version", "target")
 FAULT_TARGET_KEYS = ("intent", "policy_step")
 OPERATION_LOG_KEYS = ("logical_run_id", "operations", "schema_version")
 OPERATION_KEYS = (
-    "arguments", "events", "fault_ids", "operation_key", "policy_step",
-    "reason", "retry", "state_after", "state_before", "status", "tool",
+    "arguments",
+    "events",
+    "fault_ids",
+    "operation_key",
+    "policy_step",
+    "reason",
+    "retry",
+    "state_after",
+    "state_before",
+    "status",
+    "tool",
 )
 OPERATION_NULLABLE = (
-    "operations[].arguments", "operations[].operation_key",
-    "operations[].reason", "operations[].state_after",
-    "operations[].state_before", "operations[].tool",
+    "operations[].arguments",
+    "operations[].operation_key",
+    "operations[].reason",
+    "operations[].state_after",
+    "operations[].state_before",
+    "operations[].tool",
 )
 STATUS_ENUM = ("committed", "idempotent_replay", "rejected")
 REPLAY_INPUT_KEYS = (
-    "budget", "fault_tape", "grants", "logical_run_id", "operations",
-    "schema_version", "task_identity",
+    "budget",
+    "fault_tape",
+    "grants",
+    "logical_run_id",
+    "operations",
+    "schema_version",
+    "task_identity",
 )
 TASK_IDENTITY_KEYS = ("config_digest", "seed", "task_version")
 VIOLATION_KEYS = ("code", "detail", "location")
 CLOSED_REASON_TAXONOMY = (
-    "artifact_mismatch", "budget_exhausted", "commit_boundary_unproven",
-    "destination_out_of_grid", "grant_scope_mismatch", "invalid_arguments",
-    "inventory_empty", "inventory_not_empty", "item_not_pending",
-    "malformed_call", "missing_grant", "not_at_base",
-    "operation_key_conflict", "operation_key_invalid",
-    "order_already_completed", "order_item_mismatch", "response_lost",
-    "robot_not_at_shelf", "score_mismatch", "shelf_item_mismatch",
-    "trace_chain_invalid", "unsupported_tool",
+    "artifact_mismatch",
+    "budget_exhausted",
+    "commit_boundary_unproven",
+    "destination_out_of_grid",
+    "grant_scope_mismatch",
+    "invalid_arguments",
+    "inventory_empty",
+    "inventory_not_empty",
+    "item_not_pending",
+    "malformed_call",
+    "missing_grant",
+    "not_at_base",
+    "operation_key_conflict",
+    "operation_key_invalid",
+    "order_already_completed",
+    "order_item_mismatch",
+    "response_lost",
+    "robot_not_at_shelf",
+    "score_mismatch",
+    "shelf_item_mismatch",
+    "trace_chain_invalid",
+    "unsupported_tool",
 )
 
 
@@ -882,9 +961,7 @@ class TestAuxiliarySchemaLock(unittest.TestCase):
         fixture = _load_fixture("operation_log_schema.json")
         self.assertEqual(fixture["keys"], list(OPERATION_LOG_KEYS))
         self.assertEqual(fixture["nested"]["operations[]"], list(OPERATION_KEYS))
-        self.assertEqual(
-            fixture["enums"]["operations[].status"], list(STATUS_ENUM)
-        )
+        self.assertEqual(fixture["enums"]["operations[].status"], list(STATUS_ENUM))
         for field in OPERATION_NULLABLE:
             self.assertIn(field, fixture["nullables"])
         extra, missing = key_drift(fixture["valid_operation"], OPERATION_KEYS)
@@ -899,9 +976,7 @@ class TestAuxiliarySchemaLock(unittest.TestCase):
     def test_replay_input_lock(self):
         fixture = _load_fixture("replay_input_schema.json")
         self.assertEqual(fixture["keys"], list(REPLAY_INPUT_KEYS))
-        self.assertEqual(
-            fixture["nested"]["task_identity"], list(TASK_IDENTITY_KEYS)
-        )
+        self.assertEqual(fixture["nested"]["task_identity"], list(TASK_IDENTITY_KEYS))
         self.assertEqual(fixture["nested"]["operations[]"], list(OPERATION_KEYS))
         self.assertIn("fault_tape", fixture["nullables"])
         self.assertIn("policy", fixture["prohibited_references"])
@@ -930,9 +1005,7 @@ class TestBudgetAccountingInvariants(unittest.TestCase):
             self.assertEqual(view.maximum, 100)
             self.assertEqual(view.used + view.remaining, view.maximum)
             snapshot = budget.view()
-            self.assertEqual(
-                snapshot.used + snapshot.remaining, snapshot.maximum
-            )
+            self.assertEqual(snapshot.used + snapshot.remaining, snapshot.maximum)
         self.assertEqual(budget.view(), BudgetView(100, 0, 100))
 
     def test_counters_are_independent_integers_never_cross_touched(self):
@@ -940,24 +1013,20 @@ class TestBudgetAccountingInvariants(unittest.TestCase):
         budget.reserve_policy_attempt()
         budget.record_tool_attempt()
         budget.record_violation()
-        self.assertEqual(
-            budget.counters(), Counters(1, 1, 0, 0, 1, 0)
-        )
+        self.assertEqual(budget.counters(), Counters(1, 1, 0, 0, 1, 0))
         budget.record_commit()
-        self.assertEqual(
-            budget.counters(), Counters(1, 1, 1, 0, 1, 0)
-        )
+        self.assertEqual(budget.counters(), Counters(1, 1, 1, 0, 1, 0))
         budget.record_retry()
-        self.assertEqual(
-            budget.counters(), Counters(1, 1, 1, 1, 1, 0)
-        )
+        self.assertEqual(budget.counters(), Counters(1, 1, 1, 1, 1, 0))
         budget.record_terminal_check()
-        self.assertEqual(
-            budget.counters(), Counters(1, 1, 1, 1, 1, 1)
-        )
+        self.assertEqual(budget.counters(), Counters(1, 1, 1, 1, 1, 1))
         for field_name in (
-            "policy_steps", "tool_attempts", "committed_effects",
-            "internal_retries", "contract_violations", "terminal_checks",
+            "policy_steps",
+            "tool_attempts",
+            "committed_effects",
+            "internal_retries",
+            "contract_violations",
+            "terminal_checks",
         ):
             self.assertIsInstance(getattr(budget.counters(), field_name), int)
 
@@ -1107,13 +1176,9 @@ def _r15_candidate(**overrides):
         policy_digest=overrides.get("policy_digest", "sha256:" + "b" * 64),
         budget=overrides.get("budget", 100),
         grants=overrides.get("grants", ("move", "pick", "place")),
-        fault_tape_digest=overrides.get(
-            "fault_tape_digest", "sha256:" + "c" * 64
-        ),
+        fault_tape_digest=overrides.get("fault_tape_digest", "sha256:" + "c" * 64),
         trace_digest=overrides.get("trace_digest", "sha256:" + "d" * 64),
-        final_state_digest=overrides.get(
-            "final_state_digest", "sha256:" + "e" * 64
-        ),
+        final_state_digest=overrides.get("final_state_digest", "sha256:" + "e" * 64),
         operation_log_digest=overrides.get(
             "operation_log_digest", "sha256:" + "1" * 64
         ),
@@ -1138,9 +1203,7 @@ class TestReceiptInvariants(unittest.TestCase):
     """T-15: canonical bytes, determinism, digest hygiene, identity split."""
 
     def test_written_receipt_is_canonical_json_bytes(self):
-        receipt = ReceiptWriter.write_final(
-            _r15_candidate(), _r15_verification()
-        )
+        receipt = ReceiptWriter.write_final(_r15_candidate(), _r15_verification())
         self.assertEqual(
             canonical_json_bytes(receipt),
             canonical_json_bytes(json.loads(canonical_json_bytes(receipt))),
@@ -1149,17 +1212,18 @@ class TestReceiptInvariants(unittest.TestCase):
     def test_equal_inputs_release_byte_identical_receipts(self):
         first = ReceiptWriter.write_final(_r15_candidate(), _r15_verification())
         second = ReceiptWriter.write_final(_r15_candidate(), _r15_verification())
-        self.assertEqual(
-            canonical_json_bytes(first), canonical_json_bytes(second)
-        )
+        self.assertEqual(canonical_json_bytes(first), canonical_json_bytes(second))
 
     def test_every_digest_field_is_sha256_format_or_explicit_null(self):
-        receipt = ReceiptWriter.write_final(
-            _r15_candidate(), _r15_verification()
-        )
-        for name in ("config_digest", "policy_digest", "fault_tape_digest",
-                     "trace_digest", "final_state_digest",
-                     "operation_log_digest"):
+        receipt = ReceiptWriter.write_final(_r15_candidate(), _r15_verification())
+        for name in (
+            "config_digest",
+            "policy_digest",
+            "fault_tape_digest",
+            "trace_digest",
+            "final_state_digest",
+            "operation_log_digest",
+        ):
             value = receipt[name]
             if value is None:
                 continue  # explicit null (e.g. no fault tape)
@@ -1168,9 +1232,7 @@ class TestReceiptInvariants(unittest.TestCase):
     def test_receipt_contains_no_float_values(self):
         # REQ-07: no floating-point value may enter any digest input or
         # evidence artifact; the canonical authority would reject them.
-        receipt = ReceiptWriter.write_final(
-            _r15_candidate(), _r15_verification()
-        )
+        receipt = ReceiptWriter.write_final(_r15_candidate(), _r15_verification())
         with self.assertRaises(TypeError):
             canonical_json_bytes({**receipt, "verified_score": 20.5})
 
@@ -1187,10 +1249,20 @@ class TestReceiptInvariants(unittest.TestCase):
         self.assertEqual(
             sorted(deterministic),
             [
-                "budget", "config_digest", "counters", "fault_tape_digest",
-                "final_state_digest", "grants", "logical_run_id",
-                "operation_log_digest", "outcome", "policy_digest",
-                "policy_id", "schema_version", "seed", "task_version",
+                "budget",
+                "config_digest",
+                "counters",
+                "fault_tape_digest",
+                "final_state_digest",
+                "grants",
+                "logical_run_id",
+                "operation_log_digest",
+                "outcome",
+                "policy_digest",
+                "policy_id",
+                "schema_version",
+                "seed",
+                "task_version",
                 "trace_digest",
             ],
         )
@@ -1201,13 +1273,15 @@ class TestReceiptInvariants(unittest.TestCase):
         with self.assertRaises(ValueError):
             _r15_candidate(seed="017")
         with self.assertRaises(ValueError):
-            _r15_candidate().__class__(**{
-                **_r15_candidate().to_mapping(),
-                "counters": Counters(1, 1, 1, 0, 0, 2),
-                "task_version": "warehouse-v1",
-                "grants": ("move", "pick", "place"),
-                "logical_run_id": _R15_RUN_ID,
-            })
+            _r15_candidate().__class__(
+                **{
+                    **_r15_candidate().to_mapping(),
+                    "counters": Counters(1, 1, 1, 0, 0, 2),
+                    "task_version": "warehouse-v1",
+                    "grants": ("move", "pick", "place"),
+                    "logical_run_id": _R15_RUN_ID,
+                }
+            )
         with self.assertRaises(ValueError):
             ReceiptCandidate(
                 schema_version=2,
@@ -1231,8 +1305,7 @@ class TestReceiptInvariants(unittest.TestCase):
     def test_outcome_vocabulary_is_the_closed_four(self):
         self.assertEqual(
             OUTCOMES,
-            ("completed", "duplicate_effect", "safe_abort",
-             "unresolved_outcome"),
+            ("completed", "duplicate_effect", "safe_abort", "unresolved_outcome"),
         )
 
     def test_verification_finished_record_is_deterministic_and_guarded(self):
@@ -1241,12 +1314,13 @@ class TestReceiptInvariants(unittest.TestCase):
         self.assertEqual(record, again)
         self.assertEqual(record["event"], "verification_finished")
         with self.assertRaises(TypeError):
-            verification_finished_record({"verified_score": 20})
+            verification_finished_record({"verified_score": 20})  # type: ignore[arg-type]  # intentional negative test
 
 
 # ---------------------------------------------------------------------------
 # T-16: evidence module boundaries (design §2; runner stays callback-only)
 # ---------------------------------------------------------------------------
+
 
 class TestEvidenceModuleBoundaries(unittest.TestCase):
     """Evidence writers stay value-driven: no runtime/policy/verifier code."""
@@ -1292,21 +1366,25 @@ class TestEvidenceModuleBoundaries(unittest.TestCase):
                     offending = [
                         name
                         for name in imported
-                        if name == forbidden
-                        or name.startswith(forbidden + ".")
+                        if name == forbidden or name.startswith(forbidden + ".")
                     ]
                     self.assertEqual(offending, [])
 
     def test_trace_and_receipt_stay_domain_and_fault_free(self):
         # trace/receipt are pure composition layers; only the store may
         # resolve fault tapes and only replay may re-apply transitions.
-        for module_name in ("robot_factory_arena.evidence.trace",
-                            "robot_factory_arena.evidence.receipt"):
+        for module_name in (
+            "robot_factory_arena.evidence.trace",
+            "robot_factory_arena.evidence.receipt",
+        ):
             imported = _module_project_imports(module_name)
-            for forbidden in ("robot_factory_arena.domain",
-                              "robot_factory_arena.faults"):
+            for forbidden in (
+                "robot_factory_arena.domain",
+                "robot_factory_arena.faults",
+            ):
                 offending = [
-                    name for name in imported
+                    name
+                    for name in imported
                     if name == forbidden or name.startswith(forbidden + ".")
                 ]
                 self.assertEqual(offending, [], (module_name, forbidden))
@@ -1336,6 +1414,7 @@ class TestEvidenceModuleBoundaries(unittest.TestCase):
 # T-17: replay joins the evidence module boundaries (policy-free by design)
 # ---------------------------------------------------------------------------
 
+
 class TestReplayModuleBoundaries(unittest.TestCase):
     """Replay consumes recorded operations; it never asks a policy."""
 
@@ -1347,27 +1426,267 @@ class TestReplayModuleBoundaries(unittest.TestCase):
             "robot_factory_arena.domain.transition",
             "robot_factory_arena.evidence.canonical",
         }
-        extra = _module_project_imports(
-            "robot_factory_arena.evidence.replay"
-        ) - allowed
+        extra = _module_project_imports("robot_factory_arena.evidence.replay") - allowed
         self.assertEqual(extra, set())
 
     def test_replay_module_never_imports_policies_runtime_or_verifier(self):
-        imported = _module_project_imports(
-            "robot_factory_arena.evidence.replay"
-        )
-        for forbidden in ("robot_factory_arena.policies",
-                          "robot_factory_arena.runtime",
-                          "robot_factory_arena.verification",
-                          "robot_factory_arena.cli",
-                          "robot_factory_arena.domain.model",
-                          "robot_factory_arena.faults",
-                          "robot_factory_arena.evidence.artifact_store",
-                          "robot_factory_arena.evidence.receipt",
-                          "robot_factory_arena.evidence.trace"):
+        imported = _module_project_imports("robot_factory_arena.evidence.replay")
+        for forbidden in (
+            "robot_factory_arena.policies",
+            "robot_factory_arena.runtime",
+            "robot_factory_arena.verification",
+            "robot_factory_arena.cli",
+            "robot_factory_arena.domain.model",
+            "robot_factory_arena.faults",
+            "robot_factory_arena.evidence.artifact_store",
+            "robot_factory_arena.evidence.receipt",
+            "robot_factory_arena.evidence.trace",
+        ):
             with self.subTest(forbidden=forbidden):
                 offending = [
-                    name for name in imported
+                    name
+                    for name in imported
                     if name == forbidden or name.startswith(forbidden + ".")
                 ]
                 self.assertEqual(offending, [])
+
+
+# ---------------------------------------------------------------------------
+# T-19: verifier-owned integer scoring and structured violations (REQ-06)
+# ---------------------------------------------------------------------------
+
+from robot_factory_arena.contracts.outcomes import (  # noqa: E402
+    VerifierViolation,
+    sort_violations,
+)
+from robot_factory_arena.verification.scoring import (  # noqa: E402
+    ScoreResult,
+    compute_official_score,
+)
+from robot_factory_arena.verification.verifier import (  # noqa: E402
+    VERIFIER_VERSION,
+    VerificationArtifacts,
+    Verifier,
+)
+
+
+class TestVerifierOwnedScoring(unittest.TestCase):
+    """The official score is the verifier's integer floor ratio (REQ-06)."""
+
+    def test_floor_ratio_table(self):
+        cases = [
+            (0, 10, 0),
+            (1, 3, 33),
+            (2, 3, 66),
+            (3, 3, 100),
+            (7, 8, 87),
+            (1, 100, 1),
+            (99, 100, 99),
+            (5, 5, 100),
+            (0, 5, 0),
+            (4, 5, 80),
+        ]
+        for completed, total, expected in cases:
+            with self.subTest(completed=completed, total=total):
+                self.assertEqual(
+                    compute_official_score(completed, total).score, expected
+                )
+
+    def test_raw_numerator_and_denominator_are_retained(self):
+        result = compute_official_score(7, 8)
+        self.assertIsInstance(result, ScoreResult)
+        self.assertEqual(result.completed, 7)
+        self.assertEqual(result.total, 8)
+        self.assertEqual(result.score, 87)
+
+    def test_score_is_strictly_an_integer(self):
+        result = compute_official_score(1, 3)
+        self.assertIsInstance(result.score, int)
+        self.assertNotIsInstance(result.score, bool)
+        self.assertNotIsInstance(result.score, float)
+
+    def test_floats_and_bools_are_rejected(self):
+        for completed, total in [(1.0, 3), (2, 4.0), (True, 3), (1, False)]:
+            with self.subTest(completed=completed, total=total):
+                with self.assertRaises(TypeError):
+                    compute_official_score(completed, total)
+
+    def test_impossible_counts_are_rejected(self):
+        with self.assertRaises(ValueError):
+            compute_official_score(4, 3)  # completed exceeds total
+        with self.assertRaises(ValueError):
+            compute_official_score(-1, 3)
+        with self.assertRaises(ValueError):
+            compute_official_score(0, 0)  # a run always has orders
+        with self.assertRaises(ValueError):
+            compute_official_score(1, -2)
+
+    def test_scoring_is_deterministic(self):
+        self.assertEqual(compute_official_score(3, 7), compute_official_score(3, 7))
+
+
+class TestViolationSerializationContract(unittest.TestCase):
+    """Verifier violations serialize exactly like the locked T-03 fixture."""
+
+    @staticmethod
+    def _forged_result():
+        """One compact forged set whose verification produces violations."""
+        run_id = "lr_" + "cd" * 32
+        config = {
+            "schema_version": 1,
+            "task_version": "warehouse-v0",
+            "seed": "18",
+            "policy_id": "greedy-v0",
+            "policy_digest": "sha256:" + "3" * 64,
+            "budget": 100,
+            "grants": ["move", "pick", "place"],
+            "fault_tape_spec": None,
+        }
+        task = generate_task("18").to_mapping()
+        digest_json_local = digest_json
+        initial_digest = digest_json_local(task["initial_state"])
+        empty_log = {"schema_version": 1, "logical_run_id": run_id, "operations": []}
+        records = []
+        previous = None
+        drafts = [
+            {
+                "schema_version": 1,
+                "logical_run_id": run_id,
+                "policy_step": None,
+                "event": "run_started",
+                "operation_key": None,
+                "tool": None,
+                "arguments": None,
+                "state_before": None,
+                "state_after": initial_digest,
+                "payload": {
+                    "policy_id": "greedy-v0",
+                    "policy_digest": config["policy_digest"],
+                    "budget": 100,
+                    "grants": ["move", "pick", "place"],
+                },
+            },
+            {
+                "schema_version": 1,
+                "logical_run_id": run_id,
+                "policy_step": None,
+                "event": "run_finished",
+                "operation_key": None,
+                "tool": None,
+                "arguments": None,
+                "state_before": None,
+                "state_after": initial_digest,
+                "payload": {
+                    "outcome": "completed",
+                    "counters": {
+                        "policy_steps": 0,
+                        "tool_attempts": 0,
+                        "committed_effects": 0,
+                        "internal_retries": 0,
+                        "contract_violations": 0,
+                        "terminal_checks": 1,
+                    },
+                },
+            },
+        ]
+        for seq, body in enumerate(drafts):
+            body = {k: v for k, v in body.items() if k != "event_hash"}
+            body["seq"] = seq
+            body["prev_event_hash"] = previous
+            body["event_hash"] = digest_json_local(body)
+            records.append(body)
+            previous = body["event_hash"]
+        replay_input = {
+            "schema_version": 1,
+            "logical_run_id": run_id,
+            "task_identity": {
+                "task_version": "warehouse-v0",
+                "seed": "18",
+                "config_digest": digest_json_local(config),
+            },
+            "grants": ["move", "pick", "place"],
+            "budget": 100,
+            "fault_tape": None,
+            "operations": [],
+        }
+        receipt = {
+            "schema_version": 1,
+            "task_version": "warehouse-v0",
+            "logical_run_id": run_id,
+            "execution_id": "execution-x",
+            "seed": "18",
+            "config_digest": digest_json_local(config),
+            "policy_id": "greedy-v0",
+            "policy_digest": config["policy_digest"],
+            "budget": 100,
+            "grants": ["move", "pick", "place"],
+            "fault_tape_digest": None,
+            "trace_digest": "sha256:" + "4" * 64,
+            "final_state_digest": initial_digest,
+            "operation_log_digest": digest_json_local(empty_log),
+            "verifier_version": VERIFIER_VERSION,
+            "verified_score": 100,
+            "outcome": "completed",
+            "counters": {
+                "policy_steps": 0,
+                "tool_attempts": 0,
+                "committed_effects": 0,
+                "internal_retries": 0,
+                "contract_violations": 0,
+                "terminal_checks": 1,
+            },
+        }
+        return Verifier().verify(
+            VerificationArtifacts(
+                task=task,
+                config=config,
+                trace_records=tuple(records),
+                final_state=task["initial_state"],
+                operation_log=empty_log,
+                replay_input=replay_input,
+                receipt=receipt,
+                boundaries={},
+            )
+        )
+
+    def setUp(self):
+        self.fixture = json.loads(
+            (
+                pathlib.Path(__file__).parent
+                / "fixtures"
+                / "verifier_violation_schema.json"
+            ).read_text(encoding="utf-8")
+        )
+
+    def test_locked_fixture_example_construction(self):
+        example = self.fixture["example"]
+        violation = VerifierViolation(**example)
+        self.assertEqual(violation.code, example["code"])
+        self.assertEqual(sorted(self.fixture["keys"]), ["code", "detail", "location"])
+
+    def test_forged_run_yields_violations_matching_the_locked_shape(self):
+        result = self._forged_result()
+        self.assertFalse(result.valid)
+        self.assertTrue(result.violations)
+        for violation in result.violations:
+            serialized = {
+                "code": violation.code,
+                "location": violation.location,
+                "detail": violation.detail,
+            }
+            with self.subTest(serialized=serialized):
+                self.assertEqual(sorted(serialized), sorted(self.fixture["keys"]))
+                self.assertIn(serialized["code"], self.fixture["enums"]["code"])
+                for value in serialized.values():
+                    self.assertTrue(value)
+                    self.assertTrue(value.isascii())
+
+    def test_violations_are_sorted_by_the_three_fields(self):
+        result = self._forged_result()
+        keys = [v.sort_key for v in result.violations]
+        self.assertEqual(keys, sorted(keys))
+        # The shared sorter produces the same order (locked decision 5).
+        self.assertEqual(
+            list(sort_violations(tuple(result.violations))),
+            list(result.violations),
+        )
