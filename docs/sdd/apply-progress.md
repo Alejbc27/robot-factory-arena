@@ -328,3 +328,84 @@ Single PR, `size:exception` accepted (session decision). B4 = 3,455 net changed 
 
 - Root cause identified for the recurring "Import could not be resolved" false positives: pi-lens's Python support **is pyright** (`docs/lsp-capability-matrix.md`, python → pyright), and this repo has no `pyrightconfig.json`, so pyright runs without a project anchor and cannot resolve repo-root packages (`robot_factory_arena.*` from `tests/`). Every flagged import executes in each green gate run (the suite is fully green), so these are static-resolution gaps, not code defects.
 - **Recommended fix (out of B4's allowed edit surfaces — orchestrator call):** add a repo-root `pyrightconfig.json` anchoring the project, e.g. `{"executionEnvironments": [{"root": ".", "extraPaths": ["."]}], "include": ["robot_factory_arena", "tests"]}` (plus `"typeCheckingMode": "standard"` or `"basic"` to keep the negative-test noise down). Precedent: the B1 `.gitignore` recommendation, implemented by the orchestrator in `6f1c509`. This should eliminate most import flags for B5/B6.
+
+
+## Batch B5 — T-18..T-21 — COMPLETE, gate green (continuation of a crashed run)
+
+- **Branch:** `feat/v0-evidence-chain`
+- **Code commit:** `c9fbedc` — `feat(verification): B5 independent verifier, scoring, adversarial suite, and denylist gate` (8 files, +4,414/−150)
+- **Delivery path:** single PR with user-accepted `size:exception`; one work-unit commit for code+tests+fixtures, docs follow-up commit.
+- **Continuation context:** a previous B5 agent crashed on a connection error leaving UNCOMMITTED work: `verification/{verifier,invariants,scoring}.py` + three modified test files, gate green at 302, no B5 progress section. This run assessed, kept, fixed, and completed that work — nothing was blindly redone.
+
+### Test gate (REQ-08)
+
+- Command: `python3 -m unittest discover -s tests -v` (Python 3.14.5)
+- Final result: **Ran 310 tests — OK — 310 pass / 0 failures / 0 errors, exit 0.** (B4 baseline 271 → 310: +39)
+- Per-module counts: test_golden_trace 45, test_invariants 86, test_runtime_boundaries 56, test_faults 35, test_rerun_replay 13, test_transitions 46, test_adversarial_verifier 21, test_verifier_dependencies 8.
+
+### Continuation findings (what existed vs what this run completed)
+
+- **Kept as-is (crashed run, verified sound):** `invariants.py` (independent shapes + `independently_apply` REQ-04 semantics), `scoring.py` (integer floor score), `verifier.py` phases 0–7/9/10 (task/config identity, logical-id agreement, trace chain re-derivation, op-log validation, fault-tape two-stage agreement, reconstruction walk with boundary proofs, replay/receipt bindings, trace cross-checks, classification), and the T-18/T-19 tests (reconstruction, scoring table, violation contract).
+- **Gaps found and closed this run (the crashed verifier had three real holes):**
+  1. `score_mismatch` was documented in the module docstring but NEVER emitted — a forged receipt claiming `verified_score=100` on evidence scoring 20 passed silently. Fixed with phase 8.5 `_check_receipt_claims` (receipt score vs independently recomputed score → `score_mismatch`; receipt outcome vs independent classification → `artifact_mismatch`).
+  2. The reconstructed final state was never compared to `final_state.json` — swapping `final_state.json` AND reforging `run_finished.state_after` (re-chained) slipped through every other binding. Fixed with phase 6.5: reconstruction digest vs final_state.json digest → `artifact_mismatch` (trace-versus-final mismatch).
+  3. Receipt `outcome` was only enum-checked, never compared to the classification (self-reported success vector). Fixed in the same phase 8.5 check.
+- **Missing deliverables created this run:** `tests/fixtures/adversarial_artifacts.json` (T-21: ten frozen named reward-hacking cases with contracted valid/outcome/codes), `TestNamedRewardHackingFixtures` (canonical-bytes gate on the fixture + per-case contract assertions + forged-score-never-official), the synthetic denylist fail-closed test, and the T-20 end-to-end release-gate tests on a REAL recorded formula run.
+
+### TDD / verification evidence (continuation run)
+
+| Task | Evidence (observed this run) |
+|------|------------------------------|
+| T-18 | Reconstruction suite green (legal prefix verifies honestly: 1/5 orders, score 20, no violations; deterministic re-verify; frozen result); mappings-only inputs (`TypeError` on non-VerificationArtifacts); AST denylist fail-closed incl. NEW synthetic forbidden-import tests (runtime.tool_bay, runtime.scoring, policies.greedy, domain.transition, evidence.trace, runtime.runner each flagged by name; allowlist set clean). |
+| T-19 | Score table + raw numerator/denominator + integer-only + float/bool rejection green; violation objects exactly `{code, location, detail}` sorted by the three fields, matching `verifier_violation_schema.json` (enum-locked); NEW: `score_mismatch` proven emitted (partial-credit fixture: 60 claimed vs 20 recomputed) and forged scores never official (`verified_score is None` on invalid evidence). |
+| T-20 | NEW end-to-end release gate on a REAL seed-18 formula run (greedy, tape at step 8/place-order-00, faulted delivery, completes all 5 orders): `load_verification_artifacts` → verify → valid/completed/100 → `ReceiptWriter.write_final` releases the receipt with the exact `verification` block (status valid, post-verification auxiliary `verification_finished` record) → persist `receipt.json` canonically → re-verify bindings green (the B6 CLI composition order, proven). Missing `boundaries/` → invalid/`unresolved_outcome`/no score + `commit_boundary_unproven` + `ReceiptNotReleasedError` (an artifact lacking commit proof cannot be labeled completed). Non-canonical artifact bytes rejected at load. |
+| T-21 | `adversarial_artifacts.json` frozen canonical; ten named vectors each produce their contracted result: self_reported_success (invalid, score_mismatch+artifact_mismatch), duplicate_reward_key_reuse (valid duplicate_effect, operation_key_conflict+order_already_completed), teleport_illegal_transition (invalid, robot_not_at_shelf), trace_final_mismatch (invalid, artifact_mismatch), budget_bypass (invalid, artifact_mismatch), unauthorized_effect (invalid, missing_grant), seed_config_substitution (invalid, artifact_mismatch), idempotency_failure (invalid, artifact_mismatch), artifact_substitution (invalid, artifact_mismatch), partial_credit_gaming (invalid, score_mismatch). No runtime object is ever constructed (mappings + the pure apply() oracle on the TEST side only). |
+
+Triangulation catch during the continuation: the fixture-driven duplicate-reward builder initially minted a NEW step-9 key — the verifier correctly saw a fresh illegal commit (5 counter violations) instead of a same-key duplicate; fixed by resubmitting the STORED key (real broken-ledger shape). Also caught: the first end-to-end draft used a hand-built task and the verifier correctly rejected it (`task.json does not match the frozen REQ-01 formulas`) — the test was corrected to the real formula run, the verifier was already right.
+
+### Completed tasks
+
+- **T-18 done** — `verification/invariants.py` (re-declared locked shapes, canonical trace digest, `independently_apply`) + `verification/verifier.py` (artifact-only `Verifier.verify` over `VerificationArtifacts` mappings; imports restricted to contracts.outcomes, evidence.canonical, domain.task, siblings — AST-enforced). Done-check verified: mappings only; no runtime/policies/domain.transition/runtime-scoring imports (fail-closed, synthetically proven).
+- **T-19 done** — `verification/scoring.py` (`floor(100*completed/total)`, raw counts retained, floats/bools rejected) + structured sorted violations; NEW receipt-claim checks make `score_mismatch` real. Done-check verified: only the verifier creates the verified score; the receipt candidate is scoreless; violation serialization matches the locked fixture.
+- **T-20 done** — release gate completed: bindings + reconstruction + classification + receipt claims all pass before `ReceiptWriter.write_final` releases; ambiguity (missing/unprovable boundary) is never upgraded; duplicate effects classify `duplicate_effect`; `unresolved_outcome` carries no score. Done-check verified end-to-end on real artifacts.
+- **T-21 done** — frozen named fixtures + full adversarial suite + denylist gate (real-source scans AND synthetic fail-closed proof). Done-check verified: every mandatory adversarial case yields a deterministic violation; the dependency test fails closed.
+
+### Files changed (8, +4,414/−150)
+
+- New: `robot_factory_arena/verification/{verifier,invariants,scoring}.py`, `tests/fixtures/adversarial_artifacts.json`
+- Tests: `tests/test_adversarial_verifier.py` (+1,143 net incl. the fixture suite), `tests/test_invariants.py` (+599 net: scoring + violation contract), `tests/test_verifier_dependencies.py` (+317 net: allowlist/denylist + forged-no-runtime + synthetic fail-closed), `tests/test_faults.py` (+118 net: T-20 release-gate class)
+- Untouched: `runtime/`, `evidence/`, `policies/`, `domain/`, `contracts/`, `cli.py` (does not exist yet), README — B4 artifacts required zero changes; the verifier consumed them as-is.
+
+### Deviations / interpretations (documented in code docstrings)
+
+1. **Phase ordering inside `verify`**: receipt bindings (phase 7) run before classification (phase 8) and receipt-claim checks (phase 8.5) before trace cross-checks (phase 9) — the receipt score/outcome comparison needs the classification, and the final-state comparison needs the walk. All findings accumulate into one fail-closed result regardless of order.
+2. **`final_digest` added to the `_walk` result**: the reconstruction's final state digest is returned for the phase 6.5 binding check; a duplicate-commit chain stop leaves the last good state, so duplicate_effect evidence still binds cleanly.
+3. **Grant cross-check source**: `config.grants` is authoritative; the optional `VerificationArtifacts.grants` field exists for callers that want to assert a second declaration; receipt grants are cross-checked against both when a receipt is present.
+4. **Payload-key expectations** in the verifier match the B4 recorder exactly (proven end-to-end this batch): run_started {budget,grants,policy_digest,policy_id}, observation_emitted {observation_digest}, tool_committed {status}, tool_rejected/retry {reason,status}, fault_injected {fault_id}, run_finished {counters,outcome}, domain events {data}; policy_decision payloads are unchecked (candidate shape is runtime-side).
+5. The locked schemas were NOT changed. `verifier_violation_schema.json` was already correct (its enum already contained `score_mismatch`); the crashed implementation simply never emitted it.
+
+### Workload / PR boundary
+
+Single PR, `size:exception` accepted (session decision). B5 = 4,564 net changed lines in one work-unit commit (cumulative branch ≈ B1 2,526 + B2 2,150 + B3 2,394 + B4 3,455 + B5 4,564 + docs). Review order suggestion: invariants (independent semantics) → verifier phases (identity → chain → walk → bindings → claims → classification) → scoring → adversarial fixtures file + suite → denylist gate → T-20 end-to-end release test.
+
+### Notes for B6 (verified-run flow — what CLI/report must call)
+
+- **The verified-run composition order (proven by `TestVerifierReleaseGate`)**: run via `Runner(evidence=RunEvidenceRecorder(...).callback_map())` → `recorder.close()` → `verification = Verifier().verify(load_verification_artifacts(recorder.directory))` → `receipt = ReceiptWriter.write_final(recorder.receipt_candidate, verification)` (raises `ReceiptNotReleasedError` when invalid) → persist `receipt.json` with `canonical_json_bytes(receipt)` → optionally re-verify with the receipt present (must stay valid). `robot_factory_arena.verification.verifier.load_verification_artifacts(directory)` is the one-call composition for CLI/report.
+- **Report should render the VerificationResult**, not the receipt's claims: `verification.{valid, outcome, verified_score, completed_count, total_count, violations, verifier_version}`; the released receipt's `verification` block mirrors these (status is always `"valid"` for a released receipt).
+- **Golden-run expectation reminder**: full greedy/bounded runs on seeds 17/29 are `safe_abort` (190 steps needed); the completion demonstrator is **seed 18** (92 greedy steps, faulted first delivery at step 8 → `completed`, score 100). T-24 freezes seed-17 public evidence per AMEND-01's entry list; the verifier classifies `safe_abort` runs validly with the `budget_exhausted` record required.
+- `Verifier.verify` requires a `VerificationArtifacts` instance (TypeError otherwise) and `load_verification_artifacts` enforces canonical bytes on every declared file — CLI error paths should surface those ValueErrors verbatim.
+- `boundaries/` files are storage-only (digest-excluded); deleting them flips a completed run to `unresolved_outcome` — the CLI must not treat `boundaries/` as optional when copying run directories.
+
+### Remaining tasks (unchecked)
+
+- [ ] T-22 Render the dependency-free static report and honesty boundary
+- [ ] T-23 Implement CLI run, rerun, and replay commands
+- [ ] T-24 Freeze complete golden run evidence for public seed 17
+- [ ] T-25 Add evaluation-seed plumbing, rerun equality, and final v0 gate
+
+### Structured status / environment notes
+
+- Consumed non-authoritative SDD status (artifact store: `engram`); readiness resolved from the materialized `docs/sdd/{tasks,spec,design}.md` files; B4 handoff constraints honored as hard inputs (denylist scope, forged-artifact discipline, receipt `verification` block shape, `VerificationArtifacts` composition, boundary-proof shape, tamper-vector map).
+- **Session incident (edit tooling):** the file-edit tool corrupted indentation twice while inserting into `verifier.py` (a racing formatter hook stripped leading whitespace); repaired deterministically via scripted rewrites validated by `py_compile` + the full gate. Subsequent edits were made via scripts. Also one automated ruff pass raced a manual `setattr` fix on the frozen-probe test and was re-applied.
+- pi-lens: recurring documented false positives (repo-root import resolution; `spawn python ENOENT` — its runner invokes `python`, REQ-08 locks `python3`; pyright flags on intentional negative tests inside `assertRaises` and frozen-dataclass mutation probes — pre-existing B3-era patterns, accepted through B1–B4). No NEW flagged lines were introduced by B5 code. Authoritative verification remains the documented unittest command (310 green).
+- Engram remains the authoritative artifact store; this file is the session-authoritative progress record per batch instruction. T-18..T-21 completion is recorded here and (best effort) in the Engram apply-progress observation; the materialized `docs/sdd/tasks.md` is outside this phase's allowed edit surfaces, so the orchestrator should mark T-18..T-21 `[x]` there or in the Engram tasks observation.
