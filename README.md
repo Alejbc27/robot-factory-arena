@@ -84,7 +84,7 @@ Four signals per run, each 0–100, **reported separately — never collapsed in
 | **1. MVP core** | Seeded task, world, tool bay, baseline, budgets, verifier, trace/replay, report. | Deterministic reruns; verifier rejects a plausible cheat; budget breach kills a run; replay reproduces trace + score. |
 | **2. Robustness** | Fault tapes, safe-abort classification, recovery. | Fault outcomes classified (safe-abort / unresolved); recovery replay-equivalent. |
 | **3. Arena conditions** | R1 human-in-the-loop, R2 autonomous, R3 swarm with shared memory; seeded leaderboard. | Same tasks/seeds/budgets across conditions; multi-signal comparison report. |
-| **4. Real providers & observability** | LangGraph assembly line, self-hosted Langfuse tracing, multi-provider fallback, real cost ledger. | Live runs traced; hard € ceilings enforced; provider keys never in traces. |
+| **4. Real providers & observability** | LangGraph outer harness (coordinates attempts, not robot moves), self-hosted Langfuse tracing, one pinned provider+model per run (no silent fallback), real cost ledger. | Live runs traced; hard € ceilings enforced; provider keys never in traces; replay reproduces from recorded calls without any API access. |
 | **5. Analysis & defense** | Final report, receipts, write-up of results and limitations. | Claims match evidence; limitations stated; results reproducible from seeds. |
 
 Phases run through SDD (proposal → spec → design → tasks → apply → verify), one slice at a time.
