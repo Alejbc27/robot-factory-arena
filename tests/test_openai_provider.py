@@ -72,9 +72,9 @@ def _http_error(status, body_bytes, reason="Error"):
 
 
 class TestChatCompletionsRequestPayload(unittest.TestCase):
-    """The Luna Chat Completions envelope pins tool compatibility fields."""
+    """The Chat Completions envelope pins model-specific compatibility fields."""
 
-    def test_function_tools_disable_reasoning_effort_and_preserve_translation(self):
+    def test_luna_gets_reasoning_effort_and_preserves_tool_translation(self):
         stub = _StubTransport()
         provider = OpenAIProvider("gpt-5.6-luna", transport=stub)
         environment = dict(os.environ)
@@ -90,6 +90,17 @@ class TestChatCompletionsRequestPayload(unittest.TestCase):
             payload["tools"],
             [{"type": "function", "function": tool} for tool in TOOL_SCHEMA["tools"]],
         )
+
+    def test_non_luna_does_not_get_reasoning_effort(self):
+        stub = _StubTransport()
+        provider = OpenAIProvider("gpt-test", transport=stub)
+        environment = dict(os.environ)
+        environment["OPENAI_API_KEY"] = "sk-unit-payload"
+        with mock.patch.dict(os.environ, environment, clear=True):
+            provider.invoke(_request())
+
+        self.assertEqual(len(stub.calls), 1)
+        self.assertNotIn("reasoning_effort", stub.calls[0]["payload"])
 
 
 class TestHTTPErrorDiagnosticsViaInjectableTransport(unittest.TestCase):

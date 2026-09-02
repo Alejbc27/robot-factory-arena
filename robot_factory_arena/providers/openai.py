@@ -183,8 +183,9 @@ class OpenAIProvider:
                 for tool in request.tool_schema.get("tools", [])
             ],
             "parallel_tool_calls": False,
-            "reasoning_effort": "none",
         }
+        if request.model == "gpt-5.6-luna":
+            payload["reasoning_effort"] = "none"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",  # header only, never stored
