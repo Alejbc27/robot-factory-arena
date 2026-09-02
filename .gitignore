@@ -4,3 +4,10 @@
 # Local Pi and CodeGraph runtime state
 .pi/
 .codegraph/
+
+# macOS
+.DS_Store
+
+# Python bytecode
+__pycache__/
+*.pyc
