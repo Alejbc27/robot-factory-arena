@@ -35,11 +35,13 @@ B4 artifacts plus ``receipt.json``, ``replay-result.json``, and
 ``report.html``; the ``boundaries/`` commit-proof files are part of the run
 evidence and are never optional (REQ-05, REQ-09).
 """
+
 import argparse
 import json
 import re
 import sys
 import uuid
+from decimal import Decimal
 from pathlib import Path
 
 from robot_factory_arena.contracts.policy import policy_manifest_digest
@@ -79,6 +81,9 @@ BUDGET = 100
 RECEIPT_NAME = "receipt.json"
 REPLAY_RESULT_NAME = "replay-result.json"
 REPORT_NAME = "report.html"
+_LLM_PRICING_USD_PER_MILLION = {
+    "gpt-5.6-luna": (Decimal("0.20"), Decimal("1.20")),
+}
 
 _SEED_RE = re.compile(r"(0|[1-9][0-9]*)")
 
@@ -199,13 +204,12 @@ def _write_llm_sidecars(directory, logical_run_id, execution_id, policy):
     provider_run = _read_json(directory / "llm" / "provider-run.json")
     core_receipt = _read_json(directory / RECEIPT_NAME)
     appendix = render_llm_report(core_receipt, llm_receipt, provider_run)
-    atomic_write_bytes(
-        directory / "llm" / "llm-report.html", appendix.encode("utf-8")
-    )
+    atomic_write_bytes(directory / "llm" / "llm-report.html", appendix.encode("utf-8"))
 
 
-def _execute_run(artifacts_root, seed, policy_id, execution_id, fault_step,
-                 fault_intent, llm=None):
+def _execute_run(
+    artifacts_root, seed, policy_id, execution_id, fault_step, fault_intent, llm=None
+):
     """The verified-run composition (B5-proven order); returns (code, receipt,
     verification, directory). ``llm`` is None or (provider, model, script)."""
     task = generate_task(seed)
@@ -229,8 +233,14 @@ def _execute_run(artifacts_root, seed, policy_id, execution_id, fault_step,
             FaultTarget(fault_step, fault_intent),
         )
     config = RunConfig(
-        1, task.task_version, task.seed, policy_id,
-        policy_digest, BUDGET, GRANTS, fault_spec,
+        1,
+        task.task_version,
+        task.seed,
+        policy_id,
+        policy_digest,
+        BUDGET,
+        GRANTS,
+        fault_spec,
     )
     logical_run_id = compute_logical_run_id(task, config)
     recorder = RunEvidenceRecorder(
@@ -241,9 +251,7 @@ def _execute_run(artifacts_root, seed, policy_id, execution_id, fault_step,
     recorder.close()
     del result  # the verifier's classification is authoritative (REQ-06)
 
-    verification = Verifier().verify(
-        load_verification_artifacts(recorder.directory)
-    )
+    verification = Verifier().verify(load_verification_artifacts(recorder.directory))
     if not verification.valid:
         print("verification: INVALID — no receipt released (REQ-06)")
         for violation in verification.violations:
@@ -254,9 +262,7 @@ def _execute_run(artifacts_root, seed, policy_id, execution_id, fault_step,
         return 1, None, verification, recorder.directory
 
     receipt = ReceiptWriter.write_final(recorder.receipt_candidate, verification)
-    atomic_write_bytes(
-        recorder.directory / RECEIPT_NAME, canonical_json_bytes(receipt)
-    )
+    atomic_write_bytes(recorder.directory / RECEIPT_NAME, canonical_json_bytes(receipt))
     replayed = replay(
         _read_json(recorder.directory / "replay-input.json"), receipt=receipt
     )
@@ -267,15 +273,15 @@ def _execute_run(artifacts_root, seed, policy_id, execution_id, fault_step,
     report_html = render_report(
         receipt, verification, collect_artifact_digests(recorder.directory)
     )
-    atomic_write_bytes(
-        recorder.directory / REPORT_NAME, report_html.encode("utf-8")
-    )
+    atomic_write_bytes(recorder.directory / REPORT_NAME, report_html.encode("utf-8"))
 
     if llm is not None:
         try:
             _write_llm_sidecars(
-                recorder.directory, receipt["logical_run_id"],
-                execution_id, policy,
+                recorder.directory,
+                receipt["logical_run_id"],
+                execution_id,
+                policy,
             )
         except Exception as error:
             from robot_factory_arena.providers.evidence import (
@@ -292,19 +298,57 @@ def _execute_run(artifacts_root, seed, policy_id, execution_id, fault_step,
             return 1, None, verification, recorder.directory
 
     # Binding re-verification with receipt.json present (T-20-proven order).
-    recheck = Verifier().verify(
-        load_verification_artifacts(recorder.directory)
-    )
+    recheck = Verifier().verify(load_verification_artifacts(recorder.directory))
     if not recheck.valid:
         print(
             "error: the released receipt failed binding re-verification",
             file=sys.stderr,
         )
         for violation in recheck.violations:
-            print(f"  violation: {violation.code} at {violation.location}",
-                  file=sys.stderr)
+            print(
+                f"  violation: {violation.code} at {violation.location}",
+                file=sys.stderr,
+            )
         return 1, None, verification, recorder.directory
     return 0, receipt, verification, recorder.directory
+
+
+def _aggregate_llm_usage(provider_run: dict):
+    """Sum scrubbed per-decision usage without exposing request payloads."""
+    requests = provider_run.get("requests", [])
+    totals = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+    }
+    for request in requests:
+        usage = request.get("usage", {})
+        for name in totals:
+            totals[name] += usage.get(name, 0) or 0
+    model = requests[0].get("model") if requests else None
+    return totals, model
+
+
+def _report_llm_usage(directory):
+    """Print token totals and a clearly labeled projected USD cost."""
+    provider_run = _read_json(Path(directory) / "llm" / "provider-run.json")
+    totals, model = _aggregate_llm_usage(provider_run)
+    print(
+        "llm_usage: "
+        f"input_tokens={totals['input_tokens']} "
+        f"output_tokens={totals['output_tokens']} "
+        f"total_tokens={totals['total_tokens']}"
+    )
+    prices = _LLM_PRICING_USD_PER_MILLION.get(model) if isinstance(model, str) else None
+    if prices is None:
+        print(f"llm_estimated_cost_usd: unavailable (no pricing for {model})")
+        return
+    input_price, output_price = prices
+    cost = (
+        Decimal(totals["input_tokens"]) * input_price
+        + Decimal(totals["output_tokens"]) * output_price
+    ) / Decimal(1_000_000)
+    print(f"llm_estimated_cost_usd: {cost:.4f}")
 
 
 def _deterministic_mismatches(dir_a: Path, dir_b: Path):
@@ -332,7 +376,8 @@ def _compare_with_prior_runs(artifacts_root, logical_run_id, execution_id):
     priors = []
     if logical_dir.is_dir():
         priors = sorted(
-            path for path in logical_dir.iterdir()
+            path
+            for path in logical_dir.iterdir()
             if path.is_dir() and path.name != execution_id
         )
     if not priors:
@@ -340,9 +385,7 @@ def _compare_with_prior_runs(artifacts_root, logical_run_id, execution_id):
         return 0
     agreed = True
     for prior in priors:
-        mismatches = _deterministic_mismatches(
-            logical_dir / execution_id, prior
-        )
+        mismatches = _deterministic_mismatches(logical_dir / execution_id, prior)
         if mismatches:
             agreed = False
             print(f"deterministic agreement vs {prior.name}: false")
@@ -362,9 +405,7 @@ def _load_script(path: Path):
     try:
         entries = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        raise ValueError(
-            f"cannot read provider script {path}: {error}"
-        ) from error
+        raise ValueError(f"cannot read provider script {path}: {error}") from error
     if not isinstance(entries, list) or not entries:
         raise ValueError("provider script must be a non-empty JSON array")
     return [result_from_mapping(entry) for entry in entries]
@@ -377,9 +418,7 @@ def _validate_llm_args(args) -> int | None:
     script = getattr(args, "script", None)
     if provider is None:
         if model is not None or script is not None:
-            print(
-                "error: --model/--script require --provider", file=sys.stderr
-            )
+            print("error: --model/--script require --provider", file=sys.stderr)
             return 2
         return None
     if model is None:
@@ -416,8 +455,13 @@ def _run_and_report(args, rerun: bool) -> int:
     execution_id = args.execution_id or f"execution-{uuid.uuid4().hex}"
     verb = "rerun" if rerun else "run"
     code, receipt, verification, directory = _execute_run(
-        args.artifacts_root, args.seed, args.policy, execution_id,
-        args.fault_step, args.fault_intent, llm=llm,
+        args.artifacts_root,
+        args.seed,
+        args.policy,
+        execution_id,
+        args.fault_step,
+        args.fault_intent,
+        llm=llm,
     )
     if code != 0 or receipt is None:
         return code
@@ -431,6 +475,7 @@ def _run_and_report(args, rerun: bool) -> int:
     print(f"report: {directory / REPORT_NAME}")
     if llm is not None:
         print(f"llm_report: {directory / 'llm' / 'llm-report.html'}")
+        _report_llm_usage(directory)
     if rerun:
         return _compare_with_prior_runs(
             args.artifacts_root, receipt["logical_run_id"], execution_id
@@ -460,9 +505,7 @@ def _cmd_replay(args) -> int:
                 file=sys.stderr,
             )
             return 2
-    replayed = replay(
-        _read_json(replay_input_path), receipt=_read_json(receipt_path)
-    )
+    replayed = replay(_read_json(replay_input_path), receipt=_read_json(receipt_path))
     print(f"replay: {directory}")
     print(f"final_state_digest: {replayed.final_state_digest}")
     print(f"verified_score: {replayed.receipt_verified_score}")
@@ -508,39 +551,52 @@ def _fault_step_arg(value: str) -> int:
 
 def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--seed", required=True, type=_seed_arg,
+        "--seed",
+        required=True,
+        type=_seed_arg,
         help="non-negative decimal task seed",
     )
     parser.add_argument(
-        "--policy", default="greedy-v0", choices=POLICY_CHOICES,
+        "--policy",
+        default="greedy-v0",
+        choices=POLICY_CHOICES,
         help="reference policy (default: greedy-v0)",
     )
     parser.add_argument(
-        "--artifacts-root", default="artifacts",
+        "--artifacts-root",
+        default="artifacts",
         help="artifact store root (default: artifacts)",
     )
     parser.add_argument(
-        "--execution-id", default=None,
+        "--execution-id",
+        default=None,
         help="physical execution id (default: execution-<uuid4>)",
     )
     parser.add_argument(
-        "--fault-step", type=_fault_step_arg, default=None,
+        "--fault-step",
+        type=_fault_step_arg,
+        default=None,
         help="predeclared delivery policy step of the v0 response-loss tape",
     )
     parser.add_argument(
-        "--fault-intent", default=None,
+        "--fault-intent",
+        default=None,
         help="predeclared intent token, e.g. place-order-00",
     )
     parser.add_argument(
-        "--provider", default=None, choices=("fake", "openai"),
+        "--provider",
+        default=None,
+        choices=("fake", "openai"),
         help="LLM provider policy (default: the selected reference policy)",
     )
     parser.add_argument(
-        "--model", default=None,
+        "--model",
+        default=None,
         help="pinned model name (required with --provider)",
     )
     parser.add_argument(
-        "--script", default=None,
+        "--script",
+        default=None,
         help=(
             "canonical JSON array of ProviderResult envelopes "
             "(required with --provider fake)"
@@ -552,8 +608,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python3 -m robot_factory_arena.cli",
         description=(
-            "Robot Factory & Arena v0: deterministic warehouse "
-            "evidence-chain runs."
+            "Robot Factory & Arena v0: deterministic warehouse evidence-chain runs."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)

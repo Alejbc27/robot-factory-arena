@@ -15,6 +15,7 @@ entries and ``parallel_tool_calls: false`` is asserted; the model, user
 message (the frozen rendered prompt), and single-call discipline are carried
 unchanged.
 """
+
 import json
 import os
 import time
@@ -106,8 +107,13 @@ def _default_transport(url, headers, payload_bytes, timeout):
 class OpenAIProvider:
     """Pinned live adapter: ``provider='openai'``, one model, one call per ask."""
 
-    def __init__(self, model: str, api_url: str = DEFAULT_API_URL,
-                 transport: Transport | None = None, timeout: float = 60.0):
+    def __init__(
+        self,
+        model: str,
+        api_url: str = DEFAULT_API_URL,
+        transport: Transport | None = None,
+        timeout: float = 60.0,
+    ):
         if not isinstance(model, str) or not model:
             raise TypeError("model must be a non-empty string")
         if not isinstance(api_url, str) or not api_url:
@@ -157,8 +163,10 @@ class OpenAIProvider:
         api_key = os.environ.get(API_KEY_VARIABLE)  # read at call time only
         if not api_key:
             return self._error(
-                request, ERROR_MISSING_KEY,
-                f"{API_KEY_VARIABLE} is not set in the environment", started,
+                request,
+                ERROR_MISSING_KEY,
+                f"{API_KEY_VARIABLE} is not set in the environment",
+                started,
             )
         payload = {
             "model": request.model,
@@ -175,6 +183,7 @@ class OpenAIProvider:
                 for tool in request.tool_schema.get("tools", [])
             ],
             "parallel_tool_calls": False,
+            "reasoning_effort": "none",
         }
         headers = {
             "Content-Type": "application/json",
@@ -182,19 +191,23 @@ class OpenAIProvider:
         }
         try:
             status, body = self._transport(
-                self._api_url, headers,
-                json.dumps(payload).encode("utf-8"), self._timeout,
+                self._api_url,
+                headers,
+                json.dumps(payload).encode("utf-8"),
+                self._timeout,
             )
         except Exception as error:  # transport failures are deterministic
             return self._error(
-                request, ERROR_TRANSPORT,
-                f"transport failure: {type(error).__name__}", started,
+                request,
+                ERROR_TRANSPORT,
+                f"transport failure: {type(error).__name__}",
+                started,
             )
         if status != 200:
             return self._error(
-                request, ERROR_HTTP,
-                f"upstream returned HTTP {status}"
-                f"{_sanitized_http_detail(body)}",
+                request,
+                ERROR_HTTP,
+                f"upstream returned HTTP {status}{_sanitized_http_detail(body)}",
                 started,
             )
         try:
@@ -203,8 +216,10 @@ class OpenAIProvider:
             api_usage = envelope["usage"]
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
-                "response is not a usable chat-completions envelope", started,
+                request,
+                ERROR_INVALID_RESPONSE,
+                "response is not a usable chat-completions envelope",
+                started,
             )
         raw_tokens = (
             api_usage.get("prompt_tokens"),
@@ -215,26 +230,35 @@ class OpenAIProvider:
             for value in raw_tokens
         ):
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
-                "usage counts are missing or not integers", started,
+                request,
+                ERROR_INVALID_RESPONSE,
+                "usage counts are missing or not integers",
+                started,
             )
         usage = Usage(raw_tokens[0], raw_tokens[1], raw_tokens[0] + raw_tokens[1])
         content = message.get("content")
         if content is not None and not isinstance(content, str):
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
-                "message content must be a string or null", started,
+                request,
+                ERROR_INVALID_RESPONSE,
+                "message content must be a string or null",
+                started,
             )
         tool_calls = message.get("tool_calls") or []
         if len(tool_calls) > 1:
             return self._error(
-                request, ERROR_MULTIPLE_TOOL_CALLS,
-                "the model attempted parallel/multiple tool calls", started,
+                request,
+                ERROR_MULTIPLE_TOOL_CALLS,
+                "the model attempted parallel/multiple tool calls",
+                started,
             )
         if not tool_calls:
             return self._error(
-                request, ERROR_NO_TOOL_CALL,
-                "the model answered without a tool call", started, usage
+                request,
+                ERROR_NO_TOOL_CALL,
+                "the model answered without a tool call",
+                started,
+                usage,
             )
         try:
             function = tool_calls[0]["function"]
@@ -242,26 +266,33 @@ class OpenAIProvider:
             arguments_text = function["arguments"]
         except (KeyError, TypeError, IndexError):
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
+                request,
+                ERROR_INVALID_RESPONSE,
                 "tool call is missing its function name or arguments",
                 started,
             )
         if not isinstance(name, str) or not name:
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
-                "tool call name must be a non-empty string", started,
+                request,
+                ERROR_INVALID_RESPONSE,
+                "tool call name must be a non-empty string",
+                started,
             )
         try:
             arguments = json.loads(arguments_text)
         except (ValueError, TypeError):
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
-                "tool call arguments are not valid JSON", started,
+                request,
+                ERROR_INVALID_RESPONSE,
+                "tool call arguments are not valid JSON",
+                started,
             )
         if not isinstance(arguments, dict):
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
-                "tool call arguments must be a JSON object", started,
+                request,
+                ERROR_INVALID_RESPONSE,
+                "tool call arguments must be a JSON object",
+                started,
             )
         latency_ms = (time.monotonic_ns() - started) // 1_000_000
         return ProviderResult(

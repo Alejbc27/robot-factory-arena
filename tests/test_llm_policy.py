@@ -7,9 +7,15 @@ candidates carrying the current-run ``intent-llm-reject`` key for
 malformed_call / unsupported_tool / invalid_arguments without raising and
 without a second repair call.
 """
+
 import hashlib
 import unittest
 
+from robot_factory_arena.contracts.tool_call import (
+    normalize_tool_call,
+    validate_operation_key,
+)
+from robot_factory_arena.evidence.canonical import canonical_json, sha256_digest
 from robot_factory_arena.policies.llm import (
     POLICY_ID,
     PROMPT_TEMPLATE,
@@ -20,12 +26,6 @@ from robot_factory_arena.policies.llm import (
     render_prompt,
     tool_schema_digest,
 )
-
-from robot_factory_arena.contracts.tool_call import (
-    normalize_tool_call,
-    validate_operation_key,
-)
-from robot_factory_arena.evidence.canonical import canonical_json, sha256_digest
 from robot_factory_arena.providers.adapter import ProviderError
 from robot_factory_arena.providers.fake import FakeProvider
 
@@ -43,6 +43,16 @@ FROZEN_PROMPT = (
     "The host will add the operation key and will validate the action. If no legal\n"
     "action is possible, still select the single best action supported by the\n"
     "observation.\n"
+    "\n"
+    "Operating procedure:\n"
+    "Coordinate convention: east x+1, west x-1, north y+1, south y-1.\n"
+    "If carrying an item, find its pending matching order, move one\n"
+    "Manhattan-reducing step toward base_position, then call place only at base.\n"
+    "If empty, select the first pending order in list order, find the shelf with\n"
+    "its item_id, move one Manhattan-reducing step toward that shelf, then call\n"
+    "pick only when at that shelf.\n"
+    "After every action, re-read the current observation and last_result. Do not\n"
+    "repeat a rejected action. Never target completed or non-pending orders/items.\n"
     "\n"
     "Serialized observation:\n"
     "{{observation_json}}\n"
@@ -112,19 +122,39 @@ class TestFrozenPromptTemplate(unittest.TestCase):
         self.assertNotIn("\r", PROMPT_TEMPLATE)
         self.assertTrue(PROMPT_TEMPLATE.endswith("{{observation_json}}\n"))
 
+    def test_operating_procedure_is_present_and_digest_is_deterministic(self):
+        for guidance in (
+            "Coordinate convention: east x+1, west x-1, north y+1, south y-1.",
+            "If carrying an item, find its pending matching order",
+            "Manhattan-reducing step toward base_position",
+            "call place only at base.",
+            "first pending order in list order",
+            "find the shelf with",
+            "its item_id",
+            "pick only when at that shelf.",
+            "After every action, re-read the current observation and last_result.",
+            "Do not\nrepeat a rejected action.",
+            "Never target completed or non-pending orders/items.",
+        ):
+            self.assertIn(guidance, PROMPT_TEMPLATE)
+        first = prompt_template_digest()
+        self.assertEqual(first, prompt_template_digest())
+        self.assertEqual(first, sha256_digest(PROMPT_TEMPLATE.encode("utf-8")))
+
     def test_prompt_template_digest_is_the_sha256_of_the_utf8_bytes(self):
-        expected = "sha256:" + hashlib.sha256(
-            PROMPT_TEMPLATE.encode("utf-8")
-        ).hexdigest()
+        expected = (
+            "sha256:" + hashlib.sha256(PROMPT_TEMPLATE.encode("utf-8")).hexdigest()
+        )
         self.assertEqual(prompt_template_digest(), expected)
         self.assertRegex(prompt_template_digest(), r"sha256:[0-9a-f]{64}")
 
     def test_rendered_prompt_replaces_the_placeholder_with_canonical_json(self):
         observation = _observation(used=2)
         rendered = render_prompt(observation)
-        self.assertEqual(rendered, FROZEN_PROMPT.replace(
-            "{{observation_json}}", canonical_json(observation)
-        ))
+        self.assertEqual(
+            rendered,
+            FROZEN_PROMPT.replace("{{observation_json}}", canonical_json(observation)),
+        )
         self.assertIn('{"grants":["move","pick","place"]', rendered)
         self.assertNotIn("{{observation_json}}", rendered)
 
@@ -139,62 +169,65 @@ class TestFrozenToolSchema(unittest.TestCase):
     """T4A-04: one common JSON tool schema; single-call allowance is exact."""
 
     def test_schema_has_exactly_the_frozen_content(self):
-        self.assertEqual(TOOL_SCHEMA, {
-            "schema_version": 1,
-            "max_tool_calls": 1,
-            "parallel_tool_calls": False,
-            "tools": [
-                {
-                    "name": "move",
-                    "description": "Move one cardinal grid step.",
-                    "parameters": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["direction"],
-                        "properties": {
-                            "direction": {
-                                "type": "string",
-                                "enum": ["north", "east", "south", "west"],
-                            }
-                        },
-                    },
-                },
-                {
-                    "name": "pick",
-                    "description": "Pick the named item from the named shelf.",
-                    "parameters": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["shelf_id", "item_id"],
-                        "properties": {
-                            "shelf_id": {
-                                "type": "string",
-                                "pattern": "^shelf-(0[0-9])$",
-                            },
-                            "item_id": {
-                                "type": "string",
-                                "pattern": "^item-(0[0-9])$",
+        self.assertEqual(
+            TOOL_SCHEMA,
+            {
+                "schema_version": 1,
+                "max_tool_calls": 1,
+                "parallel_tool_calls": False,
+                "tools": [
+                    {
+                        "name": "move",
+                        "description": "Move one cardinal grid step.",
+                        "parameters": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["direction"],
+                            "properties": {
+                                "direction": {
+                                    "type": "string",
+                                    "enum": ["north", "east", "south", "west"],
+                                }
                             },
                         },
                     },
-                },
-                {
-                    "name": "place",
-                    "description": "Place the carried item into the named order.",
-                    "parameters": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["order_id"],
-                        "properties": {
-                            "order_id": {
-                                "type": "string",
-                                "pattern": "^order-(0[0-9])$",
+                    {
+                        "name": "pick",
+                        "description": "Pick the named item from the named shelf.",
+                        "parameters": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["shelf_id", "item_id"],
+                            "properties": {
+                                "shelf_id": {
+                                    "type": "string",
+                                    "pattern": "^shelf-(0[0-9])$",
+                                },
+                                "item_id": {
+                                    "type": "string",
+                                    "pattern": "^item-(0[0-9])$",
+                                },
                             },
                         },
                     },
-                },
-            ],
-        })
+                    {
+                        "name": "place",
+                        "description": "Place the carried item into the named order.",
+                        "parameters": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["order_id"],
+                            "properties": {
+                                "order_id": {
+                                    "type": "string",
+                                    "pattern": "^order-(0[0-9])$",
+                                },
+                            },
+                        },
+                    },
+                ],
+            },
+        )
 
     def test_schema_allows_exactly_one_non_parallel_tool_call(self):
         self.assertEqual(TOOL_SCHEMA["max_tool_calls"], 1)
@@ -202,9 +235,7 @@ class TestFrozenToolSchema(unittest.TestCase):
         self.assertEqual(len(TOOL_SCHEMA["tools"]), 3)
 
     def test_tool_schema_digest_is_the_canonical_json_digest(self):
-        expected = sha256_digest(
-            canonical_json(TOOL_SCHEMA).encode("utf-8")
-        )
+        expected = sha256_digest(canonical_json(TOOL_SCHEMA).encode("utf-8"))
         self.assertEqual(tool_schema_digest(), expected)
         self.assertRegex(tool_schema_digest(), r"sha256:[0-9a-f]{64}")
 
@@ -212,9 +243,15 @@ class TestFrozenToolSchema(unittest.TestCase):
 class TestGoldenDigestVectors(unittest.TestCase):
     """T4A-04: golden digests pin the frozen bytes against any drift."""
 
-    GOLDEN_PROMPT_DIGEST = "sha256:5aa8af30c4992e8c38a00c415066526665670b0daf06b52feb5332235428b6c2"
-    GOLDEN_TOOL_SCHEMA_DIGEST = "sha256:1dfd69cb33d19e6b24f3e9129f0dbd72e7c0fc9cd6df2ae6e76e2fce0b6b42c4"
-    GOLDEN_MANIFEST_DIGEST = "sha256:f90d2f6da4e3181c1edbddbd06a2d0312936803b632b119e58b49d8aa85c3650"
+    GOLDEN_PROMPT_DIGEST = (
+        "sha256:3300463634070efc2d30f915019612a6a99b92a13cc394401a1b9dbcbb831163"
+    )
+    GOLDEN_TOOL_SCHEMA_DIGEST = (
+        "sha256:1dfd69cb33d19e6b24f3e9129f0dbd72e7c0fc9cd6df2ae6e76e2fce0b6b42c4"
+    )
+    GOLDEN_MANIFEST_DIGEST = (
+        "sha256:89fbce88c3b98dcc6ec915a86de8c89b088667b8ef915112b458a19b61eef97c"
+    )
 
     def test_golden_prompt_template_digest(self):
         self.assertEqual(prompt_template_digest(), self.GOLDEN_PROMPT_DIGEST)
@@ -244,9 +281,10 @@ class TestLLMPolicyIdentity(unittest.TestCase):
             "provider": "fake",
             "tool_schema_digest": tool_schema_digest(),
         }
-        self.assertEqual(_policy().policy_digest, sha256_digest(
-            canonical_json(manifest).encode("utf-8")
-        ))
+        self.assertEqual(
+            _policy().policy_digest,
+            sha256_digest(canonical_json(manifest).encode("utf-8")),
+        )
         self.assertEqual(_policy().policy_digest, llm_policy_digest("fake", "fake-v1"))
 
     def test_digest_excludes_everything_but_the_manifest(self):
@@ -267,8 +305,13 @@ class TestLLMPolicyNormalization(unittest.TestCase):
     """T4A-05: one request, one adapter call, exact normalization semantics."""
 
     def test_valid_move_becomes_one_toolcall_with_step_used_plus_one(self):
-        script = [_success({"tool": "move", "arguments": {"direction": "north"}},
-                           "request-3", raw="move north")]
+        script = [
+            _success(
+                {"tool": "move", "arguments": {"direction": "north"}},
+                "request-3",
+                raw="move north",
+            )
+        ]
         candidate = _policy(*script).decide(_observation(used=2))
         parse = normalize_tool_call(candidate)
         self.assertTrue(parse.ok)
@@ -284,11 +327,17 @@ class TestLLMPolicyNormalization(unittest.TestCase):
         self.assertTrue(validate_operation_key(call.operation_key, LOGICAL_RUN_ID))
 
     def test_valid_pick_and_place_intents_follow_the_frozen_labels(self):
-        pick_parse = normalize_tool_call(_policy(_success(
-            {"tool": "pick",
-             "arguments": {"shelf_id": "shelf-03", "item_id": "item-04"}},
-            "request-3",
-        )).decide(_observation(used=2)))
+        pick_parse = normalize_tool_call(
+            _policy(
+                _success(
+                    {
+                        "tool": "pick",
+                        "arguments": {"shelf_id": "shelf-03", "item_id": "item-04"},
+                    },
+                    "request-3",
+                )
+            ).decide(_observation(used=2))
+        )
         self.assertTrue(pick_parse.ok)
         pick = pick_parse.tool_call
         assert pick is not None
@@ -299,10 +348,14 @@ class TestLLMPolicyNormalization(unittest.TestCase):
         self.assertEqual(
             dict(pick.arguments), {"shelf_id": "shelf-03", "item_id": "item-04"}
         )
-        place_parse = normalize_tool_call(_policy(_success(
-            {"tool": "place", "arguments": {"order_id": "order-03"}},
-            "request-4",
-        )).decide(_observation(used=3)))
+        place_parse = normalize_tool_call(
+            _policy(
+                _success(
+                    {"tool": "place", "arguments": {"order_id": "order-03"}},
+                    "request-4",
+                )
+            ).decide(_observation(used=3))
+        )
         self.assertTrue(place_parse.ok)
         place = place_parse.tool_call
         assert place is not None
@@ -314,9 +367,9 @@ class TestLLMPolicyNormalization(unittest.TestCase):
 
     def test_request_preserves_the_observation_and_frozen_prompt_schema(self):
         observation = _observation(used=2)
-        policy = _policy(_success(
-            {"tool": "move", "arguments": {"direction": "north"}}, "request-3"
-        ))
+        policy = _policy(
+            _success({"tool": "move", "arguments": {"direction": "north"}}, "request-3")
+        )
         policy.decide(observation)
         sent = policy._adapter.requests[0]
         self.assertEqual(sent.observation, observation)
@@ -346,45 +399,47 @@ class TestLLMPolicyNormalization(unittest.TestCase):
             [_error_result("no_tool_call", "prose", "request-8")], used=7
         )
         self.assertEqual(reason, "malformed_call")
-        self.assertEqual(
-            key, f"op/{LOGICAL_RUN_ID}/step-8/intent-llm-reject"
-        )
+        self.assertEqual(key, f"op/{LOGICAL_RUN_ID}/step-8/intent-llm-reject")
 
     def test_absent_tool_call_via_error_rejects_deterministically(self):
         reason, key, _ = self._rejection_reason(
             [_error_result("transport_error", "down", "request-3")]
         )
         self.assertEqual(reason, "malformed_call")
-        self.assertEqual(
-            key, f"op/{LOGICAL_RUN_ID}/step-3/intent-llm-reject"
-        )
+        self.assertEqual(key, f"op/{LOGICAL_RUN_ID}/step-3/intent-llm-reject")
 
     def test_unsupported_tool_name_becomes_unsupported_tool(self):
         reason, key, candidate = self._rejection_reason(
             [_success({"tool": "assemble", "arguments": {}}, "request-3")]
         )
         self.assertEqual(reason, "unsupported_tool")
-        self.assertEqual(
-            key, f"op/{LOGICAL_RUN_ID}/step-3/intent-llm-reject"
-        )
+        self.assertEqual(key, f"op/{LOGICAL_RUN_ID}/step-3/intent-llm-reject")
         self.assertNotIn("assemble", repr(candidate["arguments"]))
 
     def test_wrong_argument_keys_or_values_become_invalid_arguments(self):
         reason, key, _ = self._rejection_reason(
-            [_success({"tool": "move", "arguments": {"direction": "up"}},
-                      "request-3")]
+            [_success({"tool": "move", "arguments": {"direction": "up"}}, "request-3")]
         )
         self.assertEqual(reason, "invalid_arguments")
         reason, key, _ = self._rejection_reason(
-            [_success({"tool": "pick",
-                       "arguments": {"shelf_id": "shelf-3", "item_id": "item-04"}},
-                      "request-3")]
+            [
+                _success(
+                    {
+                        "tool": "pick",
+                        "arguments": {"shelf_id": "shelf-3", "item_id": "item-04"},
+                    },
+                    "request-3",
+                )
+            ]
         )
         self.assertEqual(reason, "invalid_arguments")
         reason, key, _ = self._rejection_reason(
-            [_success({"tool": "move",
-                       "arguments": {"direction": "north", "extra": 1}},
-                      "request-3")]
+            [
+                _success(
+                    {"tool": "move", "arguments": {"direction": "north", "extra": 1}},
+                    "request-3",
+                )
+            ]
         )
         self.assertEqual(reason, "invalid_arguments")
 
@@ -413,15 +468,16 @@ class TestLLMPolicyNormalization(unittest.TestCase):
             key: (dict(value) if isinstance(value, dict) else value)
             for key, value in observation.items()
         }
-        _policy(_success(
-            {"tool": "move", "arguments": {"direction": "north"}}, "request-3"
-        )).decide(observation)
+        _policy(
+            _success({"tool": "move", "arguments": {"direction": "north"}}, "request-3")
+        ).decide(observation)
         self.assertEqual(observation, frozen)
 
     def test_decisions_are_logged_in_order_for_external_evidence(self):
         policy = _policy(
-            _success({"tool": "move", "arguments": {"direction": "north"}},
-                     "request-1"),
+            _success(
+                {"tool": "move", "arguments": {"direction": "north"}}, "request-1"
+            ),
             _error_result("no_tool_call", "prose", "request-2"),
         )
         policy.decide(_observation(used=0))
