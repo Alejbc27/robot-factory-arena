@@ -324,11 +324,11 @@ def _codes(result):
     return sorted(violation.code for violation in result.violations)
 
 
-class TestModuleDiscovered(unittest.TestCase):
-    """T-01 placeholder kept for discovery; real suites live above."""
-
-    def test_module_is_discovered(self):
-        self.assertIsNotNone(__doc__)
+def _probe_mutate(value, attribute, replacement):
+    """Deliberately type-violating probe (repo convention): the attribute
+    write must raise at runtime; the untyped helper keeps the tree
+    checker-clean (documented pyright false positive otherwise)."""
+    setattr(value, attribute, replacement)
 
 
 class TestIndependentReconstruction(unittest.TestCase):
@@ -354,7 +354,7 @@ class TestIndependentReconstruction(unittest.TestCase):
         from dataclasses import FrozenInstanceError
 
         with self.assertRaises(FrozenInstanceError):
-            self.result.valid = False  # frozen probe: must raise
+            _probe_mutate(self.result, "valid", False)
 
     def test_reconstruction_is_deterministic(self):
         again = Verifier().verify(_artifacts(_base_set()))

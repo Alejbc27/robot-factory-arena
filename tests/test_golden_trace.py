@@ -983,6 +983,31 @@ class TestStaticReportRendering(unittest.TestCase):
         self.assertIn("5 / 10", html)  # completed / total orders
         self.assertIn("safe_abort", html)  # outcome (from verification)
 
+    def test_report_derives_actions_per_delivery_from_completed_deliveries(self):
+        # W-01 regression guard: committed_effects counts EVERY successful
+        # move/pick/place, not deliveries. The stale attempts/effects ratio
+        # and its mislabel must never reappear in the report.
+        html = self._render()
+        self.assertNotIn(
+            "100/92", html,
+            "committed_effects is not a delivery denominator (W-01)",
+        )
+        self.assertNotIn(
+            "tool attempts / committed effects", html,
+            "the W-01 mislabel must stay retired",
+        )
+
+    def test_report_shows_na_actions_per_delivery_without_deliveries(self):
+        # Zero completed deliveries have no per-delivery ratio even when
+        # committed world effects exist: the denominator is DELIVERIES.
+        html = self._render(verification=self._verification(completed_count=0))
+        self.assertIn(
+            "Actions per delivery (tool attempts / completed deliveries):"
+            " n/a (no completed deliveries)",
+            html,
+            "zero deliveries must render the explicit n/a message",
+        )
+
     def test_report_renders_the_verification_not_receipt_claims(self):
         # The receipt mapping deliberately carries DRIFTED claims; the report
         # must show the verifier's score/outcome only.
@@ -1066,8 +1091,15 @@ class TestStaticReportRendering(unittest.TestCase):
         self.assertNotIn("golden-17", first)
 
     def test_report_shows_exact_actions_per_delivery_ratio(self):
-        html = self._render()  # 100 tool attempts / 92 committed effects
-        self.assertIn("100/92", html)
+        # W-01 remediation: actions per delivery = tool attempts divided by
+        # the verifier's completed deliveries (5), not committed effects (92).
+        html = self._render()  # 100 tool attempts / 5 completed deliveries
+        self.assertIn(
+            "Actions per delivery (tool attempts / completed deliveries):"
+            " 100/5",
+            html,
+            "actions per delivery must be tool_attempts / completed_count",
+        )
         empty = self._render(
             self._verification(
                 verified_score=0,
@@ -1079,7 +1111,7 @@ class TestStaticReportRendering(unittest.TestCase):
                 "contract_violations": 0, "terminal_checks": 101,
             }},
         )
-        self.assertIn("n/a", empty)
+        self.assertIn("n/a (no completed deliveries)", empty)
 
 
 # ---------------------------------------------------------------------------

@@ -81,13 +81,6 @@ def _read(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-class TestModuleDiscovered(unittest.TestCase):
-    """T-01 placeholder kept for discovery; real suites live above."""
-
-    def test_module_is_discovered(self):
-        self.assertIsNotNone(__doc__)
-
-
 class TestReplayInputSchema(unittest.TestCase):
     """The locked ReplayInput schema is enforced, not inferred."""
 

@@ -100,7 +100,7 @@ contents never depend on it (REQ-07).</p>
 <p>Policy steps used: $policy_steps / $budget</p>
 <p>Tool attempts (including internal retries): $tool_attempts</p>
 <p>Committed effects: $committed_effects</p>
-<p>Actions per delivery (tool attempts / committed effects): $ratio</p>
+<p>Actions per delivery (tool attempts / completed deliveries): $ratio</p>
 </section>
 
 <section id="signal-robustness">
@@ -173,17 +173,19 @@ def _score_text(score) -> str:
     return str(score)
 
 
-def _ratio_text(counters) -> str:
+def _ratio_text(counters: Mapping, completed_deliveries: int) -> str:
+    """Actions per delivery (REQ-09): tool attempts over the verifier's
+    completed deliveries. ``committed_effects`` counts every successful
+    move/pick/place and is NOT a delivery denominator (W-01)."""
     attempts = counters.get("tool_attempts") if isinstance(counters, Mapping) else None
-    effects = counters.get("committed_effects") if isinstance(counters, Mapping) else None
     if any(
         isinstance(value, bool) or not isinstance(value, int)
-        for value in (attempts, effects)
+        for value in (attempts, completed_deliveries)
     ):
         return "n/a"
-    if effects == 0:
-        return "n/a (no committed effects)"
-    return f"{attempts}/{effects}"
+    if completed_deliveries == 0:
+        return "n/a (no completed deliveries)"
+    return f"{attempts}/{completed_deliveries}"
 
 
 def _fault_line(receipt: Mapping) -> str:
@@ -254,10 +256,8 @@ def render_report(
         raise TypeError("render_report requires a VerificationResult")
     if not isinstance(receipt, Mapping):
         raise TypeError("receipt must be a mapping")
-    counters = (
-        receipt.get("counters") if isinstance(receipt.get("counters"), Mapping)
-        else {}
-    )
+    raw_counters = receipt.get("counters")
+    counters = raw_counters if isinstance(raw_counters, Mapping) else {}
     limitation_items = "".join(
         f"<li>{_esc(limitation)}</li>" for limitation in LIMITATIONS
     )
@@ -273,7 +273,7 @@ def render_report(
         policy_steps=_counter(counters, "policy_steps"),
         tool_attempts=_counter(counters, "tool_attempts"),
         committed_effects=_counter(counters, "committed_effects"),
-        ratio=_esc(_ratio_text(counters)),
+        ratio=_esc(_ratio_text(counters, verification.completed_count)),
         fault_line=_fault_line(receipt),
         internal_retries=_counter(counters, "internal_retries"),
         outcome=_esc(verification.outcome),

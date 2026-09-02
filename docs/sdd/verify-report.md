@@ -211,3 +211,16 @@ No forbidden claim was found in the inspected v0 implementation/report path.
 ## Archive decision
 
 **Not ready for archive.** Reconcile the stale Engram B6 checkbox and address the two strict-TDD assertion-quality blockers before declaring a clean verification pass. The report-metric warning and ruff findings are non-archive-blocking but should remain visible to reviewers.
+
+## Remediation (post-verification)
+
+One remediation commit on `feat/v0-evidence-chain` (the single commit containing this section: `git log --grep 'fix: remediate verify findings' --format=%H`). Gate held: **354 tests, 0 failures, 0 errors (Python 3.14.5 stdlib unittest), run twice after remediation**; `ruff check robot_factory_arena tests` → All checks passed. No golden fixture was touched (goldens are trace/receipt bytes; report rendering is asserted by markers only).
+
+| Finding | Resolution | Evidence |
+|---|---|---|
+| C-02 placeholder tests | FIXED (deleted, not replaced in place) | Both `TestModuleDiscovered` classes (`assertIsNotNone(__doc__)`, no production call) deleted from `tests/test_adversarial_verifier.py` and `tests/test_rerun_replay.py`: each duplicated real suites living in the same module, so deleting loses no coverage. Count held by two REAL report tests added in the same commit (TDD RED → GREEN: 3 focused failures first, then green). |
+| W-01 mislabeled metric | FIXED | `robot_factory_arena/evidence/report.py`: label now "Actions per delivery (tool attempts / completed deliveries)"; `_ratio_text(counters, completed_deliveries)` divides `tool_attempts` by the verifier-owned `verification.completed_count` (REQ-02: `committed_effects` counts every move/pick/place, not deliveries). REQ-09 kept: raw `policy_steps` AND actions per delivery both present. Zero deliveries render `n/a (no completed deliveries)`. Regression guard asserts the stale `100/92` ratio and old label never reappear. |
+| W-02 safety-net reporting | NOT-ACTIONABLE | The warning concerns the narrative FORMAT of historical TDD evidence; rewriting it retroactively would falsify traceability, and uniform failure-message assertions across 354 existing tests is broad churn for cosmetic gain (no new reporting machinery built). New remediation tests use consistent descriptive assertion messages. |
+| W-03 three E402 | FIXED | `tests/test_faults.py`: all mid-file imports moved into the top import block (stdlib first, then `robot_factory_arena`, merged duplicates, `# noqa: E402` dropped, `_f`/`_v` aliases renamed to canonical names — behavior-identical). `ruff check` now passes with zero findings. |
+
+Additional checker hygiene in the same commit (repo-convention, not a listed finding): the pre-existing frozen-dataclass probe in `tests/test_adversarial_verifier.py` now routes through an untyped `_probe_mutate` helper (B5-established pattern, behavior-identical), and `_ratio_text` gained `Mapping`/`int` annotations with a single-binding narrowing fix in `render_report` — leaving the tree checker-clean like B5. The stale Engram tasks checkbox (C-01) was already reconciled by the orchestrator before this remediation.

@@ -7,14 +7,59 @@ retry into the runner (REQ-05).
 """
 import json
 import pathlib
+import shutil
+import tempfile
 import unittest
+from dataclasses import FrozenInstanceError
+from pathlib import Path
+from typing import Any
 
-from robot_factory_arena.contracts.outcomes import BudgetView
-from robot_factory_arena.contracts.tool_call import normalize_tool_call
-from robot_factory_arena.domain.observation import Observation, serialize_observation
-from robot_factory_arena.domain.task import generate_task
+from robot_factory_arena.contracts.outcomes import BudgetView, Counters
+from robot_factory_arena.contracts.policy import policy_manifest_digest
+from robot_factory_arena.contracts.tool_call import (
+    normalize_tool_call,
+    validate_operation_key,
+)
+from robot_factory_arena.domain.model import (
+    OrderState,
+    RobotState,
+    ShelfState,
+    WorldState,
+)
+from robot_factory_arena.domain.observation import (
+    Observation,
+    serialize_observation,
+)
+from robot_factory_arena.domain.task import (
+    SLOT_POSITIONS,
+    TaskDefinition,
+    generate_task,
+)
 from robot_factory_arena.domain.transition import Operation, apply
-from robot_factory_arena.evidence.canonical import canonical_json_bytes
+from robot_factory_arena.evidence.artifact_store import RunEvidenceRecorder
+from robot_factory_arena.evidence.canonical import (
+    canonical_json_bytes,
+    digest_json,
+)
+from robot_factory_arena.evidence.receipt import (
+    ReceiptNotReleasedError,
+    ReceiptWriter,
+)
+from robot_factory_arena.faults.injector import FaultInjector
+from robot_factory_arena.faults.model import (
+    FAULT_ID_RESPONSE_LOST,
+    HOOK_AFTER_COMMIT_BEFORE_RESPONSE,
+    KIND_RESPONSE_LOST,
+    Fault,
+    FaultContext,
+    FaultDecision,
+    FaultTape,
+)
+from robot_factory_arena.faults.tape import (
+    FaultTapeSpec,
+    FaultTarget,
+    resolve_fault_tape,
+)
 from robot_factory_arena.policies.bounded import BoundedPolicy
 from robot_factory_arena.policies.greedy import GreedyPolicy
 from robot_factory_arena.runtime.runner import (
@@ -22,6 +67,10 @@ from robot_factory_arena.runtime.runner import (
     RunConfig,
     Runner,
     compute_logical_run_id,
+)
+from robot_factory_arena.verification.verifier import (
+    Verifier,
+    load_verification_artifacts,
 )
 
 FIXTURE_DIR = pathlib.Path(__file__).resolve().parent / "fixtures"
@@ -49,9 +98,6 @@ def _load_fixture():
     return json.loads(
         (FIXTURE_DIR / "fault_targets.json").read_text(encoding="utf-8")
     )
-
-
-from typing import Any  # noqa: E402
 
 
 def _probe_mutate(value, attribute, replacement):
@@ -260,26 +306,6 @@ class TestFaultTargetThroughRunner(unittest.TestCase):
 
 
 # --- T-12: declarative fault model, semantic resolver, injector (REQ-03/05/07) -
-
-from dataclasses import FrozenInstanceError  # noqa: E402
-
-from robot_factory_arena.contracts.tool_call import validate_operation_key  # noqa: E402
-from robot_factory_arena.evidence.canonical import digest_json  # noqa: E402
-from robot_factory_arena.faults.injector import FaultInjector  # noqa: E402
-from robot_factory_arena.faults.model import (  # noqa: E402
-    FAULT_ID_RESPONSE_LOST,
-    HOOK_AFTER_COMMIT_BEFORE_RESPONSE,
-    KIND_RESPONSE_LOST,
-    Fault,
-    FaultContext,
-    FaultDecision,
-    FaultTape,
-)
-from robot_factory_arena.faults.tape import (  # noqa: E402
-    FaultTapeSpec,
-    FaultTarget,
-    resolve_fault_tape,
-)
 
 MODEL_RUN_ID = "lr_" + "ab" * 32
 OTHER_MODEL_RUN_ID = "lr_" + "cd" * 32
@@ -504,16 +530,6 @@ class TestFaultInjector(unittest.TestCase):
 
 
 # --- T-13: response-loss retry integrated into the runner (REQ-02/04/05) -------
-
-from robot_factory_arena.contracts.outcomes import Counters  # noqa: E402
-from robot_factory_arena.contracts.policy import policy_manifest_digest  # noqa: E402
-from robot_factory_arena.domain.model import (  # noqa: E402
-    OrderState,
-    RobotState,
-    ShelfState,
-    WorldState,
-)
-from robot_factory_arena.domain.task import SLOT_POSITIONS, TaskDefinition  # noqa: E402
 
 
 def _carrying_one_order_task(seed_text="17"):
@@ -776,17 +792,6 @@ class TestResponseLossRetry(unittest.TestCase):
 # T-16: fault persistence proof through the artifact store (REQ-05, REQ-09)
 # ---------------------------------------------------------------------------
 
-import json as _fjson  # noqa: E402
-import tempfile as _ftempfile  # noqa: E402
-from pathlib import Path as _fPath  # noqa: E402
-
-from robot_factory_arena.evidence.artifact_store import (  # noqa: E402
-    RunEvidenceRecorder,
-)
-from robot_factory_arena.evidence.canonical import (
-    canonical_json_bytes as _fcanonical,  # noqa: E402
-)
-
 
 def _faulted_recorded_run(root, execution_id="execution-fault", sink=None):
     """The B3 faulted delivery, fully evidenced by a RunEvidenceRecorder."""
@@ -805,10 +810,10 @@ def _faulted_recorded_run(root, execution_id="execution-fault", sink=None):
     # Pre-execution persistence (REQ-05/design step 2): the RESOLVED tape is
     # on disk before any observation/callback fires.
     tape_bytes = (recorder.directory / "fault_tape.json").read_bytes()
-    tape_mapping = _fjson.loads(tape_bytes.decode("utf-8"))
+    tape_mapping = json.loads(tape_bytes.decode("utf-8"))
     pre_execution_key = tape_mapping["faults"][0]["operation_key"]
     target_key = f"op/{logical_run_id}/step-1/intent-place-order-00"
-    assert tape_bytes == _fcanonical(tape_mapping)
+    assert tape_bytes == canonical_json_bytes(tape_mapping)
     assert pre_execution_key == target_key
 
     def boundary(step, call, result):
@@ -842,14 +847,14 @@ def _faulted_recorded_run(root, execution_id="execution-fault", sink=None):
 
 
 def _fread(path):
-    return _fjson.loads(_fPath(path).read_text(encoding="utf-8"))
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 class TestFaultedRunArtifactProof(unittest.TestCase):
     """T-16: the boundary, op log, and replay input prove the fault path."""
 
     def test_tape_is_persisted_before_execution_with_the_concrete_key(self):
-        with _ftempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root:
             _, recorder, target_key = _faulted_recorded_run(root)
             tape = _fread(recorder.directory / "fault_tape.json")
             self.assertEqual(tape["faults"][0]["operation_key"], target_key)
@@ -861,7 +866,7 @@ class TestFaultedRunArtifactProof(unittest.TestCase):
                              ).digest_json(tape))
 
     def test_operation_log_preserves_commit_fault_and_retry_evidence(self):
-        with _ftempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root:
             result, recorder, target_key = _faulted_recorded_run(root)
             self.assertEqual(result.outcome, "completed")
             log = _fread(recorder.directory / "operation-log.json")
@@ -883,7 +888,7 @@ class TestFaultedRunArtifactProof(unittest.TestCase):
             # The trace carries the fault and retry records between the
             # commit and run_finished (locked decision 3 ordering intact).
             raw = (recorder.directory / "trace.jsonl").read_text("utf-8")
-            events = [_fjson.loads(line)["event"]
+            events = [json.loads(line)["event"]
                       for line in raw.splitlines()]
             self.assertEqual(
                 events,
@@ -894,7 +899,7 @@ class TestFaultedRunArtifactProof(unittest.TestCase):
             self.assertNotIn("verification_finished", events)
 
     def test_boundary_file_proves_the_crossing_before_the_fault(self):
-        with _ftempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root:
             _, recorder, target_key = _faulted_recorded_run(root)
             boundary = _fread(recorder.directory / "boundaries"
                               / "step-1.json")
@@ -913,7 +918,7 @@ class TestFaultedRunArtifactProof(unittest.TestCase):
         def broken_store(step, call, result):
             raise RuntimeError("artifact store unavailable")
 
-        with _ftempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root:
             result, recorder, _ = _faulted_recorded_run(
                 root, sink=broken_store
             )
@@ -921,7 +926,7 @@ class TestFaultedRunArtifactProof(unittest.TestCase):
             log = _fread(recorder.directory / "operation-log.json")
             self.assertEqual(log["operations"], [])  # no proven commit entry
             raw = (recorder.directory / "trace.jsonl").read_text("utf-8")
-            events = [_fjson.loads(line)["event"]
+            events = [json.loads(line)["event"]
                       for line in raw.splitlines()]
             self.assertNotIn("tool_committed", events)
             self.assertNotIn("fault_injected", events)
@@ -933,22 +938,6 @@ class TestFaultedRunArtifactProof(unittest.TestCase):
             self.assertFalse(
                 (recorder.directory / "boundaries" / "step-1.json").exists()
             )
-
-
-import shutil as _fshutil  # noqa: E402
-
-from robot_factory_arena.evidence.receipt import (  # noqa: E402
-    ReceiptNotReleasedError as _fReceiptNotReleasedError,
-)
-from robot_factory_arena.evidence.receipt import (
-    ReceiptWriter as _fReceiptWriter,
-)
-from robot_factory_arena.verification.verifier import (  # noqa: E402
-    Verifier as _vVerifier,
-)
-from robot_factory_arena.verification.verifier import (
-    load_verification_artifacts as _vload,
-)
 
 
 def _faulted_formula_run(root, execution_id="execution-faulted-18"):
@@ -989,18 +978,18 @@ class TestVerifierReleaseGate(unittest.TestCase):
     """
 
     def test_faulted_run_verifies_completed_and_releases_the_receipt(self):
-        with _ftempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root:
             result, recorder = _faulted_formula_run(root)
             self.assertEqual(result.outcome, "completed")
-            artifacts = _vload(recorder.directory)
-            verification = _vVerifier().verify(artifacts)
+            artifacts = load_verification_artifacts(recorder.directory)
+            verification = Verifier().verify(artifacts)
             self.assertTrue(verification.valid)
             self.assertEqual(verification.outcome, "completed")
             self.assertEqual(verification.verified_score, 100)
             self.assertEqual(verification.completed_count, 5)
             self.assertEqual(verification.total_count, 5)
             self.assertEqual(verification.violations, ())
-            receipt = _fReceiptWriter.write_final(
+            receipt = ReceiptWriter.write_final(
                 recorder.receipt_candidate, verification
             )
             self.assertEqual(receipt["outcome"], "completed")
@@ -1018,18 +1007,18 @@ class TestVerifierReleaseGate(unittest.TestCase):
             # Persist the released receipt and re-verify the bindings with
             # receipt.json present (the B6 CLI composition order).
             (recorder.directory / "receipt.json").write_bytes(
-                _fcanonical(receipt)
+                canonical_json_bytes(receipt)
             )
-            recheck = _vVerifier().verify(_vload(recorder.directory))
+            recheck = Verifier().verify(load_verification_artifacts(recorder.directory))
             self.assertTrue(recheck.valid)
             self.assertEqual(recheck.outcome, "completed")
             self.assertEqual(recheck.verified_score, 100)
 
     def test_missing_boundary_proof_is_unresolved_and_releases_nothing(self):
-        with _ftempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root:
             _, recorder = _faulted_formula_run(root)
-            _fshutil.rmtree(recorder.directory / "boundaries")
-            verification = _vVerifier().verify(_vload(recorder.directory))
+            shutil.rmtree(recorder.directory / "boundaries")
+            verification = Verifier().verify(load_verification_artifacts(recorder.directory))
             self.assertFalse(verification.valid)
             self.assertEqual(verification.outcome, "unresolved_outcome")
             self.assertIsNone(verification.verified_score)
@@ -1037,19 +1026,19 @@ class TestVerifierReleaseGate(unittest.TestCase):
                 "commit_boundary_unproven",
                 [violation.code for violation in verification.violations],
             )
-            with self.assertRaises(_fReceiptNotReleasedError):
-                _fReceiptWriter.write_final(
+            with self.assertRaises(ReceiptNotReleasedError):
+                ReceiptWriter.write_final(
                     recorder.receipt_candidate, verification
                 )
 
     def test_load_composition_rejects_non_canonical_artifact_bytes(self):
-        with _ftempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root:
             _, recorder = _faulted_formula_run(root)
             target = recorder.directory / "final_state.json"
-            parsed = _fjson.loads(target.read_text("utf-8"))
-            target.write_text(_fjson.dumps(parsed, indent=2), encoding="utf-8")
+            parsed = json.loads(target.read_text("utf-8"))
+            target.write_text(json.dumps(parsed, indent=2), encoding="utf-8")
             with self.assertRaises(ValueError):
-                _vload(recorder.directory)
+                load_verification_artifacts(recorder.directory)
 
 
 class TestAmend01CompletionDemonstrator(unittest.TestCase):
@@ -1075,14 +1064,12 @@ class TestAmend01CompletionDemonstrator(unittest.TestCase):
         )
 
         task = generate_task(18)
-        # (module-level imports provide the runner/policy names; the
-        # tempfile alias below is the module's own `_ftempfile`)
         config = RunConfig(
             1, task.task_version, task.seed, "greedy-v0",
             policy_manifest_digest("greedy-v0"), 100,
             ("move", "pick", "place"), None,
         )
-        with _ftempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root:
             recorder = RunEvidenceRecorder(
                 root, task, config, compute_logical_run_id(task, config),
                 "execution-amend01",
