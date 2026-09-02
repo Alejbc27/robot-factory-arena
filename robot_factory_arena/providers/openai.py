@@ -18,6 +18,7 @@ unchanged.
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 
@@ -42,14 +43,64 @@ ERROR_INVALID_RESPONSE = "invalid_response"
 ERROR_NO_TOOL_CALL = "no_tool_call"
 ERROR_MULTIPLE_TOOL_CALLS = "multiple_tool_calls"
 
+# Upper bound for each sanitized upstream error field in diagnostics.
+_MAX_DETAIL_CHARS = 300
+
+
+def _sanitized_http_detail(body):
+    """Bounded ``code=… message=…`` detail from an upstream error body.
+
+    ONLY the JSON ``error.code`` and ``error.message`` scalar fields are
+    surfaced, whitespace-flattened and truncated. The raw body, headers,
+    the request payload, and any credential material are never included,
+    so an oversized or hostile body cannot leak into diagnostics.
+    """
+    try:
+        envelope = json.loads(body.decode("utf-8"))
+    except (ValueError, AttributeError, TypeError):
+        return ""
+    if not isinstance(envelope, dict):
+        return ""
+    error = envelope.get("error")
+    if not isinstance(error, dict):
+        return ""
+    parts = []
+    for field in ("code", "message"):
+        value = error.get(field)
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            continue
+        flattened = " ".join(str(value).split())[:_MAX_DETAIL_CHARS]
+        if flattened:
+            parts.append(f"{field}={flattened}")
+    if not parts:
+        return ""
+    return ": " + " ".join(parts)
+
 
 def _default_transport(url, headers, payload_bytes, timeout):
-    """The real stdlib transport; the ONLY network touchpoint in the package."""
+    """The real stdlib transport; the ONLY network touchpoint in the package.
+
+    An ``HTTPError`` is a NORMAL upstream answer (a 4xx/5xx response with a
+    body), so it is unwrapped into a plain ``(status, body)`` result instead
+    of collapsing into an opaque transport exception. Without a usable status
+    it propagates to the adapter's deterministic transport-error path.
+    """
     request = urllib.request.Request(
         url, data=payload_bytes, headers=headers, method="POST"
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.status, response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as error:
+        if not isinstance(error.code, int):
+            raise  # no usable status: keep the transport-failure path
+        try:
+            body = error.read()
+        except Exception:
+            body = b""  # the diagnostic body is best-effort; status is enough
+        if error.fp is not None:  # close() needs a body stream to close
+            error.close()
+        return error.code, body
 
 
 class OpenAIProvider:
@@ -142,7 +193,9 @@ class OpenAIProvider:
         if status != 200:
             return self._error(
                 request, ERROR_HTTP,
-                f"upstream returned HTTP {status}", started,
+                f"upstream returned HTTP {status}"
+                f"{_sanitized_http_detail(body)}",
+                started,
             )
         try:
             envelope = json.loads(body.decode("utf-8"))
