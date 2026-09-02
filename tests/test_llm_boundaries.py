@@ -131,6 +131,51 @@ def _exists(module_name):
     return True
 
 
+LLM_POLICY_ALLOWLIST = {
+    "dataclasses",
+    "robot_factory_arena.contracts.tool_call",
+    "robot_factory_arena.evidence.canonical",
+    "robot_factory_arena.providers.adapter",
+}
+
+
+class TestLLMPolicyBoundaries(unittest.TestCase):
+    """T4A-04: policies/llm.py imports only the allowed contract surface.
+
+    The task allowlist names the existing policy/tool-call contracts and the
+    canonical digest authority; the provider request envelope joins it because
+    P4A-REQ-02 requires LLMPolicy to construct exactly one ProviderRequest.
+    No runtime, verifier, domain, or providers-sidecar import is permitted.
+    """
+
+    def test_llm_policy_imports_only_the_allowed_surface(self):
+        imported = _module_imports("robot_factory_arena.policies.llm")
+        extra = imported - LLM_POLICY_ALLOWLIST
+        self.assertEqual(extra, set())
+
+    def test_llm_policy_never_imports_frozen_core_or_sidecars(self):
+        imported = _module_imports("robot_factory_arena.policies.llm")
+        for forbidden in (
+            "robot_factory_arena.domain",
+            "robot_factory_arena.runtime",
+            "robot_factory_arena.evidence.trace",
+            "robot_factory_arena.evidence.receipt",
+            "robot_factory_arena.evidence.artifact_store",
+            "robot_factory_arena.verification",
+            "robot_factory_arena.providers.evidence",
+            "robot_factory_arena.providers.fake",
+            "robot_factory_arena.providers.openai",
+            "robot_factory_arena.cli",
+        ):
+            with self.subTest(forbidden=forbidden):
+                offending = [
+                    name
+                    for name in imported
+                    if name == forbidden or name.startswith(forbidden + ".")
+                ]
+                self.assertEqual(offending, [])
+
+
 class TestFakeProviderSubprocessTripwire(unittest.TestCase):
     """Importing AND invoking the fake loads no core module, reads no secret."""
 
