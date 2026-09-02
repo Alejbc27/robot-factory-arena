@@ -636,11 +636,6 @@ import json as _json  # noqa: E402
 import tempfile  # noqa: E402
 from pathlib import Path as _Path  # noqa: E402
 
-from robot_factory_arena.evidence.artifact_store import (  # noqa: E402
-    REQUIRED_ARTIFACT_NAMES,
-    RunEvidenceRecorder,
-)
-
 from robot_factory_arena.contracts.policy import policy_manifest_digest  # noqa: E402
 from robot_factory_arena.domain.model import (  # noqa: E402
     OrderState,
@@ -650,6 +645,10 @@ from robot_factory_arena.domain.model import (  # noqa: E402
 from robot_factory_arena.domain.task import (  # noqa: E402
     SLOT_POSITIONS,
     TaskDefinition,
+)
+from robot_factory_arena.evidence.artifact_store import (  # noqa: E402
+    REQUIRED_ARTIFACT_NAMES,
+    RunEvidenceRecorder,
 )
 from robot_factory_arena.policies.greedy import GreedyPolicy  # noqa: E402
 from robot_factory_arena.runtime.runner import (  # noqa: E402
@@ -875,3 +874,557 @@ class TestArtifactPathIndependence(unittest.TestCase):
             )
             self.assertTrue(record["operation_key"].endswith(
                 "/intent-place-order-00"))
+
+
+class TestStaticReportRendering(unittest.TestCase):
+    """T-22: the dependency-free static report and honesty boundary (REQ-09,
+    REQ-10). The report renders the VERIFICATION RESULT — never receipt score
+    or outcome claims — as escaped static HTML with four SEPARATE signal
+    sections, raw counters, all digests, and the exact limitations. No
+    JavaScript, no CDN, no URLs, no composite score, no execution id (REQ-07:
+    deterministic contents must not depend on the physical execution).
+    """
+
+    def _verification(self, **overrides):
+        from robot_factory_arena.contracts.outcomes import VerificationResult
+
+        return VerificationResult(
+            valid=overrides.get("valid", True),
+            outcome=overrides.get("outcome", "safe_abort"),
+            verified_score=overrides.get("verified_score", 50),
+            completed_count=overrides.get("completed_count", 5),
+            total_count=overrides.get("total_count", 10),
+            violations=overrides.get("violations", ()),
+            verifier_version=overrides.get("verifier_version", "verifier-v0"),
+        )
+
+    def _receipt(self, verification, **overrides):
+        """A realistic RELEASED receipt (T-15 writer) for the verification."""
+        from robot_factory_arena.contracts.outcomes import Counters
+        from robot_factory_arena.evidence.receipt import (
+            ReceiptCandidate,
+            ReceiptWriter,
+        )
+
+        candidate = ReceiptCandidate(
+            schema_version=1,
+            task_version="warehouse-v0",
+            logical_run_id="lr_" + "ab" * 32,
+            execution_id="golden-17",
+            seed="17",
+            config_digest="sha256:" + "11" * 32,
+            policy_id="greedy-v0",
+            policy_digest="sha256:" + "22" * 32,
+            budget=100,
+            grants=("move", "pick", "place"),
+            fault_tape_digest=None,
+            trace_digest="sha256:" + "33" * 32,
+            final_state_digest="sha256:" + "44" * 32,
+            operation_log_digest="sha256:" + "55" * 32,
+            counters=Counters(100, 100, 92, 0, 0, 101),
+            outcome="safe_abort",
+        )
+        if verification.valid:
+            receipt = ReceiptWriter.write_final(candidate, verification)
+        else:
+            # Invalid verification releases NO receipt (REQ-06): only the
+            # scoreless candidate mapping exists for the report to render.
+            receipt = candidate.to_mapping()
+        receipt.update(overrides)
+        return receipt
+
+    def _render(self, verification=None, receipt_overrides=None,
+                artifact_digests=None):
+        from robot_factory_arena.evidence.report import render_report
+
+        verification = (
+            self._verification() if verification is None else verification
+        )
+        receipt = self._receipt(verification, **(receipt_overrides or {}))
+        digests = {
+            "config.json": "sha256:" + "11" * 32,
+            "trace.jsonl": "sha256:" + "33" * 32,
+        }
+        if artifact_digests is not None:
+            digests = artifact_digests
+        return render_report(receipt, verification, digests)
+
+    def test_render_report_requires_a_verification_result(self):
+        from robot_factory_arena.evidence.report import render_report
+
+        def render_with_wrong_verification(value):
+            # Negative probe: the verification argument is deliberately
+            # wrong-typed; the runtime contract must fail closed.
+            return render_report({}, value, {})
+
+        with self.assertRaises(TypeError):
+            render_with_wrong_verification({"status": "valid"})
+        with self.assertRaises(TypeError):
+            render_with_wrong_verification(None)
+
+    def test_report_contains_the_four_separate_signal_sections(self):
+        html = self._render()
+        for marker in (
+            "signal-task-quality",
+            "signal-efficiency",
+            "signal-robustness",
+            "signal-contract-hygiene",
+        ):
+            self.assertIn(marker, html)
+
+    def test_report_shows_raw_counters_completion_budget_and_outcome(self):
+        html = self._render()
+        for expected in (
+            "policy_steps", "tool_attempts", "committed_effects",
+            "internal_retries", "contract_violations", "terminal_checks",
+        ):
+            self.assertIn(expected, html)
+        self.assertIn("100", html)  # budget and policy steps used
+        self.assertIn("5 / 10", html)  # completed / total orders
+        self.assertIn("safe_abort", html)  # outcome (from verification)
+
+    def test_report_renders_the_verification_not_receipt_claims(self):
+        # The receipt mapping deliberately carries DRIFTED claims; the report
+        # must show the verifier's score/outcome only.
+        html = self._render(receipt_overrides={"verified_score": 999,
+                                               "outcome": "completed"})
+        self.assertIn("safe_abort", html)
+        self.assertNotIn("999", html)
+
+    def test_report_shows_all_digests_and_verifier_status_version(self):
+        digest = "sha256:" + "dd" * 32
+        html = self._render(artifact_digests={"final_state.json": digest})
+        self.assertIn("final_state.json", html)
+        self.assertIn(digest, html)
+        self.assertIn("verifier-v0", html)
+        self.assertIn("valid", html)  # verifier status
+
+    def test_report_shows_fault_details(self):
+        html_faulted = self._render(
+            receipt_overrides={"fault_tape_digest": "sha256:" + "66" * 32}
+        )
+        self.assertIn("response_lost_after_commit", html_faulted)
+        self.assertIn("response_lost", html_faulted)
+        self.assertIn("after_commit_before_response", html_faulted)
+        html_plain = self._render()
+        self.assertIn("none", html_plain)  # explicit no-fault presentation
+
+    def test_report_shows_violations_and_audit_completeness(self):
+        from robot_factory_arena.contracts.outcomes import VerifierViolation
+
+        violation = VerifierViolation(
+            code="score_mismatch", location="receipt",
+            detail="receipt score disagrees with the recomputed score",
+        )
+        html = self._render(
+            self._verification(
+                valid=False,
+                outcome="unresolved_outcome",
+                verified_score=None,
+                violations=(violation,),
+            )
+        )
+        self.assertIn("score_mismatch", html)
+        self.assertIn("receipt", html)
+        self.assertIn("invalid", html)  # verifier status and audit wording
+
+    def test_report_states_the_exact_limitations(self):
+        html = self._render()
+        for phrase in (
+            "not authentication",
+            "exactly-once",
+            "hostile-Python",
+            "plumbing-only",
+            "REFUGIO",
+            "never collapsed",
+        ):
+            self.assertIn(phrase, html)
+
+    def test_report_is_static_html_without_js_cdn_or_urls(self):
+        html = self._render()
+        self.assertTrue(html.lstrip().startswith("<!DOCTYPE html>"))
+        lowered = html.lower()
+        for forbidden in ("<script", "javascript:", "cdn", "http://",
+                          "https://"):
+            self.assertNotIn(forbidden, lowered)
+
+    def test_report_escapes_interpolated_values(self):
+        hostile = "<script>alert(1)</script>"
+        html = self._render(receipt_overrides={"policy_id": hostile})
+        self.assertNotIn("<script>alert", html)
+        self.assertIn("&lt;script&gt;", html)
+
+    def test_report_is_deterministic_and_execution_id_free(self):
+        first = self._render()
+        second = self._render()
+        self.assertEqual(first, second)
+        # A receipt whose only difference is the physical execution id must
+        # render the exact same bytes (REQ-07 path/execution independence).
+        other = self._render(receipt_overrides={"execution_id": "other-exec"})
+        self.assertEqual(first, other)
+        self.assertNotIn("other-exec", other)
+        self.assertNotIn("golden-17", first)
+
+    def test_report_shows_exact_actions_per_delivery_ratio(self):
+        html = self._render()  # 100 tool attempts / 92 committed effects
+        self.assertIn("100/92", html)
+        empty = self._render(
+            self._verification(
+                verified_score=0,
+                completed_count=0,
+            ),
+            receipt_overrides={"counters": {
+                "policy_steps": 100, "tool_attempts": 100,
+                "committed_effects": 0, "internal_retries": 0,
+                "contract_violations": 0, "terminal_checks": 101,
+            }},
+        )
+        self.assertIn("n/a", empty)
+
+
+# ---------------------------------------------------------------------------
+# T-24: committed golden run evidence (REQ-01..REQ-09, AMEND-01)
+# ---------------------------------------------------------------------------
+
+def _golden_verified_run(seed, policy_id, execution_id, root,
+                         fault_step=None, fault_intent=None):
+    """The full B5-proven verified flow for one formula seed.
+
+    run -> recorder -> close -> verify -> write_final -> persist receipt.json.
+    Returns (recorder, receipt, verification) with receipt.json persisted in
+    the run directory (canonical bytes). Deterministic bytes only: the trace
+    and every semantic artifact are independent of path and execution id.
+    """
+    from robot_factory_arena.evidence.receipt import ReceiptWriter
+    from robot_factory_arena.faults.model import (
+        FAULT_ID_RESPONSE_LOST,
+        HOOK_AFTER_COMMIT_BEFORE_RESPONSE,
+        KIND_RESPONSE_LOST,
+    )
+    from robot_factory_arena.faults.tape import FaultTapeSpec, FaultTarget
+    from robot_factory_arena.policies.bounded import BoundedPolicy
+    from robot_factory_arena.verification.verifier import (
+        Verifier,
+        load_verification_artifacts,
+    )
+
+    task = generate_task(seed)
+    policy = GreedyPolicy() if policy_id == "greedy-v0" else BoundedPolicy()
+    spec = None
+    if fault_step is not None and fault_intent is not None:
+        # Callers always declare the pair together; the explicit narrowing
+        # keeps the frozen target typed str.
+        spec = FaultTapeSpec(
+            1, FAULT_ID_RESPONSE_LOST, HOOK_AFTER_COMMIT_BEFORE_RESPONSE,
+            KIND_RESPONSE_LOST, FaultTarget(fault_step, fault_intent),
+        )
+    config = RunConfig(
+        1, task.task_version, task.seed, policy_id,
+        policy_manifest_digest(policy_id), 100, ("move", "pick", "place"),
+        spec,
+    )
+    logical_run_id = compute_logical_run_id(task, config)
+    recorder = RunEvidenceRecorder(
+        root, task, config, logical_run_id, execution_id
+    )
+    evidence = EvidenceCallbacks(**recorder.callback_map())
+    Runner(evidence=evidence).run(task, policy, config, execution_id)
+    recorder.close()
+    verification = Verifier().verify(
+        load_verification_artifacts(recorder.directory)
+    )
+    receipt = ReceiptWriter.write_final(
+        recorder.receipt_candidate, verification
+    )
+    (recorder.directory / "receipt.json").write_bytes(
+        canonical_json_bytes(receipt)
+    )
+    return recorder, receipt, verification
+
+
+def _parse_golden_trace(name):
+    raw = (FIXTURE_DIR / name).read_bytes()
+    records = []
+    for line in raw.split(b"\n")[:-1]:
+        records.append(json.loads(line.decode("utf-8")))
+    return raw, records
+
+
+class TestGoldenSeed17Evidence(unittest.TestCase):
+    """T-24: committed public seed-17 golden evidence (greedy-v0, no tape).
+
+    The full greedy run needs ~190 policy steps for 10 orders, so the golden
+    public run ends ``safe_abort`` at the locked 100-step budget with 5/10
+    orders delivered and the verifier-owned partial score 50.
+    """
+
+    def test_golden_trace_fixture_is_canonical_lf_jsonl_with_chain(self):
+        raw, records = _parse_golden_trace("golden-trace-17.jsonl")
+        self.assertTrue(raw.endswith(b"\n"))
+        events = [record["event"] for record in records]
+        self.assertEqual(events[0], "run_started")
+        self.assertEqual(events[-1], "run_finished")
+        self.assertIn("budget_exhausted", events)
+        self.assertNotIn("verification_finished", events)
+        previous = None
+        for position, record in enumerate(records):
+            with self.subTest(seq=position):
+                self.assertEqual(record["seq"], position)
+                self.assertEqual(record["prev_event_hash"], previous)
+                without_hash = {
+                    key: value for key, value in record.items()
+                    if key != "event_hash"
+                }
+                self.assertEqual(
+                    record["event_hash"], digest_json(without_hash)
+                )
+            previous = record["event_hash"]
+
+    def test_seed_17_full_run_reproduces_the_golden_trace_bytes(self):
+        with tempfile.TemporaryDirectory() as root:
+            recorder, _, _ = _golden_verified_run(
+                17, "greedy-v0", "golden-17", root
+            )
+            self.assertEqual(
+                (recorder.directory / "trace.jsonl").read_bytes(),
+                (FIXTURE_DIR / "golden-trace-17.jsonl").read_bytes(),
+            )
+            # The golden run directory carries the committed public task.
+            self.assertEqual(
+                (recorder.directory / "task.json").read_bytes(),
+                (FIXTURE_DIR / "task-17.json").read_bytes(),
+            )
+
+    def test_seed_17_golden_receipt_reproduces_byte_identical(self):
+        fixture_receipt = (FIXTURE_DIR / "golden-receipt-17.json").read_bytes()
+        with tempfile.TemporaryDirectory() as root:
+            _, receipt, verification = _golden_verified_run(
+                17, "greedy-v0", "golden-17", root
+            )
+            self.assertTrue(verification.valid)
+            self.assertEqual(verification.outcome, "safe_abort")
+            self.assertEqual(verification.verified_score, 50)
+            self.assertEqual(verification.completed_count, 5)
+            self.assertEqual(verification.total_count, 10)
+            self.assertEqual(
+                canonical_json_bytes(receipt), fixture_receipt
+            )
+
+    def test_seed_17_golden_receipt_binds_the_expected_evidence(self):
+        receipt = _read_json(FIXTURE_DIR / "golden-receipt-17.json")
+        self.assertEqual(receipt["seed"], "17")
+        self.assertEqual(receipt["policy_id"], "greedy-v0")
+        self.assertEqual(receipt["execution_id"], "golden-17")
+        self.assertIsNone(receipt["fault_tape_digest"])
+        self.assertEqual(receipt["outcome"], "safe_abort")
+        self.assertEqual(receipt["verified_score"], 50)
+        self.assertEqual(
+            receipt["counters"],
+            {"policy_steps": 100, "tool_attempts": 100,
+             "committed_effects": 100, "internal_retries": 0,
+             "contract_violations": 0, "terminal_checks": 101},
+        )
+        block = receipt["verification"]
+        self.assertEqual(block["status"], "valid")
+        self.assertEqual(block["verified_score"], 50)
+        self.assertEqual(block["completed_count"], 5)
+        self.assertEqual(block["total_count"], 10)
+        self.assertEqual(block["violations"], [])
+        self.assertEqual(
+            block["verification_finished"]["payload"],
+            {"outcome": "safe_abort", "verified_score": 50,
+             "verifier_version": "verifier-v0", "violations_count": 0},
+        )
+
+    def test_seed_17_golden_trace_digest_matches_the_receipt_binding(self):
+        receipt = _read_json(FIXTURE_DIR / "golden-receipt-17.json")
+        raw = (FIXTURE_DIR / "golden-trace-17.jsonl").read_bytes()
+        self.assertEqual(
+            receipt["trace_digest"],
+            "sha256:" + hashlib.sha256(raw).hexdigest(),
+        )
+
+
+class TestGoldenSeed18Completion(unittest.TestCase):
+    """T-24/AMEND-01: the faulted completion demonstrator (seed 18).
+
+    Seed 18 (q=8, n=5) completes all five orders in 92 greedy policy steps,
+    so the REQ-05 response-loss demonstrator (first delivery, step 8,
+    place-order-00) ends ``completed`` with one internal retry, no duplicate
+    reward, and the verifier-owned full score 100.
+    """
+
+    def test_seed_18_fixture_matches_the_formula_generator(self):
+        raw = (FIXTURE_DIR / "task-18.json").read_bytes()
+        self.assertEqual(
+            canonical_json_bytes(serialize_task(generate_task(18))), raw
+        )
+
+    def test_seed_18_faulted_run_reproduces_golden_trace_and_receipt(self):
+        with tempfile.TemporaryDirectory() as root:
+            recorder, receipt, verification = _golden_verified_run(
+                18, "greedy-v0", "golden-18", root,
+                fault_step=8, fault_intent="place-order-00",
+            )
+            self.assertTrue(verification.valid)
+            self.assertEqual(verification.outcome, "completed")
+            self.assertEqual(verification.verified_score, 100)
+            self.assertEqual(verification.completed_count, 5)
+            self.assertEqual(verification.total_count, 5)
+            self.assertEqual(
+                (recorder.directory / "trace.jsonl").read_bytes(),
+                (FIXTURE_DIR / "golden-trace-18.jsonl").read_bytes(),
+            )
+            self.assertEqual(
+                canonical_json_bytes(receipt),
+                (FIXTURE_DIR / "golden-receipt-18.json").read_bytes(),
+            )
+        self.assertEqual(
+            _read_json(FIXTURE_DIR / "golden-receipt-18.json")["counters"],
+            {"policy_steps": 92, "tool_attempts": 93,
+             "committed_effects": 92, "internal_retries": 1,
+             "contract_violations": 0, "terminal_checks": 94},
+        )
+
+    def test_seed_18_golden_trace_shows_response_loss_one_effect_retry(self):
+        _, records = _parse_golden_trace("golden-trace-18.jsonl")
+        faults = [r for r in records if r["event"] == "fault_injected"]
+        self.assertEqual(len(faults), 1)
+        self.assertEqual(faults[0]["policy_step"], 8)
+        self.assertEqual(
+            faults[0]["payload"]["fault_id"], "response_lost_after_commit"
+        )
+        retries = [r for r in records if r["event"] == "retry"]
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(retries[0]["payload"]["status"], "idempotent_replay")
+        self.assertEqual(
+            retries[0]["operation_key"], faults[0]["operation_key"]
+        )
+        deliveries = [r for r in records if r["event"] == "order_delivered"]
+        self.assertEqual(len(deliveries), 5)
+        order00 = [
+            r for r in deliveries
+            if r["payload"]["data"]["order_id"] == "order-00"
+        ]
+        # Exactly ONE delivery effect for the faulted order: the retried key
+        # must never duplicate the reward (REQ-05).
+        self.assertEqual(len(order00), 1)
+        events = [record["event"] for record in records]
+        self.assertNotIn("budget_exhausted", events)
+        self.assertEqual(records[-1]["payload"]["outcome"], "completed")
+
+
+class TestGoldenSeed29Evaluation(unittest.TestCase):
+    """T-25: evaluation-seed plumbing evidence and rerun equality.
+
+    Seed 29 is PLUMBING-ONLY (REQ-01/REQ-10): its golden run (bounded-v0, no
+    tape) ends ``safe_abort`` at the locked 100-step budget with 6/10 orders
+    and the verifier-owned partial score 60. It tunes nothing and supports no
+    experimental claim.
+    """
+
+    def test_seed_29_golden_trace_and_receipt_reproduce_byte_identical(self):
+        with tempfile.TemporaryDirectory() as root:
+            recorder, receipt, verification = _golden_verified_run(
+                29, "bounded-v0", "golden-29", root
+            )
+            self.assertTrue(verification.valid)
+            self.assertEqual(verification.outcome, "safe_abort")
+            self.assertEqual(verification.verified_score, 60)
+            self.assertEqual(verification.completed_count, 6)
+            self.assertEqual(verification.total_count, 10)
+            self.assertEqual(
+                (recorder.directory / "trace.jsonl").read_bytes(),
+                (FIXTURE_DIR / "golden-trace-29.jsonl").read_bytes(),
+            )
+            self.assertEqual(
+                canonical_json_bytes(receipt),
+                (FIXTURE_DIR / "golden-receipt-29.json").read_bytes(),
+            )
+
+    def test_seed_29_golden_receipt_stays_plumbing_only_evidence(self):
+        receipt = _read_json(FIXTURE_DIR / "golden-receipt-29.json")
+        self.assertEqual(receipt["seed"], "29")
+        self.assertEqual(receipt["policy_id"], "bounded-v0")
+        self.assertEqual(receipt["execution_id"], "golden-29")
+        self.assertEqual(receipt["outcome"], "safe_abort")
+        self.assertEqual(receipt["verified_score"], 60)
+        self.assertEqual(
+            receipt["counters"],
+            {"policy_steps": 100, "tool_attempts": 100,
+             "committed_effects": 100, "internal_retries": 0,
+             "contract_violations": 0, "terminal_checks": 101},
+        )
+        block = receipt["verification"]
+        self.assertEqual(block["status"], "valid")
+        self.assertEqual(block["verified_score"], 60)
+        self.assertEqual(
+            block["verification_finished"]["payload"]["outcome"],
+            "safe_abort",
+        )
+
+    def test_seed_29_golden_trace_digest_matches_the_receipt_binding(self):
+        receipt = _read_json(FIXTURE_DIR / "golden-receipt-29.json")
+        raw = (FIXTURE_DIR / "golden-trace-29.jsonl").read_bytes()
+        self.assertEqual(
+            receipt["trace_digest"],
+            "sha256:" + hashlib.sha256(raw).hexdigest(),
+        )
+
+    def test_seed_29_golden_trace_records_exactly_100_policy_steps(self):
+        # The kill switch: exactly 100 observations/decisions, no 101st, then
+        # budget_exhausted -> run_finished(safe_abort). Every step in 1..100
+        # appears exactly once, in order.
+        _, records = _parse_golden_trace("golden-trace-29.jsonl")
+        observations = [
+            record for record in records
+            if record["event"] == "observation_emitted"
+        ]
+        decisions = [
+            record for record in records
+            if record["event"] == "policy_decision"
+        ]
+        self.assertEqual(len(observations), 100)
+        self.assertEqual(len(decisions), 100)
+        self.assertEqual(
+            [record["policy_step"] for record in observations],
+            list(range(1, 101)),
+        )
+        events = [record["event"] for record in records]
+        self.assertIn("budget_exhausted", events)
+        self.assertEqual(records[-1]["payload"]["outcome"], "safe_abort")
+
+    def test_two_physical_seed29_reruns_are_byte_identical(self):
+        # Rerun equality (REQ-07): distinct physical executions under the
+        # SAME logical identity produce byte-identical deterministic
+        # artifacts and an identical verifier score; only execution_id (and
+        # its containing receipt bytes) differ.
+        with tempfile.TemporaryDirectory() as root_a, \
+                tempfile.TemporaryDirectory() as root_b:
+            recorder_a, receipt_a, _ = _golden_verified_run(
+                29, "bounded-v0", "golden-29-rerun-a", root_a
+            )
+            recorder_b, receipt_b, _ = _golden_verified_run(
+                29, "bounded-v0", "golden-29-rerun-b", root_b
+            )
+            # Read the persisted bytes INSIDE the contexts: the temp roots
+            # disappear when the block exits.
+            trace_a = (recorder_a.directory / "trace.jsonl").read_bytes()
+            trace_b = (recorder_b.directory / "trace.jsonl").read_bytes()
+            ops_a = (recorder_a.directory / "operation-log.json").read_bytes()
+            ops_b = (recorder_b.directory / "operation-log.json").read_bytes()
+        self.assertNotEqual(
+            receipt_a["execution_id"], receipt_b["execution_id"]
+        )
+        self.assertEqual(
+            receipt_a["logical_run_id"], receipt_b["logical_run_id"]
+        )
+        for field in ("trace_digest", "final_state_digest",
+                      "operation_log_digest", "verified_score", "outcome"):
+            self.assertEqual(receipt_a[field], receipt_b[field], field)
+        self.assertEqual(trace_a, trace_b)
+        self.assertEqual(ops_a, ops_b)
+        del receipt_a["execution_id"], receipt_b["execution_id"]
+        self.assertEqual(
+            canonical_json_bytes(receipt_a), canonical_json_bytes(receipt_b)
+        )

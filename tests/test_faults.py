@@ -35,6 +35,11 @@ FIXTURE_KEYS = ("derivation", "schema_version", "targets")
 EXPECTED_COMBINATIONS = {
     ("17", "greedy-v0"),
     ("17", "bounded-v0"),
+    # AMEND-01 completion demonstrator: seed 18 (q=8, n=5) completes the
+    # greedy full run inside the locked budget, so the REQ-05 faulted
+    # delivery demonstrator can end `completed` (seeds 17/29 cannot).
+    ("18", "greedy-v0"),
+    ("18", "bounded-v0"),
     ("29", "greedy-v0"),
     ("29", "bounded-v0"),
 }
@@ -44,6 +49,34 @@ def _load_fixture():
     return json.loads(
         (FIXTURE_DIR / "fault_targets.json").read_text(encoding="utf-8")
     )
+
+
+from typing import Any  # noqa: E402
+
+
+def _probe_mutate(value, attribute, replacement):
+    """Untyped negative probe: deliberately violates frozen semantics.
+
+    The assignment inside an ``assertRaises(FrozenInstanceError)`` block IS
+    the test; an untyped parameter keeps the runtime assertion intact while
+    telling the static checker the violation is intentional.
+    """
+    setattr(value, attribute, replacement)
+
+
+def _probe_call(callable_object, *arguments):
+    """Untyped negative probe: deliberately wrong-typed arguments.
+
+    The wrong-typed call inside an ``assertRaises(TypeError)`` block IS the
+    test; the untyped signature keeps the runtime assertion intact while
+    telling the static checker the violation is intentional.
+    """
+    return callable_object(*arguments)
+
+
+def _probe_fault(decision) -> Any:
+    """Untyped accessor: the caller asserts ``decision.fired`` first."""
+    return decision.fault
 
 
 def _simulate_first_delivery(seed, policy):
@@ -110,7 +143,7 @@ class TestFaultTargetFixture(unittest.TestCase):
         targets = _load_fixture()["targets"]
         combinations = {(t["seed"], t["policy_id"]) for t in targets}
         self.assertEqual(combinations, EXPECTED_COMBINATIONS)
-        self.assertEqual(len(targets), 4)
+        self.assertEqual(len(targets), 6)
 
     def test_every_target_has_exact_shape_and_place_intent(self):
         targets = _load_fixture()["targets"]
@@ -206,10 +239,17 @@ class TestFaultTargetThroughRunner(unittest.TestCase):
                 result = Runner(evidence=evidence).run(
                     task, policy_obj, config, "execution-fault-target"
                 )
-                # The full run exceeds the 100-step budget (190 steps); the
-                # kill switch is expected here and exercised in detail by the
-                # lifecycle tests. The first delivery still happened.
-                self.assertEqual(result.outcome, "safe_abort")
+                # Outcome depends on the seed's order count: seeds 17/29
+                # generate 10 orders (~190 steps needed), so the faulted
+                # run continues to the kill switch -> safe_abort. The
+                # AMEND-01 completion seed 18 generates 5 orders (92
+                # steps), so its faulted run COMPLETES (REQ-05: the
+                # response-loss fixture must end completed). The first
+                # delivery still happened and stays the frozen target.
+                expected_outcome = (
+                    "completed" if target["seed"] == "18" else "safe_abort"
+                )
+                self.assertEqual(result.outcome, expected_outcome)
                 self.assertGreaterEqual(len(deliveries), 1)
                 first_step, first_intent, first_order = deliveries[0]
                 self.assertEqual(first_step, target["policy_step"])
@@ -267,7 +307,7 @@ class TestFaultModel(unittest.TestCase):
             ["fault_id", "hook", "kind", "operation_key"],
         )
         with self.assertRaises(FrozenInstanceError):
-            fault.kind = "state_corrupt"
+            _probe_mutate(fault, "kind", "state_corrupt")
         with self.assertRaises(ValueError):
             Fault(FAULT_ID_RESPONSE_LOST, TARGET_KEY, "before_commit",
                   KIND_RESPONSE_LOST)
@@ -288,13 +328,13 @@ class TestFaultModel(unittest.TestCase):
         self.assertEqual(tape.identity, digest_json(tape.to_mapping()))
         self.assertRegex(tape.identity, r"^sha256:[0-9a-f]{64}$")
         with self.assertRaises(FrozenInstanceError):
-            tape.faults = ()
+            _probe_mutate(tape, "faults", ())
         with self.assertRaises(ValueError):
             FaultTape(2, (fault,))
         with self.assertRaises(ValueError):
             FaultTape(1, ())
         with self.assertRaises(TypeError):
-            FaultTape(1, ({"fault_id": "x"},))
+            _probe_call(FaultTape, 1, ({"fault_id": "x"},))
 
     def test_decision_carries_its_fault_only_when_fired(self):
         fault = Fault(FAULT_ID_RESPONSE_LOST, TARGET_KEY,
@@ -371,7 +411,7 @@ class TestFaultTapeResolution(unittest.TestCase):
 
     def test_resolver_rejects_invalid_specs_and_run_ids(self):
         with self.assertRaises(TypeError):
-            resolve_fault_tape({"fault_id": "x"}, MODEL_RUN_ID)
+            _probe_call(resolve_fault_tape, {"fault_id": "x"}, MODEL_RUN_ID)
         with self.assertRaises(ValueError):
             resolve_fault_tape(_spec(), "run-1")
         with self.assertRaises(ValueError):
@@ -420,9 +460,9 @@ class TestFaultInjector(unittest.TestCase):
             FaultContext(TARGET_KEY, "place")
         )
         self.assertTrue(fired.fired)
-        self.assertEqual(fired.fault.kind, KIND_RESPONSE_LOST)
+        self.assertEqual(_probe_fault(fired).kind, KIND_RESPONSE_LOST)
         self.assertEqual(
-            fired.fault.hook, HOOK_AFTER_COMMIT_BEFORE_RESPONSE
+            _probe_fault(fired).hook, HOOK_AFTER_COMMIT_BEFORE_RESPONSE
         )
         quiet = self.injector.after_commit_before_response(
             FaultContext(f"op/{MODEL_RUN_ID}/step-9/intent-place-order-01",
@@ -446,11 +486,11 @@ class TestFaultInjector(unittest.TestCase):
 
     def test_injector_validates_tape_and_context(self):
         with self.assertRaises(TypeError):
-            FaultInjector({"faults": []})
+            _probe_call(FaultInjector, {"faults": []})
         with self.assertRaises(TypeError):
-            self.injector.after_commit_before_response("place")
+            _probe_call(self.injector.after_commit_before_response, "place")
         with self.assertRaises(TypeError):
-            self.injector.before_commit(None)
+            _probe_call(self.injector.before_commit, None)
         with self.assertRaises(ValueError):
             self.injector.after_commit_before_response(
                 FaultContext(TARGET_KEY, "move-north-invalid")
@@ -460,7 +500,7 @@ class TestFaultInjector(unittest.TestCase):
         self.assertFalse(hasattr(self.injector, "consumed"))
         self.assertFalse(hasattr(self.injector, "state"))
         with self.assertRaises(FrozenInstanceError):
-            self.tape.faults[0].kind = "duplicate_effect"
+            _probe_mutate(self.tape.faults[0], "kind", "duplicate_effect")
 
 
 # --- T-13: response-loss retry integrated into the runner (REQ-02/04/05) -------
@@ -1010,3 +1050,81 @@ class TestVerifierReleaseGate(unittest.TestCase):
             target.write_text(_fjson.dumps(parsed, indent=2), encoding="utf-8")
             with self.assertRaises(ValueError):
                 _vload(recorder.directory)
+
+
+class TestAmend01CompletionDemonstrator(unittest.TestCase):
+    """T-24/AMEND-01: seed 18 is the frozen completion-demonstrator seed.
+
+    Deterministic selection rule: the FIRST seed in (18, 24, 30, 36) whose
+    full greedy-v0 run completes all orders inside the locked 100-step
+    budget. Seed 18 completes (92 steps), so the rule stops at 18 — the
+    fallback candidates are never needed (B5 already confirmed the winner).
+    """
+
+    def test_seed_18_completes_within_the_locked_budget(self):
+        from robot_factory_arena.domain.task import generate_task
+        from robot_factory_arena.evidence.artifact_store import (
+            RunEvidenceRecorder,
+        )
+        from robot_factory_arena.policies.greedy import GreedyPolicy
+        from robot_factory_arena.runtime.runner import (
+            EvidenceCallbacks,
+            RunConfig,
+            Runner,
+            compute_logical_run_id,
+        )
+
+        task = generate_task(18)
+        # (module-level imports provide the runner/policy names; the
+        # tempfile alias below is the module's own `_ftempfile`)
+        config = RunConfig(
+            1, task.task_version, task.seed, "greedy-v0",
+            policy_manifest_digest("greedy-v0"), 100,
+            ("move", "pick", "place"), None,
+        )
+        with _ftempfile.TemporaryDirectory() as root:
+            recorder = RunEvidenceRecorder(
+                root, task, config, compute_logical_run_id(task, config),
+                "execution-amend01",
+            )
+            evidence = EvidenceCallbacks(**recorder.callback_map())
+            result = Runner(evidence=evidence).run(
+                task, GreedyPolicy(), config, "execution-amend01"
+            )
+            recorder.close()
+        self.assertEqual(result.outcome, "completed")
+        self.assertEqual(result.counters.policy_steps, 92)
+        self.assertLessEqual(result.counters.policy_steps, 100)
+        # committed_effects counts EVERY committed world effect (moves,
+        # picks, and places), not only deliveries: the 92 legal calls all
+        # committed; the five deliveries are the completed_orders.
+        self.assertEqual(result.counters.committed_effects, 92)
+        self.assertEqual(
+            result.final_state.completed_orders,
+            ("order-00", "order-01", "order-02", "order-03", "order-04"),
+        )
+
+    def test_seed_18_first_delivery_matches_the_frozen_target(self):
+        # Both policies deliver order-00 first, at policy step 8: the frozen
+        # AMEND-01 entries must re-simulate from serialized observations only.
+        for policy in (GreedyPolicy(), BoundedPolicy()):
+            with self.subTest(policy=policy.policy_id):
+                step, tool, intent, order_id = _simulate_first_delivery(
+                    18, policy
+                )
+                self.assertEqual((step, tool, intent, order_id),
+                                 (8, "place", "place-order-00", "order-00"))
+
+    def test_selection_rule_stops_at_the_first_completing_candidate(self):
+        # AMEND-01 ordered candidates: (18, 24, 30, 36). 18 completes, so it
+        # wins and the fallbacks stay unevaluated; the frozen fixture entry
+        # is (step 8, place-order-00) for both reference policies.
+        targets = {
+            (target["seed"], target["policy_id"]): target
+            for target in _load_fixture()["targets"]
+        }
+        for policy_id in ("greedy-v0", "bounded-v0"):
+            entry = targets[("18", policy_id)]
+            with self.subTest(policy=policy_id):
+                self.assertEqual(entry["policy_step"], 8)
+                self.assertEqual(entry["intent"], "place-order-00")

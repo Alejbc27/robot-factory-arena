@@ -100,12 +100,32 @@ def _fsync_directory(directory: Path) -> None:
 def _atomic_write(path: Path, data: bytes) -> None:
     """temp + flush + fsync + atomic replace; durability, not a transaction."""
     temp = path.with_name(path.name + ".tmp")
-    with open(temp, "wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
+    try:
+        with open(temp, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+    except OSError as error:
+        # Fail FAST with context: durability failures must surface to the
+        # runner (CommitBoundaryUnprovenError -> unresolved_outcome),
+        # never be swallowed (REQ-05).
+        raise OSError(f"atomic write failed for {path}: {error}") from error
     os.replace(temp, path)
     _fsync_directory(path.parent)
+
+
+def atomic_write_bytes(path, data: bytes) -> None:
+    """Durably write bytes into an existing run directory (B6/T-23 wiring).
+
+    Minimal CLI seam: exposes the recorder's own durability helper (temp +
+    flush + fsync + atomic replace + directory fsync) so the CLI can release
+    ``receipt.json`` / ``replay-result.json`` / ``report.html`` into a closed
+    run directory with identical durability semantics. A durability helper,
+    NOT a transaction or exactly-once claim (REQ-05, REQ-10).
+    """
+    if not isinstance(data, (bytes, bytearray)):
+        raise TypeError("atomic_write_bytes requires bytes")
+    _atomic_write(Path(path), bytes(data))
 
 
 class ArtifactStore:
@@ -161,10 +181,17 @@ class RunArtifactWriter:
         """Append one LF-terminated trace record; flushed and fsynced."""
         if not isinstance(line, (bytes, bytearray)) or not line.endswith(b"\n"):
             raise ValueError("trace lines must be LF-terminated bytes")
-        with open(self._directory / "trace.jsonl", "ab") as handle:
-            handle.write(bytes(line))
-            handle.flush()
-            os.fsync(handle.fileno())
+        try:
+            with open(self._directory / "trace.jsonl", "ab") as handle:
+                handle.write(bytes(line))
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as error:
+            # Fail FAST with context: trace-append durability failures must
+            # surface to the runner, never be swallowed (REQ-05).
+            raise OSError(
+                f"trace append failed for {self._directory}: {error}"
+            ) from error
 
     def persist_commit_boundary(self, record: Mapping) -> None:
         """Durably record one proven persistence boundary (path-only storage).

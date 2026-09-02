@@ -1690,3 +1690,36 @@ class TestViolationSerializationContract(unittest.TestCase):
             list(sort_violations(tuple(result.violations))),
             list(result.violations),
         )
+
+
+class TestGoldenReceiptsMatchLockedSchema(unittest.TestCase):
+    """T-25: every committed golden receipt carries the locked receipt shape.
+
+    The three golden artifacts (public 17, AMEND-01 completion 18, evaluation
+    plumbing 29) are permanent acceptance evidence: their key set must match
+    the locked REQ-03 receipt schema for as long as they are committed.
+    """
+
+    def test_every_golden_receipt_has_exactly_the_locked_keys(self):
+        from robot_factory_arena.evidence.receipt import RECEIPT_KEYS
+
+        for name in ("golden-receipt-17.json", "golden-receipt-18.json",
+                     "golden-receipt-29.json"):
+            with self.subTest(fixture=name):
+                receipt = json.loads(
+                    (FIXTURE_DIR / name).read_text(encoding="utf-8")
+                )
+                self.assertEqual(sorted(receipt), sorted(RECEIPT_KEYS))
+
+    def test_golden_receipts_cover_exactly_the_three_fixture_seeds(self):
+        seeds = {}
+        for name in ("golden-receipt-17.json", "golden-receipt-18.json",
+                     "golden-receipt-29.json"):
+            receipt = json.loads(
+                (FIXTURE_DIR / name).read_text(encoding="utf-8")
+            )
+            seeds[receipt["seed"]] = receipt["outcome"]
+        self.assertEqual(
+            seeds,
+            {"17": "safe_abort", "18": "completed", "29": "safe_abort"},
+        )

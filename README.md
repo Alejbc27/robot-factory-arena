@@ -2,7 +2,7 @@
 
 A deterministic, reproducible agent-evaluation system: a **factory** that assembles bounded agent workers (authorized tools, QC, budgets, release gate) and an **arena** that measures how different control strategies — human-directed, autonomous, swarm — attack the same optimization task. Inspired by the REFUGIO finding (Madrid 2026): autonomous agents fall into local optima when they cannot share discoveries; human+AI teams do not. This project tests that hypothesis with its own instrumentation — measured, not asserted.
 
-**Status: early.** SDD exploration complete; no source code yet. This document is the project charter: goals, scope boundary, and roadmap.
+**Status: v0 implemented.** The deterministic evidence-chain core (SDD batches B1–B6) is complete and green under the one-command gate below; no live providers yet. The charter sections of this document are unchanged.
 
 ## What I want to achieve
 
@@ -26,6 +26,46 @@ The critical path is **deterministic and local**. No framework or live provider 
 | Verifier | Independent, deterministic, anti-cheat: rejects self-reported success and reward hacking. |
 | Fault injection | Deterministic fault tapes (response loss, duplicate delivery, restart) with safe-abort/unresolved outcomes. |
 | Evidence | JSONL trace + receipt per run; replay reproduces trace and score; static `report.html`. |
+
+## v0 implementation (deterministic evidence-chain)
+
+The v0 core is a stdlib-only Python 3.14.5 package (`robot_factory_arena/`): seeded warehouse tasks from the frozen REQ-01 formulas, pure `greedy-v0`/`bounded-v0` reference policies, a runner-owned hard 100-step `policy_steps` budget, an authorized ToolBay with an idempotency ledger, exactly one declarative fault tape (`response_lost_after_commit`), an append-only hash-chained trace, canonical artifacts under `artifacts/runs/<logical_run_id>/<execution_id>/`, an independent artifact-only verifier that owns the official integer score, and a static offline `report.html` per run.
+
+One-command test gate (stdlib `unittest` only, Python 3.14.5):
+
+```text
+python3 -m unittest discover -s tests -v
+```
+
+CLI — run, rerun, and replay are distinct operations:
+
+```text
+# execute one evidenced run and release its verified receipt
+python3 -m robot_factory_arena.cli run --seed 17 --policy greedy-v0
+
+# same logical identity, fresh physical execution, deterministic artifacts compared
+python3 -m robot_factory_arena.cli rerun --seed 17 --policy bounded-v0
+
+# offline replay of one recorded run
+python3 -m robot_factory_arena.cli replay artifacts/runs/<logical_run_id>/<execution_id>
+```
+
+Replay reads only the run directory's `replay-input.json` and `receipt.json`; it never imports or calls a policy or provider, and it reports whether the final-state digest, verified score, and outcome match the receipt. Exit codes: 0 success/match, 1 evidence disagreement (rerun bytes differ, replay mismatch, invalid verification), 2 usage or artifact errors.
+
+The response-loss demonstrator can be declared on `run`/`rerun` with `--fault-step 8 --fault-intent place-order-00`; both constants are predeclared — no policy is ever consulted to resolve a fault target.
+
+Each run directory contains `config.json`, `task.json`, `fault_tape.json` (or the explicit canonical `null` artifact), `trace.jsonl`, `final_state.json`, `operation-log.json`, `replay-input.json`, the verified `receipt.json`, `replay-result.json`, the static `report.html`, and the `boundaries/` commit-proof files. The `boundaries/` files are part of the run evidence, not optional: removing them flips verification to `unresolved_outcome`. Copy a run directory wholesale when moving it offline.
+
+Golden evidence (committed fixtures): public seed 17 (`greedy-v0`, no tape) ends `safe_abort` at the 100-step budget with 5 of 10 orders delivered, verified score 50; evaluation seed 29 (`bounded-v0`, plumbing-only) ends `safe_abort` with 6 of 10, score 60; the completion demonstrator seed 18 (AMEND-01) declares the response-loss tape at step 8 and completes all 5 orders in 92 policy steps with one internal retry, verified score 100.
+
+### v0 honesty boundary
+
+- The trace hash chain and the digest bindings are **tamper evidence, not authentication**: edits are detected, but artifact provenance is not proven.
+- There is **no exactly-once guarantee**: the persistence boundary is a durability and audit proof, not a transaction.
+- There is **no hostile-Python sandbox**: policy outputs are semantically untrusted, but policy source is not treated as hostile malware; no hostile arbitrary-Python isolation is claimed.
+- Evaluation seed 29 is **plumbing-only**: it exercises the plumbing and carries no tuning or experimental claim.
+- **No scientific REFUGIO claim**: the project is paper-inspired; v0 makes no scientific reproduction, leaderboard, R1/R2/R3 arena, or production-security claim.
+- The four report signals are reported separately and are never collapsed into one number; no composite score is computed.
 
 ## Score model
 
