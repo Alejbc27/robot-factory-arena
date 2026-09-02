@@ -15,9 +15,11 @@ entries and ``parallel_tool_calls: false`` is asserted; the model, user
 message (the frozen rendered prompt), and single-call discipline are carried
 unchanged.
 """
+
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 
@@ -42,21 +44,76 @@ ERROR_INVALID_RESPONSE = "invalid_response"
 ERROR_NO_TOOL_CALL = "no_tool_call"
 ERROR_MULTIPLE_TOOL_CALLS = "multiple_tool_calls"
 
+# Upper bound for each sanitized upstream error field in diagnostics.
+_MAX_DETAIL_CHARS = 300
+
+
+def _sanitized_http_detail(body):
+    """Bounded ``code=… message=…`` detail from an upstream error body.
+
+    ONLY the JSON ``error.code`` and ``error.message`` scalar fields are
+    surfaced, whitespace-flattened and truncated. The raw body, headers,
+    the request payload, and any credential material are never included,
+    so an oversized or hostile body cannot leak into diagnostics.
+    """
+    try:
+        envelope = json.loads(body.decode("utf-8"))
+    except (ValueError, AttributeError, TypeError):
+        return ""
+    if not isinstance(envelope, dict):
+        return ""
+    error = envelope.get("error")
+    if not isinstance(error, dict):
+        return ""
+    parts = []
+    for field in ("code", "message"):
+        value = error.get(field)
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            continue
+        flattened = " ".join(str(value).split())[:_MAX_DETAIL_CHARS]
+        if flattened:
+            parts.append(f"{field}={flattened}")
+    if not parts:
+        return ""
+    return ": " + " ".join(parts)
+
 
 def _default_transport(url, headers, payload_bytes, timeout):
-    """The real stdlib transport; the ONLY network touchpoint in the package."""
+    """The real stdlib transport; the ONLY network touchpoint in the package.
+
+    An ``HTTPError`` is a NORMAL upstream answer (a 4xx/5xx response with a
+    body), so it is unwrapped into a plain ``(status, body)`` result instead
+    of collapsing into an opaque transport exception. Without a usable status
+    it propagates to the adapter's deterministic transport-error path.
+    """
     request = urllib.request.Request(
         url, data=payload_bytes, headers=headers, method="POST"
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.status, response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as error:
+        if not isinstance(error.code, int):
+            raise  # no usable status: keep the transport-failure path
+        try:
+            body = error.read()
+        except Exception:
+            body = b""  # the diagnostic body is best-effort; status is enough
+        if error.fp is not None:  # close() needs a body stream to close
+            error.close()
+        return error.code, body
 
 
 class OpenAIProvider:
     """Pinned live adapter: ``provider='openai'``, one model, one call per ask."""
 
-    def __init__(self, model: str, api_url: str = DEFAULT_API_URL,
-                 transport: Transport | None = None, timeout: float = 60.0):
+    def __init__(
+        self,
+        model: str,
+        api_url: str = DEFAULT_API_URL,
+        transport: Transport | None = None,
+        timeout: float = 60.0,
+    ):
         if not isinstance(model, str) or not model:
             raise TypeError("model must be a non-empty string")
         if not isinstance(api_url, str) or not api_url:
@@ -106,8 +163,10 @@ class OpenAIProvider:
         api_key = os.environ.get(API_KEY_VARIABLE)  # read at call time only
         if not api_key:
             return self._error(
-                request, ERROR_MISSING_KEY,
-                f"{API_KEY_VARIABLE} is not set in the environment", started,
+                request,
+                ERROR_MISSING_KEY,
+                f"{API_KEY_VARIABLE} is not set in the environment",
+                started,
             )
         payload = {
             "model": request.model,
@@ -125,24 +184,32 @@ class OpenAIProvider:
             ],
             "parallel_tool_calls": False,
         }
+        if request.model == "gpt-5.6-luna":
+            payload["reasoning_effort"] = "none"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",  # header only, never stored
         }
         try:
             status, body = self._transport(
-                self._api_url, headers,
-                json.dumps(payload).encode("utf-8"), self._timeout,
+                self._api_url,
+                headers,
+                json.dumps(payload).encode("utf-8"),
+                self._timeout,
             )
         except Exception as error:  # transport failures are deterministic
             return self._error(
-                request, ERROR_TRANSPORT,
-                f"transport failure: {type(error).__name__}", started,
+                request,
+                ERROR_TRANSPORT,
+                f"transport failure: {type(error).__name__}",
+                started,
             )
         if status != 200:
             return self._error(
-                request, ERROR_HTTP,
-                f"upstream returned HTTP {status}", started,
+                request,
+                ERROR_HTTP,
+                f"upstream returned HTTP {status}{_sanitized_http_detail(body)}",
+                started,
             )
         try:
             envelope = json.loads(body.decode("utf-8"))
@@ -150,8 +217,10 @@ class OpenAIProvider:
             api_usage = envelope["usage"]
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
-                "response is not a usable chat-completions envelope", started,
+                request,
+                ERROR_INVALID_RESPONSE,
+                "response is not a usable chat-completions envelope",
+                started,
             )
         raw_tokens = (
             api_usage.get("prompt_tokens"),
@@ -162,26 +231,35 @@ class OpenAIProvider:
             for value in raw_tokens
         ):
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
-                "usage counts are missing or not integers", started,
+                request,
+                ERROR_INVALID_RESPONSE,
+                "usage counts are missing or not integers",
+                started,
             )
         usage = Usage(raw_tokens[0], raw_tokens[1], raw_tokens[0] + raw_tokens[1])
         content = message.get("content")
         if content is not None and not isinstance(content, str):
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
-                "message content must be a string or null", started,
+                request,
+                ERROR_INVALID_RESPONSE,
+                "message content must be a string or null",
+                started,
             )
         tool_calls = message.get("tool_calls") or []
         if len(tool_calls) > 1:
             return self._error(
-                request, ERROR_MULTIPLE_TOOL_CALLS,
-                "the model attempted parallel/multiple tool calls", started,
+                request,
+                ERROR_MULTIPLE_TOOL_CALLS,
+                "the model attempted parallel/multiple tool calls",
+                started,
             )
         if not tool_calls:
             return self._error(
-                request, ERROR_NO_TOOL_CALL,
-                "the model answered without a tool call", started, usage
+                request,
+                ERROR_NO_TOOL_CALL,
+                "the model answered without a tool call",
+                started,
+                usage,
             )
         try:
             function = tool_calls[0]["function"]
@@ -189,26 +267,33 @@ class OpenAIProvider:
             arguments_text = function["arguments"]
         except (KeyError, TypeError, IndexError):
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
+                request,
+                ERROR_INVALID_RESPONSE,
                 "tool call is missing its function name or arguments",
                 started,
             )
         if not isinstance(name, str) or not name:
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
-                "tool call name must be a non-empty string", started,
+                request,
+                ERROR_INVALID_RESPONSE,
+                "tool call name must be a non-empty string",
+                started,
             )
         try:
             arguments = json.loads(arguments_text)
         except (ValueError, TypeError):
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
-                "tool call arguments are not valid JSON", started,
+                request,
+                ERROR_INVALID_RESPONSE,
+                "tool call arguments are not valid JSON",
+                started,
             )
         if not isinstance(arguments, dict):
             return self._error(
-                request, ERROR_INVALID_RESPONSE,
-                "tool call arguments must be a JSON object", started,
+                request,
+                ERROR_INVALID_RESPONSE,
+                "tool call arguments must be a JSON object",
+                started,
             )
         latency_ms = (time.monotonic_ns() - started) // 1_000_000
         return ProviderResult(

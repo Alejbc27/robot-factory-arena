@@ -28,6 +28,7 @@ The module imports ONLY the tool-call contract, the canonical digest
 authority, and the provider request envelope (AST-enforced): no runtime,
 verifier, world state, or mutable runtime-state access.
 """
+
 from dataclasses import dataclass
 
 from robot_factory_arena.contracts.tool_call import (
@@ -59,6 +60,16 @@ PROMPT_TEMPLATE = (
     "The host will add the operation key and will validate the action. If no legal\n"
     "action is possible, still select the single best action supported by the\n"
     "observation.\n"
+    "\n"
+    "Operating procedure:\n"
+    "Coordinate convention: east x+1, west x-1, north y+1, south y-1.\n"
+    "If carrying an item, find its pending matching order, move one\n"
+    "Manhattan-reducing step toward base_position, then call place only at base.\n"
+    "If empty, select the first pending order in list order, find the shelf with\n"
+    "its item_id, move one Manhattan-reducing step toward that shelf, then call\n"
+    "pick only when at that shelf.\n"
+    "After every action, re-read the current observation and last_result. Do not\n"
+    "repeat a rejected action. Never target completed or non-pending orders/items.\n"
     "\n"
     "Serialized observation:\n"
     "{{observation_json}}\n"
