@@ -1277,7 +1277,16 @@ class Verifier:
 
         derived = {
             "policy_steps": max_nonretry_step,
-            "tool_attempts": len(operations) if ops_ok else 0,
+            # AMEND-v0-2 (REQ-02): tool_attempts counts ToolBay
+            # submissions only. Parse-level rejections (malformed_call,
+            # unsupported_tool, operation_key_invalid) never reach the
+            # ToolBay, so their op-log entries (tool is null) do not
+            # count; the entries stay in the log for audit.
+            "tool_attempts": (
+                sum(1 for op in operations if op["tool"] is not None)
+                if ops_ok
+                else 0
+            ),
             "committed_effects": commit_count if ops_ok else 0,
             "internal_retries": (
                 sum(1 for op in operations if op["retry"]) if ops_ok else 0
