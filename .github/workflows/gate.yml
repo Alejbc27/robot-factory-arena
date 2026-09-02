@@ -14,6 +14,6 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
         with:
-          python-version: "3.14"
+          python-version: "3.14.5"
       - name: One-command unittest gate
         run: python -m unittest discover -s tests -v
