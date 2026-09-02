@@ -1,6 +1,6 @@
 # Robot Factory & Arena
 
-A deterministic, reproducible agent-evaluation system: a **factory** that assembles bounded agent workers (authorized tools, QC, budgets, release gate) and an **arena** that measures how different control strategies — human-directed, autonomous, swarm — attack the same optimization task. Inspired by the REFUGIO finding (Madrid 2026): autonomous agents fall into local optima when they cannot share discoveries; human+AI teams do not. This project tests that hypothesis with its own instrumentation — measured, not asserted.
+A deterministic, reproducible agent-evaluation system: a **factory** that assembles bounded agent workers (authorized tools, QC, budgets, release gate) and an **arena** that measures how different control strategies — human-directed, autonomous, swarm — attack the same optimization task. Inspired by REFUGIO Madrid (2026), where autonomous frontier agents on that task tended to plateau while human+AI teams advanced through shared discoveries; later models recovered some of the same exploits independently. This project tests that hypothesis with its own instrumentation — measured, not asserted.
 
 **Status: v0 implemented.** The deterministic evidence-chain core (SDD batches B1–B6) is complete and green under the one-command gate below; no live providers yet. The charter sections of this document are unchanged.
 

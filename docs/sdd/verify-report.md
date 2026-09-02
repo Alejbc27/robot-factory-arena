@@ -2,9 +2,9 @@
 
 ## Status
 
-**FAIL — archive-blocked, with the implementation evidence otherwise largely passing.**
+**PASS — verification findings remediated.**
 
-The v0 runtime, evidence chain, independent verifier, CLI flows, replay, fault handling, and golden artifacts were exercised successfully. Archive is blocked by two CRITICAL findings: an authoritative Engram tasks snapshot still contains an unchecked B6 implementation marker, and two discovery-only tests contain assertions that do not exercise production behavior under the strict-TDD assertion-quality rules. A WARNING also remains for the report's mislabeled actions-per-delivery denominator.
+Initial verification found two CRITICAL findings (C-01 stale Engram tasks checkbox; C-02 placeholder tests with no production assertions) and three WARNINGs (W-01 mislabeled report metric; W-02 TDD evidence format; W-03 import order). **All merge-blocking findings were remediated** — see "Remediation (post-verification)" and the "Initial archive decision (superseded)" section below; original findings preserved for traceability. Remediation commit: `86a54f5`; C-01 was reconciled by the orchestrator before remediation.
 
 ## Executive summary
 
@@ -208,9 +208,9 @@ README and generated reports correctly state:
 
 No forbidden claim was found in the inspected v0 implementation/report path.
 
-## Archive decision
+## Initial archive decision (superseded)
 
-**Not ready for archive.** Reconcile the stale Engram B6 checkbox and address the two strict-TDD assertion-quality blockers before declaring a clean verification pass. The report-metric warning and ruff findings are non-archive-blocking but should remain visible to reviewers.
+**Not ready for archive (superseded — see Final archive decision at the end of this report).** Reconcile the stale Engram B6 checkbox and address the two strict-TDD assertion-quality blockers before declaring a clean verification pass. The report-metric warning and ruff findings are non-archive-blocking but should remain visible to reviewers.
 
 ## Remediation (post-verification)
 
@@ -224,3 +224,7 @@ One remediation commit on `feat/v0-evidence-chain` (the single commit containing
 | W-03 three E402 | FIXED | `tests/test_faults.py`: all mid-file imports moved into the top import block (stdlib first, then `robot_factory_arena`, merged duplicates, `# noqa: E402` dropped, `_f`/`_v` aliases renamed to canonical names — behavior-identical). `ruff check` now passes with zero findings. |
 
 Additional checker hygiene in the same commit (repo-convention, not a listed finding): the pre-existing frozen-dataclass probe in `tests/test_adversarial_verifier.py` now routes through an untyped `_probe_mutate` helper (B5-established pattern, behavior-identical), and `_ratio_text` gained `Mapping`/`int` annotations with a single-binding narrowing fix in `render_report` — leaving the tree checker-clean like B5. The stale Engram tasks checkbox (C-01) was already reconciled by the orchestrator before this remediation.
+
+## Final archive decision
+
+**Ready for merge/archive.** All merge-blocking findings are resolved: C-01 reconciled (orchestrator, 2026-09-02), C-02 fixed in `86a54f5`; W-01 and W-03 fixed in the same commit; W-02 assessed not-actionable with justification above. Verified gate after remediation: **354 tests, 0 failures, 0 errors, run twice** under Python 3.14.5. This section supersedes the initial archive decision; the original findings are retained above unchanged for traceability.
