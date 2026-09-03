@@ -92,6 +92,24 @@ class TestLlmUsageReporting(unittest.TestCase):
             output.getvalue(),
         )
 
+    def test_glm_cost_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._write_provider_run(
+                root,
+                self._provider_run(
+                    "glm-5.3-flash",
+                    [{"input_tokens": 2, "output_tokens": 3, "total_tokens": 5}],
+                ),
+            )
+            output = StringIO()
+            with redirect_stdout(output):
+                cli._report_llm_usage(root)
+
+        self.assertIn(
+            "llm_estimated_cost_usd: unavailable (no pricing for glm-5.3-flash)",
+            output.getvalue(),
+        )
+
     def test_luna_run_with_no_usage_reports_zero_cost(self):
         with tempfile.TemporaryDirectory() as root:
             self._write_provider_run(
@@ -155,6 +173,27 @@ class TestLlmUsageReporting(unittest.TestCase):
             i for i, line in enumerate(lines) if line.startswith("llm_usage:")
         )
         self.assertLess(report_index, usage_index)
+
+
+class TestGlmProviderCliRegistration(unittest.TestCase):
+    def test_glm_is_an_available_provider_choice(self):
+        parser = cli._build_parser()
+        for command in ("run", "rerun"):
+            with self.subTest(command=command):
+                args = parser.parse_args(
+                    [command, "--seed", "1", "--provider", "glm", "--model", "glm-4.5"]
+                )
+                self.assertEqual(args.provider, "glm")
+                self.assertEqual(args.model, "glm-4.5")
+
+    def test_glm_wires_to_the_pinned_provider_without_invoking_network(self):
+        policy = cli._build_llm_policy("glm", "glm-4.5", None)
+        self.assertEqual(policy.provider, "glm")
+        self.assertEqual(policy.model, "glm-4.5")
+
+    def test_glm_rejects_script_like_openai(self):
+        args = SimpleNamespace(provider="glm", model="glm-4.5", script="script.json")
+        self.assertEqual(cli._validate_llm_args(args), 2)
 
 
 if __name__ == "__main__":

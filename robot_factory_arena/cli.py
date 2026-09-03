@@ -168,12 +168,16 @@ def _build_llm_policy(provider, model, script_results):
     imports them — same discipline as the reference policies above)."""
     from robot_factory_arena.policies.llm import LLMPolicy
     from robot_factory_arena.providers.fake import FakeProvider
+    from robot_factory_arena.providers.glm import GLMProvider
     from robot_factory_arena.providers.openai import OpenAIProvider
 
     if provider == "fake":
         return LLMPolicy(FakeProvider(script=script_results or ()))
     if provider == "openai":
         return LLMPolicy(OpenAIProvider(model))
+    if provider == "glm":
+        return LLMPolicy(GLMProvider(model))
+
     raise ValueError(f"unsupported provider: {provider!r}")
 
 
@@ -427,12 +431,13 @@ def _validate_llm_args(args) -> int | None:
     if provider == "fake" and script is None:
         print("error: --provider fake requires --script", file=sys.stderr)
         return 2
-    if provider == "openai" and script is not None:
+    if provider in ("openai", "glm") and script is not None:
         print(
-            "error: --provider openai does not accept --script",
+            f"error: --provider {provider} does not accept --script",
             file=sys.stderr,
         )
         return 2
+
     return None
 
 
@@ -445,7 +450,11 @@ def _run_and_report(args, rerun: bool) -> int:
         script_results = (
             _load_script(Path(args.script)) if args.provider == "fake" else None
         )
-        llm = (args.provider, args.model, script_results)
+        llm = (
+            args.provider,
+            args.model,
+            script_results,
+        )
     if (args.fault_step is None) != (args.fault_intent is None):
         print(
             "error: --fault-step and --fault-intent must be provided together",
@@ -586,7 +595,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--provider",
         default=None,
-        choices=("fake", "openai"),
+        choices=("fake", "openai", "glm"),
         help="LLM provider policy (default: the selected reference policy)",
     )
     parser.add_argument(

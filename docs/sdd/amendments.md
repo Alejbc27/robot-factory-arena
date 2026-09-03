@@ -17,8 +17,15 @@ Accepted amendments to the v0 specification (Engram observation 6170 / working c
 - **Scope**: the counter derivation in `verification/verifier.py` (+ tests) only. REQ-02's counter definitions, the operation-log schema (including `tool: null` rejection records), runner counter behavior, the receipt/trace cross-checks, all locked schemas, and the v0 golden fixtures (which contain no parse-rejection entries, so their expected values are unchanged) are untouched. Frozen-module rule: this is the single authorized verifier correction under AMEND-v0-2; no other frozen behavior changes.
 
 ## AMEND-4A-2 — Prompt wording reconciled with real-provider acceptance
-
+    
 - **Accepted**: 2026-09-02, maintainer `alejandrobosch` (issue #11).
 - **Context**: real-provider acceptance exposed insufficient navigation guidance in the exact P4A-REQ-04 prompt wording.
 - **Decision**: issue #11 supersedes that wording; the authoritative prompt is now the template frozen by the new prompt digest.
 - **Scope**: prompt template and prompt digest only. Core schemas, verifier, and replay are unchanged.
+    
+## AMEND-5A-1 — GLM adapter pinned to the Coding Plan endpoint for the MVP
+    
+- **Accepted**: 2026-09-03, maintainer `alejbc27` (interactive decision; issue #13).
+- **Context**: after the PR #14 review re-scoped the adapter to the standard Open Platform endpoint, a live probe showed the maintainer account carries no Open Platform USD balance (HTTP 429, code=1113 "Insufficient balance or no resource package"), while the Coding Plan quota is active. Standard-surface acceptance would require recharging balance or a ~30–70 min free-model run. Z.AI's Usage Policy limits the GLM Coding Plan to officially supported tools and this project is not one; the maintainer accepted that documented restriction as an informed decision for private MVP use (own account, own quota, no redistribution).
+- **Decision**: `GLMProvider.API_URL` is pinned to `https://api.z.ai/api/coding/paas/v4/chat/completions` so GLM usage consumes the maintainer's Coding Plan quota. The pre-existing live acceptance run (`glm-5.3-flash`: completed, 100/100, 92/92 tool calls, 124,920 tokens, offline replay match, clean secret scan over 105 artifacts) stands as the Phase 5A live acceptance. No custom endpoint injection is reintroduced.
+- **Scope**: the endpoint constant and its test only. All other PR #14 review properties are preserved: no `--api-url`, dual object/string `function.arguments` parsing, no `parallel_tool_calls`, secret-safe bounded errors, and the frozen core untouched.
