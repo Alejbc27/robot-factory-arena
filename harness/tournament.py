@@ -61,7 +61,10 @@ def validate_config(config):
             versions.is_known_core_version(config["core_version"]),
             "unknown core_version (fail closed)",
         ),
-        (_nonempty(config["provider"]) and _nonempty(config["model"]), "provider/model"),
+        (
+            _nonempty(config["provider"]) and _nonempty(config["model"]),
+            "provider/model",
+        ),
         (
             isinstance(config["generation"], dict) and bool(config["generation"]),
             "generation settings",
@@ -81,8 +84,7 @@ def validate_config(config):
             "tool grants",
         ),
         (
-            config["fault_config"] is None
-            or isinstance(config["fault_config"], dict),
+            config["fault_config"] is None or isinstance(config["fault_config"], dict),
             "fault configuration",
         ),
         (config["seeds"] == [18, 24, 30], "ordered seeds"),
@@ -128,7 +130,9 @@ def load_sealed(root, tournament_id, artifact_root="artifacts/tournaments"):
 
 
 def reject_drift(sealed, candidate):
-    drifted = [field for field in FROZEN_FIELDS if sealed.get(field) != candidate.get(field)]
+    drifted = [
+        field for field in FROZEN_FIELDS if sealed.get(field) != candidate.get(field)
+    ]
     if drifted:
         raise TournamentError(f"comparability drift in frozen fields: {drifted}")
 

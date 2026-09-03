@@ -190,9 +190,12 @@ class TestAppendOnlyLogs(Base):
             log.verify(expected_tail_digest=anchor)
         path.write_bytes(raw)
         lines = path.read_bytes().splitlines(keepends=True)
-        lines[0] = strategy_context.canonical_json_bytes(
-            {"schema_version": 1, "seq": 0, "prev_digest": None, "event": "a!"}
-        ) + b"\n"
+        lines[0] = (
+            strategy_context.canonical_json_bytes(
+                {"schema_version": 1, "seq": 0, "prev_digest": None, "event": "a!"}
+            )
+            + b"\n"
+        )
         path.write_bytes(b"".join(lines))
         with self.assertRaises(logs.LogIntegrityError):
             log.verify()
@@ -269,9 +272,7 @@ class TestSubprocessAdapter(Base):
     def test_exact_command_and_registration_before_start(self):
         frozen, meta, result, calls = self._launch(self.root)
         self.assertEqual(
-            calls[0][
-                calls[0].index("--strategy-context") + 1 :
-            ],
+            calls[0][calls[0].index("--strategy-context") + 1 :],
             [str(self.root / "contexts" / "strategy-context-000.json")],
         )
         self.assertTrue(
@@ -311,9 +312,7 @@ class TestSubprocessAdapter(Base):
             "logical_run_id": "logical-run-1",
             "policy_digest": "sha256:" + "d" * 64,
         }
-        chain = subprocess_adapter.bind_identity(
-            meta, reported, core_config, receipt
-        )
+        chain = subprocess_adapter.bind_identity(meta, reported, core_config, receipt)
         self.assertEqual(chain["context_digest"], frozen["digest"])
         self.assertEqual(chain["logical_run_id"], "logical-run-1")
         strategy_context.verify_context_chain(

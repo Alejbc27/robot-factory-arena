@@ -102,7 +102,9 @@ def register_launch(tournament_root, attempt_id, metadata):
         raise LaunchError(f"launch metadata missing: {missing}")
     path = _attempt_dir(tournament_root, attempt_id) / "launch.json"
     if path.exists():
-        raise LaunchError(f"attempt metadata immutable: {attempt_id} already registered")
+        raise LaunchError(
+            f"attempt metadata immutable: {attempt_id} already registered"
+        )
     stored = {
         "schema_version": versions.LAUNCH_SCHEMA_VERSION,
         "attempt_id": attempt_id,

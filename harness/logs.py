@@ -47,7 +47,9 @@ class AppendOnlyLog:
         try:
             return [json.loads(line) for line in self._lines()]
         except json.JSONDecodeError as exc:
-            raise LogIntegrityError(f"log contains a non-JSON line: {self.path}") from exc
+            raise LogIntegrityError(
+                f"log contains a non-JSON line: {self.path}"
+            ) from exc
 
     def tail_digest(self):
         lines = self._lines()
