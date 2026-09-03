@@ -25,7 +25,7 @@ from robot_factory_arena.providers.adapter import (
 Transport = Callable[[str, dict, bytes, float], "tuple[int, bytes]"]
 
 PROVIDER_ID = "glm"
-API_URL = "https://api.z.ai/api/paas/v4/chat/completions"
+API_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions"
 API_KEY_VARIABLE = "ZAI_API_KEY"
 
 ERROR_MISSING_KEY = "missing_api_key"
