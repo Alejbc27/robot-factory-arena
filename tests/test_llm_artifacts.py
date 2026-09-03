@@ -31,8 +31,8 @@ from robot_factory_arena.evidence.receipt import ReceiptWriter
 from robot_factory_arena.policies.llm import (
     DecisionRecord,
     LLMPolicy,
-    llm_policy_digest,
-    prompt_template_digest,
+    llm_vnext_policy_digest,
+    prompt_composition_digest,
     tool_schema_digest,
 )
 from robot_factory_arena.providers.adapter import (
@@ -99,8 +99,8 @@ def _policy(*script):
 
 def _config(task):
     return RunConfig(
-        1, task.task_version, task.seed, "llm-v0",
-        llm_policy_digest("fake", "fake-v1"), 100, GRANTS, None,
+        1, task.task_version, task.seed, "llm-v1",
+        llm_vnext_policy_digest("fake", "fake-v1"), 100, GRANTS, None,
     )
 
 
@@ -127,8 +127,8 @@ def _completion_script(seed="18"):
 
     task = generate_task(seed)
     config = RunConfig(
-        1, task.task_version, task.seed, "llm-v0",
-        llm_policy_digest("fake", "fake-v1"), 100, GRANTS, None,
+        1, task.task_version, task.seed, "llm-v1",
+        llm_vnext_policy_digest("fake", "fake-v1"), 100, GRANTS, None,
     )
     observations = {}
 
@@ -360,7 +360,7 @@ class TestSidecarShapes(unittest.TestCase):
             self.directory,
             self.logical_run_id,
             "exec-llm-1",
-            prompt_template_digest(),
+            prompt_composition_digest(),
             tool_schema_digest(),
             self.policy.decisions,
             self.directory / "receipt.json",
@@ -425,7 +425,7 @@ class TestSidecarShapes(unittest.TestCase):
         self.assertEqual(llm_receipt["execution_id"], "exec-llm-1")
         self.assertEqual(llm_receipt["provider"], "fake")
         self.assertEqual(llm_receipt["model"], "fake-v1")
-        self.assertEqual(llm_receipt["prompt_digest"], prompt_template_digest())
+        self.assertEqual(llm_receipt["prompt_digest"], prompt_composition_digest())
         self.assertEqual(llm_receipt["tool_schema_digest"], tool_schema_digest())
         for value in llm_receipt.values():
             if isinstance(value, str) and value.startswith("sha256:"):
@@ -497,7 +497,7 @@ class TestFailClosedExport(unittest.TestCase):
             with self.assertRaises(SecretDetectedError) as caught:
                 write_provider_artifacts(
                     directory, logical_run_id, "exec-llm-1",
-                    prompt_template_digest(), tool_schema_digest(),
+                    prompt_composition_digest(), tool_schema_digest(),
                     policy.decisions, directory / "receipt.json",
                 )
             self.assertIn("secret_detected", str(caught.exception))
@@ -525,7 +525,7 @@ class TestFailClosedExport(unittest.TestCase):
             )
             write_provider_artifacts(
                 directory, logical_run_id, "exec-llm-1",
-                prompt_template_digest(), tool_schema_digest(),
+                prompt_composition_digest(), tool_schema_digest(),
                 policy.decisions, directory / "receipt.json",
             )
             text = "\n".join(
@@ -554,7 +554,7 @@ class TestStaticLLMReport(unittest.TestCase):
             self.directory,
             self.logical_run_id,
             "exec-llm-1",
-            prompt_template_digest(),
+            prompt_composition_digest(),
             tool_schema_digest(),
             self.policy.decisions,
             self.directory / "receipt.json",
@@ -614,7 +614,7 @@ class TestStaticLLMReport(unittest.TestCase):
         core_bytes = (self.directory / "receipt.json").read_bytes()
         receipt = build_llm_receipt(
             self.logical_run_id, "exec-llm-1", "fake", "fake-v1",
-            prompt_template_digest(), tool_schema_digest(),
+            prompt_composition_digest(), tool_schema_digest(),
             provider_run, core_bytes,
         )
         html = render_llm_report(self.core_receipt, receipt, provider_run)

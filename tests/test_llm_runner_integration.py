@@ -7,6 +7,7 @@ makes no ToolBay submission/world effect, and exposes last_result.status ==
 identity flows only through policy_digest/logical_run_id; and the trace
 carries only the existing normalized fields.
 """
+
 import json
 import tempfile
 import unittest
@@ -14,7 +15,10 @@ from pathlib import Path
 
 from robot_factory_arena.domain.task import generate_task
 from robot_factory_arena.evidence.artifact_store import RunEvidenceRecorder
-from robot_factory_arena.policies.llm import LLMPolicy, llm_policy_digest
+from robot_factory_arena.policies.llm import (
+    LLMPolicy,
+    llm_vnext_policy_digest,
+)
 from robot_factory_arena.providers.adapter import (
     ProviderError,
     ProviderResult,
@@ -79,17 +83,35 @@ def _script(moves, trailing_error):
     return script
 
 
-def _config(task, provider="fake", model="fake-v1"):
+def _config(task, provider="fake", model="fake-v1", strategy_context=None):
     return RunConfig(
         1,
         task.task_version,
         task.seed,
-        "llm-v0",
-        llm_policy_digest(provider, model),
+        "llm-v1",
+        llm_vnext_policy_digest(provider, model, strategy_context),
         100,
         GRANTS,
         None,
     )
+
+
+def _guidance_context(*texts):
+    """A minimal valid §2.1 StrategyContext carrying ordered guidance."""
+    return {
+        "schema_version": 1,
+        "source_tournament_id": "tournament-test",
+        "guidance": [
+            {
+                "guidance_id": f"guidance-{ordinal + 1:04d}",
+                "author_id": "human",
+                "guidance_ordinal": ordinal,
+                "text": text,
+            }
+            for ordinal, text in enumerate(texts)
+        ],
+        "discoveries": [],
+    }
 
 
 class _ObservationCollector:
@@ -130,9 +152,7 @@ class TestProviderErrorConsumesOneStepAndCannotMutateTheWorld(unittest.TestCase)
         # Step 8's rejection is exposed to the NEXT observation (step 9).
         after = collector.observations[9]
         self.assertEqual(after["policy_steps"]["used"], 8)
-        self.assertEqual(
-            after["last_result"]["status"], "rejected"
-        )
+        self.assertEqual(after["last_result"]["status"], "rejected")
         self.assertEqual(after["last_result"]["reason"], "malformed_call")
         self.assertEqual(
             after["last_result"]["operation_key"],
@@ -222,13 +242,59 @@ class TestIdentityFlowsOnlyThroughPolicyDigest(unittest.TestCase):
         self.assertEqual(tuple(sorted(mapping)), tuple(sorted(RUN_CONFIG_KEYS)))
 
 
+class TestStrategyContextIdentityFlowsThroughLogicalId(unittest.TestCase):
+    """AMEND-4A-3 (design §3.3): context identity is RunConfig identity.
+
+    A changed context changes the vNext policy digest and therefore the
+    logical run id; canonical-equivalent reordered contexts share one
+    identity; the RunConfig key set stays frozen.
+    """
+
+    def test_changed_context_changes_policy_digest_and_logical_id(self):
+        task = generate_task("17")
+        config_plain = _config(task)
+        config_guided = _config(task, strategy_context=_guidance_context("hold north"))
+        self.assertEqual(config_guided.policy_id, "llm-v1")
+        self.assertNotEqual(config_plain.policy_digest, config_guided.policy_digest)
+        self.assertNotEqual(
+            compute_logical_run_id(task, config_plain),
+            compute_logical_run_id(task, config_guided),
+        )
+
+    def test_canonical_equivalent_contexts_share_one_logical_id(self):
+        task = generate_task("17")
+        first = _guidance_context("first", "second")
+        reordered = {
+            **first,
+            "guidance": list(reversed(first["guidance"])),
+            "discoveries": list(first["discoveries"]),
+        }
+        config_a = _config(task, strategy_context=first)
+        config_b = _config(task, strategy_context=reordered)
+        self.assertEqual(config_a.policy_digest, config_b.policy_digest)
+        self.assertEqual(
+            compute_logical_run_id(task, config_a),
+            compute_logical_run_id(task, config_b),
+        )
+
+
 class TestTraceCarriesOnlyNormalizedFields(unittest.TestCase):
     """P4A-REQ-09: raw provider output never reaches the core trace."""
 
     LOCKED_TRACE_FIELDS = {
-        "schema_version", "seq", "logical_run_id", "policy_step", "event",
-        "operation_key", "tool", "arguments", "state_before", "state_after",
-        "payload", "prev_event_hash", "event_hash",
+        "schema_version",
+        "seq",
+        "logical_run_id",
+        "policy_step",
+        "event",
+        "operation_key",
+        "tool",
+        "arguments",
+        "state_before",
+        "state_after",
+        "payload",
+        "prev_event_hash",
+        "event_hash",
     }
 
     def test_trace_records_stay_within_the_locked_normalized_shape(self):
@@ -244,7 +310,10 @@ class TestTraceCarriesOnlyNormalizedFields(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as root:
             recorder = RunEvidenceRecorder(
-                root, task, config, compute_logical_run_id(task, config),
+                root,
+                task,
+                config,
+                compute_logical_run_id(task, config),
                 "exec-integration-3",
             )
             Runner(evidence=EvidenceCallbacks(**recorder.callback_map())).run(
@@ -257,8 +326,12 @@ class TestTraceCarriesOnlyNormalizedFields(unittest.TestCase):
             self.assertEqual(set(record), self.LOCKED_TRACE_FIELDS)
         self.assertIn('"policy_decision"', raw)
         for forbidden in (
-            "raw_visible_response", "latency_ms", "tool_schema", "prompt",
-            "script_exhausted", "moving north",
+            "raw_visible_response",
+            "latency_ms",
+            "tool_schema",
+            "prompt",
+            "script_exhausted",
+            "moving north",
         ):
             self.assertNotIn(forbidden, raw)
 

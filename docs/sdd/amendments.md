@@ -23,6 +23,13 @@ Accepted amendments to the v0 specification (Engram observation 6170 / working c
 - **Decision**: issue #11 supersedes that wording; the authoritative prompt is now the template frozen by the new prompt digest.
 - **Scope**: prompt template and prompt digest only. Core schemas, verifier, and replay are unchanged.
 
+## AMEND-4A-3 — Canonical StrategyContext bound to LLM policy identity
+
+- **Accepted**: 2026-09-03, maintainer `alejbc27` (interactive decision, SDD apply phase; change `phase6-langgraph-harness`).
+- **Context**: Phase 6 orchestration needs a causal, auditable channel for R3 shared discoveries and (where selected) R1 human guidance. Prompt injection through an unbound external string would make policy identity and rerun identity incomplete, while modifying the frozen AMEND-4A-2 prompt authority or the core observation would violate the evidence boundary.
+- **Decision**: introduce `StrategyContext`, a canonical JSON value frozen before every LLM-policy core run. The value is either JSON `null` (no context) or the schema-versioned object defined by the Phase 6 design. Its canonical UTF-8 JSON bytes are digested with the existing SHA-256 canonical digest authority. LLMPolicy vNext composes the unchanged AMEND-4A-2 prompt rendering with an exact, separately digested StrategyContext suffix; the observation remains unchanged and providers receive the existing ProviderRequest envelope. The vNext policy manifest retains the existing manifest fields and adds `strategy_context_digest` as a behavior-affecting field; the field is always present and is `null` when context is absent. Consequently, changing StrategyContext changes `policy_digest` and the existing `logical_run_id` through the unchanged RunConfig/logical-identity path. No environment variable, provider adapter change, observation mutation, runtime/world-state input, or coordinator model is permitted.
+- **Scope**: one policy/composition amendment only: StrategyContext validation/canonicalization, vNext prompt composition and prompt-composition digest, manifest/policy-digest extension, and CLI composition plumbing that supplies a frozen context file to LLMPolicy. `domain/`, `runtime/`, `evidence/`, `verification/`, `providers/`, ProviderAdapter implementations, receipt/provider-evidence shapes, verifier/replay/trace contracts, and the `RunConfig` schema are unchanged.
+
 ## AMEND-5A-1 — GLM adapter pinned to the Coding Plan endpoint for the MVP
 
 - **Accepted**: 2026-09-03, maintainer `alejbc27` (interactive decision; issue #13).
