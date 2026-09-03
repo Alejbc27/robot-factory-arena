@@ -7,6 +7,7 @@ makes no ToolBay submission/world effect, and exposes last_result.status ==
 identity flows only through policy_digest/logical_run_id; and the trace
 carries only the existing normalized fields.
 """
+
 import json
 import tempfile
 import unittest
@@ -151,9 +152,7 @@ class TestProviderErrorConsumesOneStepAndCannotMutateTheWorld(unittest.TestCase)
         # Step 8's rejection is exposed to the NEXT observation (step 9).
         after = collector.observations[9]
         self.assertEqual(after["policy_steps"]["used"], 8)
-        self.assertEqual(
-            after["last_result"]["status"], "rejected"
-        )
+        self.assertEqual(after["last_result"]["status"], "rejected")
         self.assertEqual(after["last_result"]["reason"], "malformed_call")
         self.assertEqual(
             after["last_result"]["operation_key"],
@@ -254,9 +253,7 @@ class TestStrategyContextIdentityFlowsThroughLogicalId(unittest.TestCase):
     def test_changed_context_changes_policy_digest_and_logical_id(self):
         task = generate_task("17")
         config_plain = _config(task)
-        config_guided = _config(
-            task, strategy_context=_guidance_context("hold north")
-        )
+        config_guided = _config(task, strategy_context=_guidance_context("hold north"))
         self.assertEqual(config_guided.policy_id, "llm-v1")
         self.assertNotEqual(config_plain.policy_digest, config_guided.policy_digest)
         self.assertNotEqual(
@@ -285,9 +282,19 @@ class TestTraceCarriesOnlyNormalizedFields(unittest.TestCase):
     """P4A-REQ-09: raw provider output never reaches the core trace."""
 
     LOCKED_TRACE_FIELDS = {
-        "schema_version", "seq", "logical_run_id", "policy_step", "event",
-        "operation_key", "tool", "arguments", "state_before", "state_after",
-        "payload", "prev_event_hash", "event_hash",
+        "schema_version",
+        "seq",
+        "logical_run_id",
+        "policy_step",
+        "event",
+        "operation_key",
+        "tool",
+        "arguments",
+        "state_before",
+        "state_after",
+        "payload",
+        "prev_event_hash",
+        "event_hash",
     }
 
     def test_trace_records_stay_within_the_locked_normalized_shape(self):
@@ -303,7 +310,10 @@ class TestTraceCarriesOnlyNormalizedFields(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as root:
             recorder = RunEvidenceRecorder(
-                root, task, config, compute_logical_run_id(task, config),
+                root,
+                task,
+                config,
+                compute_logical_run_id(task, config),
                 "exec-integration-3",
             )
             Runner(evidence=EvidenceCallbacks(**recorder.callback_map())).run(
@@ -316,8 +326,12 @@ class TestTraceCarriesOnlyNormalizedFields(unittest.TestCase):
             self.assertEqual(set(record), self.LOCKED_TRACE_FIELDS)
         self.assertIn('"policy_decision"', raw)
         for forbidden in (
-            "raw_visible_response", "latency_ms", "tool_schema", "prompt",
-            "script_exhausted", "moving north",
+            "raw_visible_response",
+            "latency_ms",
+            "tool_schema",
+            "prompt",
+            "script_exhausted",
+            "moving north",
         ):
             self.assertNotIn(forbidden, raw)
 

@@ -6,6 +6,7 @@ are strictly validated; a residual secret fails the sidecar export closed
 (exit 1, no ``llm/`` directory) without touching the released core receipt;
 and rerun agreement works unchanged for LLM runs.
 """
+
 import json
 import subprocess
 import sys
@@ -46,17 +47,23 @@ def _completion_script(seed="18"):
 
     task = generate_task(seed)
     config = RunConfig(
-        1, task.task_version, task.seed, "llm-v1",
-        llm_vnext_policy_digest("fake", "fake-v1"), 100, GRANTS, None,
+        1,
+        task.task_version,
+        task.seed,
+        "llm-v1",
+        llm_vnext_policy_digest("fake", "fake-v1"),
+        100,
+        GRANTS,
+        None,
     )
     observations = {}
 
     def on_observation(step, serialized):
         observations[step] = serialized
 
-    result = Runner(
-        evidence=EvidenceCallbacks(on_observation=on_observation)
-    ).run(task, GreedyPolicy(), config, "exec-plan")
+    result = Runner(evidence=EvidenceCallbacks(on_observation=on_observation)).run(
+        task, GreedyPolicy(), config, "exec-plan"
+    )
     assert result.outcome == "completed", result.outcome
     script = []
     for step in sorted(observations):
@@ -122,24 +129,39 @@ class TestFakeCliRunEmitsSidecars(unittest.TestCase):
             root_path = Path(root)
             script_path = _script_file(root_path, _completion_script())
             completed = _cli(
-                "run", "--seed", "18", "--provider", "fake",
-                "--model", "fake-v1", "--script", str(script_path),
-                "--artifacts-root", str(root_path / "artifacts"),
-                "--execution-id", "exec-llm-cli",
+                "run",
+                "--seed",
+                "18",
+                "--provider",
+                "fake",
+                "--model",
+                "fake-v1",
+                "--script",
+                str(script_path),
+                "--artifacts-root",
+                str(root_path / "artifacts"),
+                "--execution-id",
+                "exec-llm-cli",
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn("llm_report:", completed.stdout)
-            run_dir = next(
-                (root_path / "artifacts" / "runs").glob("lr_*/exec-llm-cli")
-            )
+            run_dir = next((root_path / "artifacts" / "runs").glob("lr_*/exec-llm-cli"))
             for name in (
-                "config.json", "task.json", "trace.jsonl", "final_state.json",
-                "operation-log.json", "replay-input.json", "receipt.json",
-                "replay-result.json", "report.html",
+                "config.json",
+                "task.json",
+                "trace.jsonl",
+                "final_state.json",
+                "operation-log.json",
+                "replay-input.json",
+                "receipt.json",
+                "replay-result.json",
+                "report.html",
             ):
                 self.assertTrue((run_dir / name).is_file(), name)
             for name in (
-                "provider-run.json", "llm-receipt.json", "llm-report.html",
+                "provider-run.json",
+                "llm-receipt.json",
+                "llm-report.html",
             ):
                 self.assertTrue((run_dir / "llm" / name).is_file(), name)
             envelope = json.loads(
@@ -153,9 +175,17 @@ class TestFakeCliRunEmitsSidecars(unittest.TestCase):
             root_path = Path(root)
             script_path = _script_file(root_path, _completion_script())
             base = [
-                "rerun", "--seed", "18", "--provider", "fake",
-                "--model", "fake-v1", "--script", str(script_path),
-                "--artifacts-root", str(root_path / "artifacts"),
+                "rerun",
+                "--seed",
+                "18",
+                "--provider",
+                "fake",
+                "--model",
+                "fake-v1",
+                "--script",
+                str(script_path),
+                "--artifacts-root",
+                str(root_path / "artifacts"),
             ]
             first = _cli(*base, "--execution-id", "exec-llm-rerun-1")
             self.assertEqual(first.returncode, 0, first.stderr)
@@ -170,16 +200,23 @@ class TestCliLlmArgumentValidation(unittest.TestCase):
             root_path = Path(root)
             script_path = _script_file(root_path, _completion_script())
             cases = (
-                ("--provider", "fake"),                      # no model/script
-                ("--model", "fake-v1"),                      # no provider
-                ("--script", str(script_path)),              # no provider
-                ("--provider", "openai", "--model", "m",
-                 "--script", str(script_path)),              # openai + script
+                ("--provider", "fake"),  # no model/script
+                ("--model", "fake-v1"),  # no provider
+                ("--script", str(script_path)),  # no provider
+                (
+                    "--provider",
+                    "openai",
+                    "--model",
+                    "m",
+                    "--script",
+                    str(script_path),
+                ),  # openai + script
             )
             for case in cases:
                 with self.subTest(case=case):
-                    completed = _cli("run", *case, "--artifacts-root",
-                                     str(root_path / "a"))
+                    completed = _cli(
+                        "run", *case, "--artifacts-root", str(root_path / "a")
+                    )
                     self.assertEqual(completed.returncode, 2)
                     self.assertIn("error:", completed.stderr)
 
@@ -187,9 +224,15 @@ class TestCliLlmArgumentValidation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             completed = _cli(
-                "run", "--provider", "fake", "--model", "fake-v1",
-                "--script", str(root_path / "absent.json"),
-                "--artifacts-root", str(root_path / "a"),
+                "run",
+                "--provider",
+                "fake",
+                "--model",
+                "fake-v1",
+                "--script",
+                str(root_path / "absent.json"),
+                "--artifacts-root",
+                str(root_path / "a"),
             )
             self.assertEqual(completed.returncode, 2)
 
@@ -203,29 +246,39 @@ class TestCliFailClosedSecretExport(unittest.TestCase):
             provider=poisoned["provider"],
             model=poisoned["model"],
             request_id=poisoned["request_id"],
-            usage=Usage(poisoned["usage"]["input_tokens"],
-                        poisoned["usage"]["output_tokens"],
-                        poisoned["usage"]["total_tokens"]),
+            usage=Usage(
+                poisoned["usage"]["input_tokens"],
+                poisoned["usage"]["output_tokens"],
+                poisoned["usage"]["total_tokens"],
+            ),
             latency_ms=poisoned["latency_ms"],
             raw_visible_response=poisoned["raw_visible_response"],
-            tool_call=ToolCallPayload(poisoned["tool_call"]["tool"],
-                                      poisoned["tool_call"]["arguments"]),
+            tool_call=ToolCallPayload(
+                poisoned["tool_call"]["tool"], poisoned["tool_call"]["arguments"]
+            ),
             error=None,
         )
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             script_path = _script_file(root_path, script)
             completed = _cli(
-                "run", "--seed", "18", "--provider", "fake",
-                "--model", "fake-v1", "--script", str(script_path),
-                "--artifacts-root", str(root_path / "artifacts"),
-                "--execution-id", "exec-secret",
+                "run",
+                "--seed",
+                "18",
+                "--provider",
+                "fake",
+                "--model",
+                "fake-v1",
+                "--script",
+                str(script_path),
+                "--artifacts-root",
+                str(root_path / "artifacts"),
+                "--execution-id",
+                "exec-secret",
             )
             self.assertEqual(completed.returncode, 1)
             self.assertIn("secret_detected", completed.stderr)
-            run_dir = next(
-                (root_path / "artifacts" / "runs").glob("lr_*/exec-secret")
-            )
+            run_dir = next((root_path / "artifacts" / "runs").glob("lr_*/exec-secret"))
             self.assertFalse((run_dir / "llm").exists())
             # The core receipt stands released and unchanged (REQ-07).
             self.assertTrue((run_dir / "receipt.json").is_file())
@@ -253,11 +306,21 @@ class TestStrategyContextTransport(unittest.TestCase):
     def _run_with_context(self, root_path, context_path, execution_id):
         script_path = _script_file(root_path, _completion_script())
         return _cli(
-            "run", "--seed", "18", "--provider", "fake",
-            "--model", "fake-v1", "--script", str(script_path),
-            "--strategy-context", str(context_path),
-            "--artifacts-root", str(root_path / "artifacts"),
-            "--execution-id", execution_id,
+            "run",
+            "--seed",
+            "18",
+            "--provider",
+            "fake",
+            "--model",
+            "fake-v1",
+            "--script",
+            str(script_path),
+            "--strategy-context",
+            str(context_path),
+            "--artifacts-root",
+            str(root_path / "artifacts"),
+            "--execution-id",
+            execution_id,
         )
 
     def test_valid_context_run_reports_the_expected_context_identity(self):
@@ -266,18 +329,22 @@ class TestStrategyContextTransport(unittest.TestCase):
             context_path = _context_file(root_path, "ctx.json", self.MARKER)
             completed = self._run_with_context(root_path, context_path, "exec-ctx-1")
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            expected = strategy_context_digest(json.loads(context_path.read_text("utf-8")))
+            expected = strategy_context_digest(
+                json.loads(context_path.read_text("utf-8"))
+            )
             self.assertIn(f"strategy_context_digest: {expected}", completed.stdout)
 
     def test_changed_context_changes_the_logical_run_id(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             first = self._run_with_context(
-                root_path, _context_file(root_path, "a.json", "first text"),
+                root_path,
+                _context_file(root_path, "a.json", "first text"),
                 "exec-ctx-a",
             )
             second = self._run_with_context(
-                root_path, _context_file(root_path, "b.json", "second text"),
+                root_path,
+                _context_file(root_path, "b.json", "second text"),
                 "exec-ctx-b",
             )
             self.assertEqual(first.returncode, 0, first.stderr)
@@ -293,10 +360,19 @@ class TestStrategyContextTransport(unittest.TestCase):
             context_path = _context_file(root_path, "ctx.json", self.MARKER)
             script_path = _script_file(root_path, _completion_script())
             base = [
-                "rerun", "--seed", "18", "--provider", "fake",
-                "--model", "fake-v1", "--script", str(script_path),
-                "--strategy-context", str(context_path),
-                "--artifacts-root", str(root_path / "artifacts"),
+                "rerun",
+                "--seed",
+                "18",
+                "--provider",
+                "fake",
+                "--model",
+                "fake-v1",
+                "--script",
+                str(script_path),
+                "--strategy-context",
+                str(context_path),
+                "--artifacts-root",
+                str(root_path / "artifacts"),
             ]
             first = _cli(*base, "--execution-id", "exec-ctx-r1")
             self.assertEqual(first.returncode, 0, first.stderr)
@@ -309,10 +385,19 @@ class TestStrategyContextTransport(unittest.TestCase):
             root_path = Path(root)
             script_path = _script_file(root_path, _completion_script())
             completed = _cli(
-                "run", "--seed", "18", "--provider", "fake",
-                "--model", "fake-v1", "--script", str(script_path),
-                "--artifacts-root", str(root_path / "artifacts"),
-                "--execution-id", "exec-null-ctx",
+                "run",
+                "--seed",
+                "18",
+                "--provider",
+                "fake",
+                "--model",
+                "fake-v1",
+                "--script",
+                str(script_path),
+                "--artifacts-root",
+                str(root_path / "artifacts"),
+                "--execution-id",
+                "exec-null-ctx",
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn("strategy_context_digest: null", completed.stdout)
@@ -332,9 +417,7 @@ class TestStrategyContextTransport(unittest.TestCase):
             context_path = _context_file(root_path, "ctx.json", self.MARKER)
             completed = self._run_with_context(root_path, context_path, "exec-ctx-art")
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            run_dir = next(
-                (root_path / "artifacts" / "runs").glob("lr_*/exec-ctx-art")
-            )
+            run_dir = next((root_path / "artifacts" / "runs").glob("lr_*/exec-ctx-art"))
             config = json.loads((run_dir / "config.json").read_text("utf-8"))
             context = json.loads(context_path.read_text("utf-8"))
             self.assertEqual(config["policy_id"], "llm-v1")
@@ -357,10 +440,19 @@ class TestStrategyContextTransport(unittest.TestCase):
             root_path = Path(root)
             script_path = _script_file(root_path, _completion_script())
             completed = _cli(
-                "run", "--seed", "18", "--provider", "fake",
-                "--model", "fake-v1", "--script", str(script_path),
-                "--strategy-context", str(root_path / "absent.json"),
-                "--artifacts-root", str(root_path / "artifacts"),
+                "run",
+                "--seed",
+                "18",
+                "--provider",
+                "fake",
+                "--model",
+                "fake-v1",
+                "--script",
+                str(script_path),
+                "--strategy-context",
+                str(root_path / "absent.json"),
+                "--artifacts-root",
+                str(root_path / "artifacts"),
             )
             self.assertEqual(completed.returncode, 2)
             self.assertIn("cannot read strategy context", completed.stderr)
@@ -374,10 +466,19 @@ class TestStrategyContextTransport(unittest.TestCase):
             )
             script_path = _script_file(root_path, _completion_script())
             completed = _cli(
-                "run", "--seed", "18", "--provider", "fake",
-                "--model", "fake-v1", "--script", str(script_path),
-                "--strategy-context", str(path),
-                "--artifacts-root", str(root_path / "artifacts"),
+                "run",
+                "--seed",
+                "18",
+                "--provider",
+                "fake",
+                "--model",
+                "fake-v1",
+                "--script",
+                str(script_path),
+                "--strategy-context",
+                str(path),
+                "--artifacts-root",
+                str(root_path / "artifacts"),
             )
             self.assertEqual(completed.returncode, 2)
             self.assertIn("exactly the §2.1 keys", completed.stderr)
@@ -387,9 +488,15 @@ class TestStrategyContextTransport(unittest.TestCase):
             root_path = Path(root)
             context_path = _context_file(root_path, "ctx.json", self.MARKER)
             completed = _cli(
-                "run", "--seed", "18", "--policy", "greedy-v0",
-                "--strategy-context", str(context_path),
-                "--artifacts-root", str(root_path / "artifacts"),
+                "run",
+                "--seed",
+                "18",
+                "--policy",
+                "greedy-v0",
+                "--strategy-context",
+                str(context_path),
+                "--artifacts-root",
+                str(root_path / "artifacts"),
             )
             self.assertEqual(completed.returncode, 2)
             self.assertIn("require --provider", completed.stderr)

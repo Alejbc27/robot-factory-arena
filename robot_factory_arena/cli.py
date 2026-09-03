@@ -174,9 +174,7 @@ def _build_llm_policy(provider, model, script_results, strategy_context=None):
     from robot_factory_arena.providers.openai import OpenAIProvider
 
     if provider == "fake":
-        return LLMPolicy(
-                FakeProvider(script=script_results or ()), strategy_context
-        )
+        return LLMPolicy(FakeProvider(script=script_results or ()), strategy_context)
     if provider == "openai":
         return LLMPolicy(OpenAIProvider(model), strategy_context)
     if provider == "glm":
@@ -433,11 +431,10 @@ def _load_strategy_context(path: Path):
     try:
         context = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        raise ValueError(
-            f"cannot read strategy context {path}: {error}"
-        ) from error
+        raise ValueError(f"cannot read strategy context {path}: {error}") from error
     validate_strategy_context(context)
     return context
+
 
 def _validate_llm_args(args) -> int | None:
     """Strict LLM flag validation; None when acceptable, else exit code 2."""

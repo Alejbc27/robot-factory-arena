@@ -7,6 +7,7 @@ tripwire proves replay never imports ``LLMPolicy`` or ``providers``; deleting
 ``llm/`` leaves core replay/verifier/report evidence untouched; and replay
 never modifies the sidecars.
 """
+
 import json
 import os
 import shutil
@@ -48,17 +49,23 @@ def _completion_script(seed="18"):
 
     task = generate_task(seed)
     config = RunConfig(
-        1, task.task_version, task.seed, "llm-v1",
-        llm_vnext_policy_digest("fake", "fake-v1"), 100, GRANTS, None,
+        1,
+        task.task_version,
+        task.seed,
+        "llm-v1",
+        llm_vnext_policy_digest("fake", "fake-v1"),
+        100,
+        GRANTS,
+        None,
     )
     observations = {}
 
     def on_observation(step, serialized):
         observations[step] = serialized
 
-    result = Runner(
-        evidence=EvidenceCallbacks(on_observation=on_observation)
-    ).run(task, GreedyPolicy(), config, "exec-plan")
+    result = Runner(evidence=EvidenceCallbacks(on_observation=on_observation)).run(
+        task, GreedyPolicy(), config, "exec-plan"
+    )
     assert result.outcome == "completed", result.outcome
     script = []
     for step in sorted(observations):
@@ -93,19 +100,31 @@ class TestLLMRunReplaysOffline(unittest.TestCase):
         )
         completed = subprocess.run(
             [
-                sys.executable, "-m", "robot_factory_arena.cli", "run",
-                "--seed", "18", "--provider", "fake", "--model", "fake-v1",
-                "--script", str(script_path),
-                "--artifacts-root", str(cls.root / "artifacts"),
-                "--execution-id", "exec-replay",
+                sys.executable,
+                "-m",
+                "robot_factory_arena.cli",
+                "run",
+                "--seed",
+                "18",
+                "--provider",
+                "fake",
+                "--model",
+                "fake-v1",
+                "--script",
+                str(script_path),
+                "--artifacts-root",
+                str(cls.root / "artifacts"),
+                "--execution-id",
+                "exec-replay",
             ],
-            cwd=REPO_ROOT, capture_output=True, text=True, timeout=240,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=240,
             check=False,
         )
         assert completed.returncode == 0, completed.stderr
-        cls.run_dir = next(
-            (cls.root / "artifacts" / "runs").glob("lr_*/exec-replay")
-        )
+        cls.run_dir = next((cls.root / "artifacts" / "runs").glob("lr_*/exec-replay"))
 
     @classmethod
     def tearDownClass(cls):
@@ -114,7 +133,10 @@ class TestLLMRunReplaysOffline(unittest.TestCase):
     def _replay(self, directory):
         return subprocess.run(
             [
-                sys.executable, "-m", "robot_factory_arena.cli", "replay",
+                sys.executable,
+                "-m",
+                "robot_factory_arena.cli",
+                "replay",
                 str(directory),
             ],
             cwd=REPO_ROOT,
@@ -161,15 +183,11 @@ class TestLLMRunReplaysOffline(unittest.TestCase):
     def test_replay_never_modifies_the_sidecars(self):
         before = {
             name: (self.run_dir / "llm" / name).read_bytes()
-            for name in ("provider-run.json", "llm-receipt.json",
-                         "llm-report.html")
+            for name in ("provider-run.json", "llm-receipt.json", "llm-report.html")
         }
         completed = self._replay(self.run_dir)
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        after = {
-            name: (self.run_dir / "llm" / name).read_bytes()
-            for name in before
-        }
+        after = {name: (self.run_dir / "llm" / name).read_bytes() for name in before}
         self.assertEqual(before, after)
 
     def test_deleting_llm_does_not_affect_core_replay_or_evidence(self):
@@ -177,8 +195,13 @@ class TestLLMRunReplaysOffline(unittest.TestCase):
         shutil.copytree(self.run_dir, copy_root)
         shutil.rmtree(copy_root / "llm")
         core_names = (
-            "config.json", "task.json", "trace.jsonl", "final_state.json",
-            "operation-log.json", "replay-input.json", "receipt.json",
+            "config.json",
+            "task.json",
+            "trace.jsonl",
+            "final_state.json",
+            "operation-log.json",
+            "replay-input.json",
+            "receipt.json",
             "report.html",
         )
         for name in core_names:
