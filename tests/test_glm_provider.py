@@ -10,7 +10,7 @@ from robot_factory_arena.policies.llm import TOOL_SCHEMA
 from robot_factory_arena.providers.adapter import ProviderRequest
 from robot_factory_arena.providers.glm import GLMProvider
 
-DEFAULT_URL = "https://api.z.ai/api/paas/v4/chat/completions"
+DEFAULT_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions"
 
 
 def _request(**overrides):
