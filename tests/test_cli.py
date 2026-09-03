@@ -1,15 +1,13 @@
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from robot_factory_arena import cli
-
-CODING_PLAN_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions"
 
 
 class TestLlmUsageReporting(unittest.TestCase):
@@ -94,12 +92,12 @@ class TestLlmUsageReporting(unittest.TestCase):
             output.getvalue(),
         )
 
-    def test_glm_coding_plan_cost_is_unavailable(self):
+    def test_glm_cost_is_unavailable(self):
         with tempfile.TemporaryDirectory() as root:
             self._write_provider_run(
                 root,
                 self._provider_run(
-                    "glm-4.5",
+                    "glm-5.3-flash",
                     [{"input_tokens": 2, "output_tokens": 3, "total_tokens": 5}],
                 ),
             )
@@ -108,7 +106,7 @@ class TestLlmUsageReporting(unittest.TestCase):
                 cli._report_llm_usage(root)
 
         self.assertIn(
-            "llm_estimated_cost_usd: unavailable (no pricing for glm-4.5)",
+            "llm_estimated_cost_usd: unavailable (no pricing for glm-5.3-flash)",
             output.getvalue(),
         )
 
@@ -183,104 +181,15 @@ class TestGlmProviderCliRegistration(unittest.TestCase):
         for command in ("run", "rerun"):
             with self.subTest(command=command):
                 args = parser.parse_args(
-                    [
-                        command,
-                        "--seed",
-                        "1",
-                        "--provider",
-                        "glm",
-                        "--model",
-                        "glm-4.5",
-                        "--api-url",
-                        CODING_PLAN_URL,
-                    ]
+                    [command, "--seed", "1", "--provider", "glm", "--model", "glm-4.5"]
                 )
                 self.assertEqual(args.provider, "glm")
                 self.assertEqual(args.model, "glm-4.5")
-                self.assertEqual(args.api_url, CODING_PLAN_URL)
 
     def test_glm_wires_to_the_pinned_provider_without_invoking_network(self):
         policy = cli._build_llm_policy("glm", "glm-4.5", None)
         self.assertEqual(policy.provider, "glm")
         self.assertEqual(policy.model, "glm-4.5")
-
-    def test_coding_plan_url_is_passed_to_glm_provider(self):
-        adapter = SimpleNamespace(
-            provider="glm", model="glm-4.5", invoke=lambda request: None
-        )
-        with patch(
-            "robot_factory_arena.providers.glm.GLMProvider", return_value=adapter
-        ) as provider:
-            cli._build_llm_policy("glm", "glm-4.5", None, CODING_PLAN_URL)
-
-        provider.assert_called_once_with("glm-4.5", api_url=CODING_PLAN_URL)
-
-    def test_coding_plan_url_is_threaded_through_run_configuration(self):
-        args = SimpleNamespace(
-            provider="glm",
-            model="glm-4.5",
-            script=None,
-            api_url=CODING_PLAN_URL,
-            fault_step=None,
-            fault_intent=None,
-            execution_id="execution-test",
-            seed="1",
-            policy="greedy-v0",
-            artifacts_root="artifacts",
-        )
-        verification = SimpleNamespace(
-            outcome="completed", verified_score=1, verifier_version="v0"
-        )
-        receipt = {"logical_run_id": "lr_" + "a" * 64}
-        with (
-            patch.object(
-                cli,
-                "_execute_run",
-                return_value=(0, receipt, verification, Path("artifacts")),
-            ) as execute,
-            patch.object(cli, "_report_llm_usage"),
-            redirect_stdout(StringIO()),
-        ):
-            result = cli._run_and_report(args, rerun=False)
-
-        self.assertEqual(result, 0)
-        self.assertEqual(
-            execute.call_args.kwargs["llm"],
-            ("glm", "glm-4.5", None, CODING_PLAN_URL),
-        )
-
-    def test_api_url_without_provider_returns_exit_2_with_stable_error(self):
-        output = StringIO()
-        with redirect_stderr(output):
-            result = cli.main(["run", "--seed", "1", "--api-url", CODING_PLAN_URL])
-
-        self.assertEqual(result, 2)
-        self.assertEqual(
-            output.getvalue(), "error: --api-url requires --provider glm\n"
-        )
-
-    def test_api_url_with_non_glm_provider_returns_exit_2_with_stable_error(self):
-        output = StringIO()
-        with redirect_stderr(output):
-            result = cli.main(
-                [
-                    "run",
-                    "--seed",
-                    "1",
-                    "--provider",
-                    "openai",
-                    "--model",
-                    "gpt-5.6-luna",
-                    "--api-url",
-                    CODING_PLAN_URL,
-                ]
-            )
-
-        self.assertEqual(result, 2)
-        self.assertEqual(
-            output.getvalue(),
-            "error: --api-url is only supported with --provider glm\n",
-        )
 
     def test_glm_rejects_script_like_openai(self):
         args = SimpleNamespace(provider="glm", model="glm-4.5", script="script.json")

@@ -163,7 +163,7 @@ def collect_artifact_digests(directory) -> dict:
     return dict(sorted(digests.items()))
 
 
-def _build_llm_policy(provider, model, script_results, api_url=None):
+def _build_llm_policy(provider, model, script_results):
     """Resolve the Phase 4A LLM policy; providers/llm load LAZILY (replay never
     imports them — same discipline as the reference policies above)."""
     from robot_factory_arena.policies.llm import LLMPolicy
@@ -176,9 +176,7 @@ def _build_llm_policy(provider, model, script_results, api_url=None):
     if provider == "openai":
         return LLMPolicy(OpenAIProvider(model))
     if provider == "glm":
-        if api_url is None:
-            return LLMPolicy(GLMProvider(model))
-        return LLMPolicy(GLMProvider(model, api_url=api_url))
+        return LLMPolicy(GLMProvider(model))
 
     raise ValueError(f"unsupported provider: {provider!r}")
 
@@ -217,22 +215,13 @@ def _execute_run(
     artifacts_root, seed, policy_id, execution_id, fault_step, fault_intent, llm=None
 ):
     """The verified-run composition (B5-proven order); returns (code, receipt,
-    verification, directory). ``llm`` is None or (provider, model, script[, api_url])."""
+    verification, directory). ``llm`` is None or (provider, model, script)."""
     task = generate_task(seed)
     if llm is not None:
         from robot_factory_arena.policies.llm import llm_policy_digest
 
-        if len(llm) == 3:
-            provider, model, script_results = llm
-            api_url = None
-        elif len(llm) == 4:
-            provider, model, script_results, api_url = llm
-        else:
-            raise ValueError("llm configuration must contain 3 or 4 values")
-        if api_url is None:
-            policy = _build_llm_policy(provider, model, script_results)
-        else:
-            policy = _build_llm_policy(provider, model, script_results, api_url)
+        provider, model, script_results = llm
+        policy = _build_llm_policy(provider, model, script_results)
         policy_digest = llm_policy_digest(provider, model)
         policy_id = "llm-v0"
     else:
@@ -431,17 +420,6 @@ def _validate_llm_args(args) -> int | None:
     provider = getattr(args, "provider", None)
     model = getattr(args, "model", None)
     script = getattr(args, "script", None)
-    api_url = getattr(args, "api_url", None)
-    if api_url is not None:
-        if provider is None:
-            print("error: --api-url requires --provider glm", file=sys.stderr)
-            return 2
-        if provider != "glm":
-            print(
-                "error: --api-url is only supported with --provider glm",
-                file=sys.stderr,
-            )
-            return 2
     if provider is None:
         if model is not None or script is not None:
             print("error: --model/--script require --provider", file=sys.stderr)
@@ -476,7 +454,6 @@ def _run_and_report(args, rerun: bool) -> int:
             args.provider,
             args.model,
             script_results,
-            getattr(args, "api_url", None),
         )
     if (args.fault_step is None) != (args.fault_intent is None):
         print(
@@ -633,11 +610,6 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
             "canonical JSON array of ProviderResult envelopes "
             "(required with --provider fake)"
         ),
-    )
-    parser.add_argument(
-        "--api-url",
-        default=None,
-        help="GLM chat-completions endpoint (requires --provider glm)",
     )
 
 

@@ -70,12 +70,6 @@ def _chat_body(content="moving north", tool_calls=None):
 
 
 class TestGLMProviderRequest(unittest.TestCase):
-    def test_rejects_non_http_api_urls(self):
-        with self.assertRaisesRegex(ValueError, "absolute HTTP\\(S\\) URL"):
-            GLMProvider("glm-4.5", api_url="file:///etc/passwd")
-        with self.assertRaisesRegex(ValueError, "absolute HTTP\\(S\\) URL"):
-            GLMProvider("glm-4.5", api_url="/relative/path")
-
     def test_identity_default_endpoint_and_request_envelope(self):
         stub = _StubTransport(body=_chat_body())
         provider = GLMProvider("glm-4.5", transport=stub)
@@ -98,7 +92,7 @@ class TestGLMProviderRequest(unittest.TestCase):
             [{"role": "user", "content": "the frozen prompt"}],
         )
         self.assertEqual(call["payload"]["tool_choice"], "auto")
-        self.assertIs(call["payload"]["parallel_tool_calls"], False)
+        self.assertNotIn("parallel_tool_calls", call["payload"])
         self.assertEqual(
             call["payload"]["tools"],
             [{"type": "function", "function": tool} for tool in TOOL_SCHEMA["tools"]],
@@ -185,6 +179,48 @@ class TestGLMProviderResponses(unittest.TestCase):
         assert multiple.error is not None
         self.assertEqual(multiple.error.code, "multiple_tool_calls")
 
+    def test_string_form_arguments_are_parsed_into_the_tool_call(self):
+        result = self._invoke(
+            body=_chat_body(
+                tool_calls=[
+                    {
+                        "function": {
+                            "name": "move",
+                            "arguments": '{"direction": "north"}',
+                        }
+                    }
+                ]
+            )
+        )
+
+        assert result.error is None
+        assert result.tool_call is not None
+        self.assertEqual(
+            result.tool_call.to_mapping(),
+            {"tool": "move", "arguments": {"direction": "north"}},
+        )
+
+    def test_object_form_arguments_are_accepted_directly(self):
+        result = self._invoke(
+            body=_chat_body(
+                tool_calls=[
+                    {
+                        "function": {
+                            "name": "move",
+                            "arguments": {"direction": "north"},
+                        }
+                    }
+                ]
+            )
+        )
+
+        assert result.error is None
+        assert result.tool_call is not None
+        self.assertEqual(
+            result.tool_call.to_mapping(),
+            {"tool": "move", "arguments": {"direction": "north"}},
+        )
+
     def test_malformed_json_arguments_are_invalid_response(self):
         result = self._invoke(
             body=_chat_body(
@@ -193,6 +229,27 @@ class TestGLMProviderResponses(unittest.TestCase):
         )
         assert result.error is not None
         self.assertEqual(result.error.code, "invalid_response")
+
+    def test_non_object_and_non_string_arguments_are_invalid_response(self):
+        for arguments in (
+            ["north"],
+            42,
+            None,
+            True,
+            '["north"]',
+            '"north"',
+            "42",
+        ):
+            with self.subTest(arguments=arguments):
+                result = self._invoke(
+                    body=_chat_body(
+                        tool_calls=[
+                            {"function": {"name": "move", "arguments": arguments}}
+                        ]
+                    )
+                )
+                assert result.error is not None
+                self.assertEqual(result.error.code, "invalid_response")
 
     def test_malformed_response_and_transport_error_are_bounded(self):
         for body in (b"not json", b"{}", b'{"choices": []}'):

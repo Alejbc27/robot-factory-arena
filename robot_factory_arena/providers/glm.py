@@ -13,7 +13,6 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from urllib.parse import urlsplit
 
 from robot_factory_arena.providers.adapter import (
     ProviderError,
@@ -26,7 +25,7 @@ from robot_factory_arena.providers.adapter import (
 Transport = Callable[[str, dict, bytes, float], "tuple[int, bytes]"]
 
 PROVIDER_ID = "glm"
-DEFAULT_API_URL = "https://api.z.ai/api/paas/v4/chat/completions"
+API_URL = "https://api.z.ai/api/paas/v4/chat/completions"
 API_KEY_VARIABLE = "ZAI_API_KEY"
 
 ERROR_MISSING_KEY = "missing_api_key"
@@ -91,23 +90,17 @@ class GLMProvider:
     def __init__(
         self,
         model: str,
-        api_url: str = DEFAULT_API_URL,
         transport: Transport | None = None,
         timeout: float = 60.0,
     ):
         if not isinstance(model, str) or not model:
             raise TypeError("model must be a non-empty string")
-        if not isinstance(api_url, str) or not api_url:
-            raise TypeError("api_url must be a non-empty string")
-        parsed_url = urlsplit(api_url)
-        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-            raise ValueError("api_url must be an absolute HTTP(S) URL")
         if transport is not None and not callable(transport):
             raise TypeError("transport must be callable or None")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             raise TypeError("timeout must be a number")
         self._model = model
-        self._api_url = api_url
+        self._api_url = API_URL
         self._transport: Transport = (
             transport if transport is not None else _default_transport
         )
@@ -167,7 +160,6 @@ class GLMProvider:
                 for tool in request.tool_schema.get("tools", [])
             ],
             "tool_choice": "auto",
-            "parallel_tool_calls": False,
         }
         headers = {
             "Content-Type": "application/json",
@@ -266,7 +258,7 @@ class GLMProvider:
         try:
             function = tool_calls[0]["function"]
             name = function["name"]
-            arguments_text = function["arguments"]
+            arguments = function["arguments"]
         except (KeyError, TypeError, IndexError):
             return self._error(
                 request,
@@ -281,15 +273,18 @@ class GLMProvider:
                 "tool call name must be a non-empty string",
                 started,
             )
-        try:
-            arguments = json.loads(arguments_text)
-        except (ValueError, TypeError):
-            return self._error(
-                request,
-                ERROR_INVALID_RESPONSE,
-                "tool call arguments are not valid JSON",
-                started,
-            )
+        # Z.AI's reference depicts ``function.arguments`` as an object while
+        # live runs return a JSON string; accept both at this boundary.
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except ValueError:
+                return self._error(
+                    request,
+                    ERROR_INVALID_RESPONSE,
+                    "tool call arguments are not valid JSON",
+                    started,
+                )
         if not isinstance(arguments, dict):
             return self._error(
                 request,
