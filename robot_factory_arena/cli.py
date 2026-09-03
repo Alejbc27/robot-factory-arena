@@ -163,20 +163,24 @@ def collect_artifact_digests(directory) -> dict:
     return dict(sorted(digests.items()))
 
 
-def _build_llm_policy(provider, model, script_results):
+def _build_llm_policy(provider, model, script_results, strategy_context=None):
     """Resolve the Phase 4A LLM policy; providers/llm load LAZILY (replay never
-    imports them — same discipline as the reference policies above)."""
+    imports them — same discipline as the reference policies above). The
+    AMEND-4A-3 strategy context is a validated policy input, composed into
+    the vNext prompt; it never enters the observation envelope."""
     from robot_factory_arena.policies.llm import LLMPolicy
     from robot_factory_arena.providers.fake import FakeProvider
     from robot_factory_arena.providers.glm import GLMProvider
     from robot_factory_arena.providers.openai import OpenAIProvider
 
     if provider == "fake":
-        return LLMPolicy(FakeProvider(script=script_results or ()))
+        return LLMPolicy(
+                FakeProvider(script=script_results or ()), strategy_context
+        )
     if provider == "openai":
-        return LLMPolicy(OpenAIProvider(model))
+        return LLMPolicy(OpenAIProvider(model), strategy_context)
     if provider == "glm":
-        return LLMPolicy(GLMProvider(model))
+        return LLMPolicy(GLMProvider(model), strategy_context)
 
     raise ValueError(f"unsupported provider: {provider!r}")
 
@@ -189,7 +193,7 @@ def _write_llm_sidecars(directory, logical_run_id, execution_id, policy):
     failure, never a changed core outcome).
     """
     from robot_factory_arena.policies.llm import (
-        prompt_template_digest,
+        prompt_composition_digest,
         tool_schema_digest,
     )
     from robot_factory_arena.providers.evidence import write_provider_artifacts
@@ -199,7 +203,9 @@ def _write_llm_sidecars(directory, logical_run_id, execution_id, policy):
         directory,
         logical_run_id,
         execution_id,
-        prompt_template_digest(),
+        # AMEND-4A-3: the vNext prompt_digest binding carries the composed
+        # template digest through the unchanged providers/evidence.py API.
+        prompt_composition_digest(),
         tool_schema_digest(),
         policy.decisions,
         directory / RECEIPT_NAME,
@@ -215,15 +221,16 @@ def _execute_run(
     artifacts_root, seed, policy_id, execution_id, fault_step, fault_intent, llm=None
 ):
     """The verified-run composition (B5-proven order); returns (code, receipt,
-    verification, directory). ``llm`` is None or (provider, model, script)."""
+    verification, directory). ``llm`` is None or a
+    (provider, model, script, strategy_context) vNext carrier."""
     task = generate_task(seed)
     if llm is not None:
-        from robot_factory_arena.policies.llm import llm_policy_digest
+        from robot_factory_arena.policies.llm import llm_vnext_policy_digest
 
-        provider, model, script_results = llm
-        policy = _build_llm_policy(provider, model, script_results)
-        policy_digest = llm_policy_digest(provider, model)
-        policy_id = "llm-v0"
+        provider, model, script_results, strategy_context = llm
+        policy = _build_llm_policy(provider, model, script_results, strategy_context)
+        policy_digest = llm_vnext_policy_digest(provider, model, strategy_context)
+        policy_id = "llm-v1"
     else:
         policy = _build_policy(policy_id)
         policy_digest = policy_manifest_digest(policy_id)
@@ -415,14 +422,35 @@ def _load_script(path: Path):
     return [result_from_mapping(entry) for entry in entries]
 
 
+def _load_strategy_context(path: Path):
+    """Load one frozen canonical StrategyContext file (AMEND-4A-3).
+
+    Strict §2.1 validation happens here, BEFORE any LLMPolicy construction;
+    file/JSON/schema errors surface as exit 2, matching _load_script.
+    """
+    from robot_factory_arena.policies.llm import validate_strategy_context
+
+    try:
+        context = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(
+            f"cannot read strategy context {path}: {error}"
+        ) from error
+    validate_strategy_context(context)
+    return context
+
 def _validate_llm_args(args) -> int | None:
     """Strict LLM flag validation; None when acceptable, else exit code 2."""
     provider = getattr(args, "provider", None)
     model = getattr(args, "model", None)
     script = getattr(args, "script", None)
+    context = getattr(args, "strategy_context", None)
     if provider is None:
-        if model is not None or script is not None:
-            print("error: --model/--script require --provider", file=sys.stderr)
+        if model is not None or script is not None or context is not None:
+            print(
+                "error: --model/--script/--strategy-context require --provider",
+                file=sys.stderr,
+            )
             return 2
         return None
     if model is None:
@@ -446,7 +474,16 @@ def _run_and_report(args, rerun: bool) -> int:
     if invalid is not None:
         return invalid
     llm = None
+    strategy_context = None
+    context_digest_text = "null"
     if args.provider is not None:
+        # AMEND-4A-3: the frozen context is loaded and validated BEFORE the
+        # policy is constructed inside _execute_run (design Â§2.2 step 4).
+        strategy_context = (
+            _load_strategy_context(Path(args.strategy_context))
+            if args.strategy_context is not None
+            else None
+        )
         script_results = (
             _load_script(Path(args.script)) if args.provider == "fake" else None
         )
@@ -454,7 +491,14 @@ def _run_and_report(args, rerun: bool) -> int:
             args.provider,
             args.model,
             script_results,
+            strategy_context,
         )
+        if strategy_context is not None:
+            from robot_factory_arena.policies.llm import (
+                strategy_context_digest,
+            )
+
+            context_digest_text = strategy_context_digest(strategy_context)
     if (args.fault_step is None) != (args.fault_intent is None):
         print(
             "error: --fault-step and --fault-intent must be provided together",
@@ -484,6 +528,8 @@ def _run_and_report(args, rerun: bool) -> int:
     print(f"report: {directory / REPORT_NAME}")
     if llm is not None:
         print(f"llm_report: {directory / 'llm' / 'llm-report.html'}")
+        # Expected context/policy identity for harness launch metadata.
+        print(f"strategy_context_digest: {context_digest_text}")
         _report_llm_usage(directory)
     if rerun:
         return _compare_with_prior_runs(
@@ -609,6 +655,14 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "canonical JSON array of ProviderResult envelopes "
             "(required with --provider fake)"
+        ),
+    )
+    parser.add_argument(
+        "--strategy-context",
+        default=None,
+        help=(
+            "canonical StrategyContext JSON file, validated before the LLM "
+            "policy is constructed (optional, requires --provider)"
         ),
     )
 
