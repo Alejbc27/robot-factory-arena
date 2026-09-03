@@ -136,8 +136,12 @@ def _policy(*script, **kwargs):
     return LLMPolicy(FakeProvider(script=list(script)), **kwargs)
 
 
-def _guidance(guidance_id="guidance-0001", author_id="human",
-              guidance_ordinal=0, text="advisory note"):
+def _guidance(
+    guidance_id="guidance-0001",
+    author_id="human",
+    guidance_ordinal=0,
+    text="advisory note",
+):
     return {
         "guidance_id": guidance_id,
         "author_id": author_id,
@@ -146,10 +150,15 @@ def _guidance(guidance_id="guidance-0001", author_id="human",
     }
 
 
-def _discovery(source_attempt_id="r3-agent-01-seed-18-attempt-01",
-               explorer_id="explorer-01", discovery_ordinal=0,
-               text="shared finding", agent_id="agent-01", seed="18",
-               attempt_ordinal=1):
+def _discovery(
+    source_attempt_id="r3-agent-01-seed-18-attempt-01",
+    explorer_id="explorer-01",
+    discovery_ordinal=0,
+    text="shared finding",
+    agent_id="agent-01",
+    seed="18",
+    attempt_ordinal=1,
+):
     return {
         "source_attempt_id": source_attempt_id,
         "explorer_id": explorer_id,
@@ -167,8 +176,7 @@ def _discovery(source_attempt_id="r3-agent-01-seed-18-attempt-01",
     }
 
 
-def _context(guidance=None, discoveries=None,
-             source_tournament_id="tournament-p6"):
+def _context(guidance=None, discoveries=None, source_tournament_id="tournament-p6"):
     return {
         "schema_version": 1,
         "source_tournament_id": source_tournament_id,
@@ -330,66 +338,104 @@ class TestStrategyContextValidation(unittest.TestCase):
             "run_status": "finished",
             "core_receipt_digest": "sha256:" + "ab" * 32,
         }
-        duplicate = _context(
-            discoveries=[_discovery(), _discovery(text="other")]
-        )
+        duplicate = _context(discoveries=[_discovery(), _discovery(text="other")])
         violations = (
             ("extra top-level key", {**_context(), "snapshot_ordinal": 1}),
-            ("missing top-level key", {key: value for key, value
-                                       in _context().items()
-                                       if key != "guidance"}),
+            (
+                "missing top-level key",
+                {key: value for key, value in _context().items() if key != "guidance"},
+            ),
             ("wrong schema_version", {**_context(), "schema_version": 2}),
             ("bool schema_version", {**_context(), "schema_version": True}),
-            ("empty source tournament",
-             {**_context(), "source_tournament_id": ""}),
-            ("non-string source tournament",
-             {**_context(), "source_tournament_id": 7}),
+            ("empty source tournament", {**_context(), "source_tournament_id": ""}),
+            ("non-string source tournament", {**_context(), "source_tournament_id": 7}),
             ("guidance not a list", {**_context(), "guidance": {}}),
             ("discoveries not a list", {**_context(), "discoveries": "x"}),
             ("guidance extra key", _context(guidance=[bad_guidance])),
-            ("guidance empty text",
-             _context(guidance=[_guidance(text="")])),
-            ("guidance negative ordinal",
-             _context(guidance=[_guidance(guidance_ordinal=-1)])),
-            ("guidance bool ordinal",
-             _context(guidance=[_guidance(guidance_ordinal=True)])),
-            ("guidance float ordinal",
-             _context(guidance=[{**_guidance(),
-                                 "guidance_ordinal": float_ordinal}])),
-            ("discovery extra key",
-             _context(discoveries=[{**_discovery(), "rank": 1}])),
-            ("discovery missing evidence",
-             _context(discoveries=[{**_discovery(),
-                                    "evidence": bad_evidence}])),
-            ("discovery empty text",
-             _context(discoveries=[_discovery(text="")])),
-            ("discovery negative ordinal",
-             _context(discoveries=[_discovery(discovery_ordinal=-1)])),
-            ("wrong producing condition",
-             _context(discoveries=[{**_discovery(),
-                                    "producing_condition": "R1"}])),
-            ("empty producing agent",
-             _context(discoveries=[{**_discovery(),
-                                    "producing_agent_id": ""}])),
-            ("non-string producing seed",
-             _context(discoveries=[{**_discovery(),
-                                    "producing_seed": 18}])),
-            ("attempt ordinal below one",
-             _context(discoveries=[_discovery(attempt_ordinal=0)])),
-            ("non-finished evidence",
-             _context(discoveries=[{**_discovery(),
-                                    "evidence": {**_discovery()["evidence"],
-                                                 "run_status": "running"}}])),
-            ("uppercase digest syntax",
-             _context(discoveries=[{**_discovery(),
-                                    "evidence": {**_discovery()["evidence"],
-                                                 "core_receipt_digest":
-                                                 "sha256:" + "AB" * 32}}])),
-            ("short digest syntax",
-             _context(discoveries=[{**_discovery(),
-                                    "evidence": {**_discovery()["evidence"],
-                                                 "llm_receipt_digest":
-                                                 "sha256:abcd"}}])),
+            ("guidance empty text", _context(guidance=[_guidance(text="")])),
+            (
+                "guidance negative ordinal",
+                _context(guidance=[_guidance(guidance_ordinal=-1)]),
+            ),
+            (
+                "guidance bool ordinal",
+                _context(guidance=[_guidance(guidance_ordinal=True)]),
+            ),
+            (
+                "guidance float ordinal",
+                _context(guidance=[{**_guidance(), "guidance_ordinal": float_ordinal}]),
+            ),
+            (
+                "discovery extra key",
+                _context(discoveries=[{**_discovery(), "rank": 1}]),
+            ),
+            (
+                "discovery missing evidence",
+                _context(discoveries=[{**_discovery(), "evidence": bad_evidence}]),
+            ),
+            ("discovery empty text", _context(discoveries=[_discovery(text="")])),
+            (
+                "discovery negative ordinal",
+                _context(discoveries=[_discovery(discovery_ordinal=-1)]),
+            ),
+            (
+                "wrong producing condition",
+                _context(discoveries=[{**_discovery(), "producing_condition": "R1"}]),
+            ),
+            (
+                "empty producing agent",
+                _context(discoveries=[{**_discovery(), "producing_agent_id": ""}]),
+            ),
+            (
+                "non-string producing seed",
+                _context(discoveries=[{**_discovery(), "producing_seed": 18}]),
+            ),
+            (
+                "attempt ordinal below one",
+                _context(discoveries=[_discovery(attempt_ordinal=0)]),
+            ),
+            (
+                "non-finished evidence",
+                _context(
+                    discoveries=[
+                        {
+                            **_discovery(),
+                            "evidence": {
+                                **_discovery()["evidence"],
+                                "run_status": "running",
+                            },
+                        }
+                    ]
+                ),
+            ),
+            (
+                "uppercase digest syntax",
+                _context(
+                    discoveries=[
+                        {
+                            **_discovery(),
+                            "evidence": {
+                                **_discovery()["evidence"],
+                                "core_receipt_digest": "sha256:" + "AB" * 32,
+                            },
+                        }
+                    ]
+                ),
+            ),
+            (
+                "short digest syntax",
+                _context(
+                    discoveries=[
+                        {
+                            **_discovery(),
+                            "evidence": {
+                                **_discovery()["evidence"],
+                                "llm_receipt_digest": "sha256:abcd",
+                            },
+                        }
+                    ]
+                ),
+            ),
             ("duplicate discovery identity", duplicate),
             ("non-dict guidance entry", _context(guidance=["note"])),
         )
@@ -410,48 +456,52 @@ class TestCanonicalStrategyContextIdentity(unittest.TestCase):
         raw = canonical_strategy_context_bytes(context)
         self.assertNotIn(b"\n", raw)
         self.assertNotIn(b", ", raw)
-        self.assertEqual(
-            raw, canonical_json_bytes(canonical_strategy_context(context))
-        )
+        self.assertEqual(raw, canonical_json_bytes(canonical_strategy_context(context)))
 
     def test_reordered_records_are_canonically_equivalent(self):
         first = _context(
-            guidance=[_guidance(),
-                      _guidance("guidance-0002", guidance_ordinal=1)],
-            discoveries=[_discovery(),
-                         _discovery("r3-agent-02-seed-24-attempt-01",
-                                    "explorer-02")],
+            guidance=[_guidance(), _guidance("guidance-0002", guidance_ordinal=1)],
+            discoveries=[
+                _discovery(),
+                _discovery("r3-agent-02-seed-24-attempt-01", "explorer-02"),
+            ],
         )
         second = _context(
             guidance=[first["guidance"][1], first["guidance"][0]],
             discoveries=[first["discoveries"][1], first["discoveries"][0]],
         )
         self.assertNotEqual(first, second)
-        self.assertEqual(canonical_strategy_context_bytes(first),
-                         canonical_strategy_context_bytes(second))
-        self.assertEqual(strategy_context_digest(first),
-                         strategy_context_digest(second))
+        self.assertEqual(
+            canonical_strategy_context_bytes(first),
+            canonical_strategy_context_bytes(second),
+        )
+        self.assertEqual(
+            strategy_context_digest(first), strategy_context_digest(second)
+        )
 
     def test_changed_text_or_provenance_changes_the_digest(self):
         base = _context(discoveries=[_discovery()])
         variants = (
             ("text", _context(discoveries=[_discovery(text="changed")])),
-            ("source tournament",
-             _context(source_tournament_id="tournament-prior")),
-            ("explorer",
-             _context(discoveries=[_discovery(explorer_id="explorer-09")])),
-            ("producing agent",
-             _context(discoveries=[_discovery(agent_id="agent-09")])),
-            ("producing seed",
-             _context(discoveries=[_discovery(seed="24")])),
-            ("guidance text",
-             _context(guidance=[_guidance(text="revised")],
-                      discoveries=[_discovery()])),
+            ("source tournament", _context(source_tournament_id="tournament-prior")),
+            ("explorer", _context(discoveries=[_discovery(explorer_id="explorer-09")])),
+            (
+                "producing agent",
+                _context(discoveries=[_discovery(agent_id="agent-09")]),
+            ),
+            ("producing seed", _context(discoveries=[_discovery(seed="24")])),
+            (
+                "guidance text",
+                _context(
+                    guidance=[_guidance(text="revised")], discoveries=[_discovery()]
+                ),
+            ),
         )
         for label, variant in variants:
             with self.subTest(changed=label):
-                self.assertNotEqual(strategy_context_digest(base),
-                                    strategy_context_digest(variant))
+                self.assertNotEqual(
+                    strategy_context_digest(base), strategy_context_digest(variant)
+                )
 
 
 class TestComposedPromptComposition(unittest.TestCase):
@@ -462,12 +512,12 @@ class TestComposedPromptComposition(unittest.TestCase):
         self.assertTrue(COMPOSED_PROMPT_TEMPLATE.startswith(PROMPT_TEMPLATE))
 
     def test_composition_digest_is_the_sha256_of_the_composed_template(self):
-        expected = "sha256:" + hashlib.sha256(
-            COMPOSED_PROMPT_TEMPLATE.encode("utf-8")
-        ).hexdigest()
+        expected = (
+            "sha256:"
+            + hashlib.sha256(COMPOSED_PROMPT_TEMPLATE.encode("utf-8")).hexdigest()
+        )
         self.assertEqual(prompt_composition_digest(), expected)
-        self.assertNotEqual(prompt_composition_digest(),
-                            prompt_template_digest())
+        self.assertNotEqual(prompt_composition_digest(), prompt_template_digest())
 
     def test_rendered_composition_has_observation_first_then_context(self):
         observation = _observation(used=2)
@@ -481,24 +531,28 @@ class TestComposedPromptComposition(unittest.TestCase):
                 canonical_json(canonical_strategy_context(context)),
             ),
         )
-        self.assertLess(rendered.index(canonical_json(observation)),
-                        rendered.index("shared finding"))
+        self.assertLess(
+            rendered.index(canonical_json(observation)),
+            rendered.index("shared finding"),
+        )
         self.assertNotIn("{{observation_json}}", rendered)
         self.assertNotIn("{{strategy_context_json}}", rendered)
 
     def test_absent_context_is_rendered_as_explicit_null(self):
         rendered = render_composed_prompt(_observation(), None)
-        self.assertTrue(rendered.endswith(
-            "StrategyContext (advisory shared guidance; not world state):\n"
-            "null\n"
-        ))
+        self.assertTrue(
+            rendered.endswith(
+                "StrategyContext (advisory shared guidance; not world state):\nnull\n"
+            )
+        )
 
     def test_order_equivalent_contexts_render_byte_identically(self):
         observation = _observation()
         first = _context(
-            discoveries=[_discovery(),
-                         _discovery("r3-agent-02-seed-24-attempt-01",
-                                    "explorer-02")]
+            discoveries=[
+                _discovery(),
+                _discovery("r3-agent-02-seed-24-attempt-01", "explorer-02"),
+            ]
         )
         second = _context(discoveries=list(reversed(first["discoveries"])))
         self.assertEqual(
@@ -520,41 +574,49 @@ class TestVnextManifestIdentity(unittest.TestCase):
         self.assertEqual(
             set(manifest),
             {
-                "implementation_version", "model", "policy_id",
-                "prompt_template_digest", "provider",
-                "strategy_context_digest", "tool_schema_digest",
+                "implementation_version",
+                "model",
+                "policy_id",
+                "prompt_template_digest",
+                "provider",
+                "strategy_context_digest",
+                "tool_schema_digest",
             },
         )
         self.assertIn("strategy_context_digest", manifest)
         self.assertIsNone(manifest["strategy_context_digest"])
         self.assertEqual(manifest["policy_id"], "llm-v1")
         self.assertEqual(manifest["implementation_version"], "2")
-        self.assertEqual(manifest["prompt_template_digest"],
-                         prompt_composition_digest())
+        self.assertEqual(
+            manifest["prompt_template_digest"], prompt_composition_digest()
+        )
 
     def test_vnext_digest_is_the_digest_of_the_manifest(self):
         manifest = llm_vnext_policy_manifest("fake", "fake-v1")
-        self.assertEqual(llm_vnext_policy_digest("fake", "fake-v1"),
-                         digest_json(manifest))
-        self.assertEqual(_policy().policy_digest,
-                         llm_vnext_policy_digest("fake", "fake-v1"))
+        self.assertEqual(
+            llm_vnext_policy_digest("fake", "fake-v1"), digest_json(manifest)
+        )
+        self.assertEqual(
+            _policy().policy_digest, llm_vnext_policy_digest("fake", "fake-v1")
+        )
 
     def test_present_context_enters_the_manifest_digest_strictly(self):
         context = _context(discoveries=[_discovery()])
         with_context = llm_vnext_policy_manifest("fake", "fake-v1", context)
-        self.assertEqual(with_context["strategy_context_digest"],
-                         strategy_context_digest(context))
-        self.assertNotEqual(llm_vnext_policy_digest("fake", "fake-v1"),
-                            llm_vnext_policy_digest("fake", "fake-v1",
-                                                    context))
+        self.assertEqual(
+            with_context["strategy_context_digest"], strategy_context_digest(context)
+        )
+        self.assertNotEqual(
+            llm_vnext_policy_digest("fake", "fake-v1"),
+            llm_vnext_policy_digest("fake", "fake-v1", context),
+        )
         equivalent = _context(
-            discoveries=[_discovery(),
-                         _discovery("r3-agent-02-seed-24-attempt-01",
-                                    "explorer-02")]
+            discoveries=[
+                _discovery(),
+                _discovery("r3-agent-02-seed-24-attempt-01", "explorer-02"),
+            ]
         )
-        reordered = _context(
-            discoveries=list(reversed(equivalent["discoveries"]))
-        )
+        reordered = _context(discoveries=list(reversed(equivalent["discoveries"])))
         self.assertEqual(
             llm_vnext_policy_digest("fake", "fake-v1", equivalent),
             llm_vnext_policy_digest("fake", "fake-v1", reordered),
@@ -563,10 +625,11 @@ class TestVnextManifestIdentity(unittest.TestCase):
     def test_legacy_v0_surface_still_exposes_the_six_key_path(self):
         self.assertEqual(POLICY_ID, "llm-v0")
         self.assertEqual(IMPLEMENTATION_VERSION, "1")
-        self.assertNotEqual(llm_policy_digest("fake", "fake-v1"),
-                            llm_vnext_policy_digest("fake", "fake-v1"))
-        self.assertNotEqual(prompt_template_digest(),
-                            prompt_composition_digest())
+        self.assertNotEqual(
+            llm_policy_digest("fake", "fake-v1"),
+            llm_vnext_policy_digest("fake", "fake-v1"),
+        )
+        self.assertNotEqual(prompt_template_digest(), prompt_composition_digest())
 
 
 class TestGoldenDigestVectors(unittest.TestCase):
@@ -603,10 +666,11 @@ class TestGoldenDigestVectors(unittest.TestCase):
         )
 
     def test_golden_vnext_composition_and_null_context_manifest(self):
-        self.assertEqual(prompt_composition_digest(),
-                         self.GOLDEN_COMPOSITION_DIGEST)
-        self.assertEqual(llm_vnext_policy_digest("fake", "fake-v1"),
-                         self.GOLDEN_VNEXT_NULL_MANIFEST_DIGEST)
+        self.assertEqual(prompt_composition_digest(), self.GOLDEN_COMPOSITION_DIGEST)
+        self.assertEqual(
+            llm_vnext_policy_digest("fake", "fake-v1"),
+            self.GOLDEN_VNEXT_NULL_MANIFEST_DIGEST,
+        )
 
 
 class TestLLMPolicyIdentity(unittest.TestCase):
@@ -632,8 +696,9 @@ class TestLLMPolicyIdentity(unittest.TestCase):
             _policy().policy_digest,
             sha256_digest(canonical_json(manifest).encode("utf-8")),
         )
-        self.assertEqual(_policy().policy_digest,
-                         llm_vnext_policy_digest("fake", "fake-v1"))
+        self.assertEqual(
+            _policy().policy_digest, llm_vnext_policy_digest("fake", "fake-v1")
+        )
 
     def test_legacy_six_key_manifest_path_is_pinned_verbatim(self):
         legacy = {
@@ -740,9 +805,8 @@ class TestLLMPolicyNormalization(unittest.TestCase):
         self.assertEqual(sent.prompt, render_composed_prompt(observation, None))
         self.assertEqual(
             sent.prompt,
-            render_prompt(observation) + SUFFIX.replace(
-                "{{strategy_context_json}}", "null"
-            ),
+            render_prompt(observation)
+            + SUFFIX.replace("{{strategy_context_json}}", "null"),
         )
         self.assertEqual(sent.tool_schema, TOOL_SCHEMA)
         self.assertEqual(sent.request_id, "request-3")
@@ -751,11 +815,11 @@ class TestLLMPolicyNormalization(unittest.TestCase):
 
     def test_context_composes_the_prompt_without_entering_the_observation(self):
         observation = _observation(used=2)
-        context = _context(guidance=[_guidance()],
-                           discoveries=[_discovery()])
+        context = _context(guidance=[_guidance()], discoveries=[_discovery()])
         policy = _policy(
-            _success({"tool": "move", "arguments": {"direction": "north"}},
-                     "request-3"),
+            _success(
+                {"tool": "move", "arguments": {"direction": "north"}}, "request-3"
+            ),
             strategy_context=context,
         )
         frozen = {

@@ -166,9 +166,7 @@ def tool_schema_digest() -> str:
 _STRATEGY_CONTEXT_KEYS = frozenset(
     {"schema_version", "source_tournament_id", "guidance", "discoveries"}
 )
-_GUIDANCE_KEYS = frozenset(
-    {"guidance_id", "author_id", "guidance_ordinal", "text"}
-)
+_GUIDANCE_KEYS = frozenset({"guidance_id", "author_id", "guidance_ordinal", "text"})
 _DISCOVERY_KEYS = frozenset(
     {
         "source_attempt_id",
@@ -182,9 +180,7 @@ _DISCOVERY_KEYS = frozenset(
         "text",
     }
 )
-_EVIDENCE_KEYS = frozenset(
-    {"run_status", "core_receipt_digest", "llm_receipt_digest"}
-)
+_EVIDENCE_KEYS = frozenset({"run_status", "core_receipt_digest", "llm_receipt_digest"})
 _HEX_DIGITS = frozenset("0123456789abcdef")
 
 
@@ -206,9 +202,7 @@ def _require_non_empty_str(value, label: str) -> str:
 
 def _require_ordinal(value, label: str, minimum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ValueError(
-            f"StrategyContext {label} must be an integer >= {minimum}"
-        )
+        raise ValueError(f"StrategyContext {label} must be an integer >= {minimum}")
     return value
 
 
@@ -222,9 +216,7 @@ def _require_discovery(entry) -> dict:
         raise ValueError("discovery producing_condition must be exactly 'R3'")
     _require_non_empty_str(entry["producing_agent_id"], "producing_agent_id")
     _require_non_empty_str(entry["producing_seed"], "producing_seed")
-    _require_ordinal(
-        entry["producing_attempt_ordinal"], "producing_attempt_ordinal", 1
-    )
+    _require_ordinal(entry["producing_attempt_ordinal"], "producing_attempt_ordinal", 1)
     _require_non_empty_str(entry["text"], "discovery text")
     evidence = entry["evidence"]
     if not isinstance(evidence, dict) or set(evidence) != _EVIDENCE_KEYS:
@@ -255,11 +247,7 @@ def validate_strategy_context(strategy_context) -> None:
     if set(strategy_context) != _STRATEGY_CONTEXT_KEYS:
         raise ValueError("StrategyContext must have exactly the §2.1 keys")
     version = strategy_context["schema_version"]
-    if (
-        isinstance(version, bool)
-        or not isinstance(version, int)
-        or version != 1
-    ):
+    if isinstance(version, bool) or not isinstance(version, int) or version != 1:
         raise ValueError("StrategyContext schema_version must be exactly 1")
     _require_non_empty_str(
         strategy_context["source_tournament_id"], "source_tournament_id"
@@ -327,9 +315,7 @@ def canonical_strategy_context(strategy_context):
 
 def canonical_strategy_context_bytes(strategy_context) -> bytes:
     """LF-free compact canonical JSON bytes (``b"null"`` when absent)."""
-    return canonical_json(canonical_strategy_context(strategy_context)).encode(
-        "utf-8"
-    )
+    return canonical_json(canonical_strategy_context(strategy_context)).encode("utf-8")
 
 
 def strategy_context_digest(strategy_context) -> str:
@@ -414,9 +400,7 @@ def llm_vnext_policy_manifest(provider, model, strategy_context=None) -> dict:
 def llm_vnext_policy_digest(provider, model, strategy_context=None) -> str:
     """Digest of the exact seven-key vNext manifest; a changed context changes
     this digest and, through the unchanged RunConfig path, the logical ID."""
-    return digest_json(
-        llm_vnext_policy_manifest(provider, model, strategy_context)
-    )
+    return digest_json(llm_vnext_policy_manifest(provider, model, strategy_context))
 
 
 @dataclass(frozen=True)
@@ -467,9 +451,7 @@ class LLMPolicy:
         if not callable(getattr(adapter, "invoke", None)):
             raise TypeError("adapter must expose a callable invoke()")
         self._strategy_context = canonical_strategy_context(strategy_context)
-        manifest = llm_vnext_policy_manifest(
-            provider, model, self._strategy_context
-        )
+        manifest = llm_vnext_policy_manifest(provider, model, self._strategy_context)
         self.strategy_context_digest = manifest["strategy_context_digest"]
         self.policy_digest = digest_json(manifest)
         self._provider_name = provider
@@ -502,9 +484,7 @@ class LLMPolicy:
                 model=self._model_name,
                 request_id=request_id,
                 observation=observation,
-                prompt=render_composed_prompt(
-                    observation, self._strategy_context
-                ),
+                prompt=render_composed_prompt(observation, self._strategy_context),
                 tool_schema=TOOL_SCHEMA,
             )
         )
