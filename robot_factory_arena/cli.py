@@ -479,9 +479,10 @@ def _run_and_report(args, rerun: bool) -> int:
     if args.provider is not None:
         # AMEND-4A-3: the frozen context is loaded and validated BEFORE the
         # policy is constructed inside _execute_run (design Â§2.2 step 4).
+        raw_context = getattr(args, "strategy_context", None)
         strategy_context = (
-            _load_strategy_context(Path(args.strategy_context))
-            if args.strategy_context is not None
+            _load_strategy_context(Path(raw_context))
+            if raw_context is not None
             else None
         )
         script_results = (
