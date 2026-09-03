@@ -75,5 +75,23 @@ class TestOptionalExtra(unittest.TestCase):
         self.assertTrue(hasattr(langgraph, "__version__"))
 
 
+class TestGateWorkflowSplit(unittest.TestCase):
+    def test_core_job_runs_without_optional_extra(self):
+        text = GATE.read_text(encoding="utf-8")
+        core = re.search(r"unittest-gate:.*?(?=\n  \w[-\w]*:|\Z)", text, re.S)
+        if core is None:
+            self.fail("unittest-gate job missing from gate.yml")
+        self.assertNotIn("harness", core.group(0))
+        self.assertIn("unittest discover -s tests", core.group(0))
+
+    def test_harness_job_installs_extra_before_harness_tests(self):
+        text = GATE.read_text(encoding="utf-8")
+        job = re.search(r"harness-gate:.*?(?=\n  \w[-\w]*:|\Z)", text, re.S)
+        if job is None:
+            self.fail("harness-gate job missing from gate.yml")
+        self.assertIn("[harness]", job.group(0))
+        self.assertIn("test_harness", job.group(0))
+
+
 if __name__ == "__main__":
     unittest.main()

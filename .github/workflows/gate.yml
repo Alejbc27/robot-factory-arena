@@ -5,6 +5,9 @@ on:
   push:
     branches: [master]
 
+permissions:
+  contents: read
+
 jobs:
   unittest-gate:
     runs-on: ubuntu-latest
@@ -17,3 +20,17 @@ jobs:
           python-version: "3.14.5"
       - name: One-command unittest gate
         run: python -m unittest discover -s tests -v
+
+  harness-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
+        with:
+          python-version: "3.14.5"
+      - name: Install the optional harness extra only
+        run: python -m pip install -e ".[harness]"
+      - name: Harness foundation and isolation tests
+        run: python -m unittest tests.test_harness_foundation tests.test_harness_isolation -v

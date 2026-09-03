@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robot-factory-arena"
+version = "0.1.0"
+description = "Deterministic robot-factory evidence core with an optional tournament harness"
+requires-python = ">=3.14"
+dependencies = [] # the core stays stdlib-only; no runtime dependency is introduced
+
+[project.optional-dependencies]
+# Phase 6 harness orchestration only; the core CI job never installs this.
+harness = ["langgraph==1.2.11"]
+
+[tool.setuptools.packages.find]
+include = ["robot_factory_arena*", "harness*"]
