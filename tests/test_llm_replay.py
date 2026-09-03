@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 
 from robot_factory_arena.domain.task import generate_task
-from robot_factory_arena.policies.llm import llm_policy_digest
+from robot_factory_arena.policies.llm import llm_vnext_policy_digest
 from robot_factory_arena.providers.adapter import (
     ProviderResult,
     ToolCallPayload,
@@ -48,8 +48,8 @@ def _completion_script(seed="18"):
 
     task = generate_task(seed)
     config = RunConfig(
-        1, task.task_version, task.seed, "llm-v0",
-        llm_policy_digest("fake", "fake-v1"), 100, GRANTS, None,
+        1, task.task_version, task.seed, "llm-v1",
+        llm_vnext_policy_digest("fake", "fake-v1"), 100, GRANTS, None,
     )
     observations = {}
 
