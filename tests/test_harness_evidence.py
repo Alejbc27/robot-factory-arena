@@ -349,5 +349,41 @@ class TestStructuralValidation(Base):
                 self.assertIsNone(result.input_tokens, name)
 
 
+class TestCanonicalParsing(Base):
+    """PR #20 final blocker: artifact-content parse failures must classify
+    invalid — never escape the binder as UnicodeDecodeError/ValueError, and
+    finite floats are non-canonical per the core writer's integers-only
+    contract (REQ-07)."""
+
+    def test_invalid_utf8_classifies_invalid_never_raises(self):
+        receipt = self.run_dir / "receipt.json"
+        receipt.write_bytes(b'{"outcome": "\xff\xfe"}')
+        result = self.bind()  # must not raise for content
+        self.assertEqual(result.status, "invalid")
+        self.assertIn("utf-8", (result.reason or "").lower())
+        self.assertIsNone(result.verified_score)
+        self.assertIsNone(result.input_tokens)
+
+    def test_nan_constant_classifies_invalid_never_raises(self):
+        receipt = self.run_dir / "receipt.json"
+        receipt.write_bytes(b'{"score": NaN}')
+        result = self.bind()  # must not raise for content
+        self.assertEqual(result.status, "invalid")
+        self.assertIn("float", (result.reason or "").lower())
+        self.assertIsNone(result.verified_score)
+        self.assertIsNone(result.input_tokens)
+
+    def test_finite_float_anywhere_classifies_invalid_never_raises(self):
+        receipt = self.run_dir / "receipt.json"
+        # Canonical-looking bytes carrying a finite float: previously
+        # round-tripped and passed, though the writer can never emit it.
+        receipt.write_bytes(b'{"untracked": 1.5}')
+        result = self.bind()  # must not raise for content
+        self.assertEqual(result.status, "invalid")
+        self.assertIn("float", (result.reason or "").lower())
+        self.assertIsNone(result.verified_score)
+        self.assertIsNone(result.input_tokens)
+
+
 if __name__ == "__main__":
     unittest.main()

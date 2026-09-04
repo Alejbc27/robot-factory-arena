@@ -129,15 +129,33 @@ def scan_secrets(raw, label):
             raise EvidenceError(f"secret pattern {pattern!r} in {label}")
 
 
+def _contains_float(value):
+    """Mirror of the core writer's integers-only contract (REQ-07): floats
+    (finite, NaN, or inf) can never appear in canonical artifacts."""
+    if isinstance(value, float):
+        return True
+    if isinstance(value, dict):
+        return any(_contains_float(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_contains_float(v) for v in value)
+    return False
+
+
 def _read_canonical(path, required):
     path = Path(path)
     if not path.exists():
         raise EvidenceError(f"missing artifact: {path.name}")
     raw = path.read_bytes()
     try:
-        value = json.loads(raw)
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EvidenceError(f"invalid UTF-8 bytes: {path.name}") from exc
+    try:
+        value = json.loads(text)
     except json.JSONDecodeError as exc:
         raise EvidenceError(f"malformed JSON: {path.name}") from exc
+    if _contains_float(value):
+        raise EvidenceError(f"non-canonical float value: {path.name}")
     if not isinstance(value, dict) or canonical_json_bytes(value) != raw:
         raise EvidenceError(f"non-canonical JSON bytes: {path.name}")
     missing = [key for key in required if key not in value]
