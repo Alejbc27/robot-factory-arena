@@ -6,6 +6,7 @@ strategy_context_digest -> CLI reported digest -> policy_digest ->
 logical_run_id / receipt.
 """
 
+import copy
 import json
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ from harness import (
     tournament,
     versions,
 )
+from robot_factory_arena.policies import llm as core_llm
 
 BASE_CONFIG = {
     "schema_version": 1,
@@ -509,6 +511,231 @@ class TestSubprocessAdapter(Base):
         for d, pdigs in digests.items():
             self.assertEqual(len(pdigs), 1)
         strategy_context.assert_identity_separation(digests)
+
+
+def _context_variant(**changes):
+    context = json.loads(json.dumps(SAMPLE_CONTEXT))
+    context.update(changes)
+    return context
+
+
+def _discovery_variant(**changes):
+    context = json.loads(json.dumps(SAMPLE_CONTEXT))
+    context["discoveries"][0].update(changes)
+    return context
+
+
+def _evidence_variant(**changes):
+    context = json.loads(json.dumps(SAMPLE_CONTEXT))
+    context["discoveries"][0]["evidence"].update(changes)
+    return context
+
+
+def _discovery_variant_without(key):
+    context = json.loads(json.dumps(SAMPLE_CONTEXT))
+    del context["discoveries"][0][key]
+    return context
+
+
+def _guidance_entry():
+    return {
+        "guidance_id": "guidance-0001",
+        "author_id": "human",
+        "guidance_ordinal": 0,
+        "text": "prefer spiral over sweep",
+    }
+
+
+def _discovery_entry(source_attempt_id, explorer_id, ordinal):
+    return {
+        "source_attempt_id": source_attempt_id,
+        "explorer_id": explorer_id,
+        "discovery_ordinal": ordinal,
+        "producing_condition": "R3",
+        "producing_agent_id": "agent-01",
+        "producing_seed": "18",
+        "producing_attempt_ordinal": 1,
+        "evidence": {
+            "run_status": "finished",
+            "core_receipt_digest": "sha256:" + "a" * 64,
+            "llm_receipt_digest": "sha256:" + "b" * 64,
+        },
+        "text": "shared finding",
+    }
+
+
+# PR #18 blocker 3: every sample is asserted against BOTH the harness mirror
+# and the core policy validator (tests may import the core; harness source
+# may not) — they must accept and reject identically.
+PARITY_SAMPLES = (
+    ("valid-context", SAMPLE_CONTEXT, True),
+    ("valid-null-context", None, True),
+    (
+        "valid-guidance-and-multi-discoveries",
+        _context_variant(
+            guidance=[_guidance_entry()],
+            discoveries=[
+                _discovery_entry("a", "e1", 0),
+                _discovery_entry("a", "e2", 0),
+                _discovery_entry("b", "e1", 1),
+            ],
+        ),
+        True,
+    ),
+    ("bool-schema-version", _context_variant(schema_version=True), False),
+    ("float-schema-version", _context_variant(schema_version=1.0), False),
+    ("wrong-schema-version", _context_variant(schema_version=2), False),
+    ("string-schema-version", _context_variant(schema_version="1"), False),
+    (
+        "empty-source-tournament-id",
+        _context_variant(source_tournament_id=""),
+        False,
+    ),
+    (
+        "non-string-source-tournament-id",
+        _context_variant(source_tournament_id=7),
+        False,
+    ),
+    ("guidance-not-a-list", _context_variant(guidance={}), False),
+    ("discoveries-not-a-list", _context_variant(discoveries={}), False),
+    (
+        "empty-guidance-id",
+        _context_variant(guidance=[dict(_guidance_entry(), guidance_id="")]),
+        False,
+    ),
+    (
+        "empty-author-id",
+        _context_variant(guidance=[dict(_guidance_entry(), author_id="")]),
+        False,
+    ),
+    (
+        "bool-guidance-ordinal",
+        _context_variant(guidance=[dict(_guidance_entry(), guidance_ordinal=True)]),
+        False,
+    ),
+    (
+        "negative-guidance-ordinal",
+        _context_variant(guidance=[dict(_guidance_entry(), guidance_ordinal=-1)]),
+        False,
+    ),
+    (
+        "empty-guidance-text",
+        _context_variant(guidance=[dict(_guidance_entry(), text="")]),
+        False,
+    ),
+    (
+        "duplicate-guidance-identity",
+        _context_variant(guidance=[_guidance_entry(), _guidance_entry()]),
+        False,
+    ),
+    ("empty-source-attempt-id", _discovery_variant(source_attempt_id=""), False),
+    ("empty-explorer-id", _discovery_variant(explorer_id=""), False),
+    ("bool-discovery-ordinal", _discovery_variant(discovery_ordinal=True), False),
+    (
+        "negative-discovery-ordinal",
+        _discovery_variant(discovery_ordinal=-1),
+        False,
+    ),
+    ("condition-not-R3", _discovery_variant(producing_condition="R1"), False),
+    ("condition-lowercase-r3", _discovery_variant(producing_condition="r3"), False),
+    (
+        "empty-producing-agent-id",
+        _discovery_variant(producing_agent_id=""),
+        False,
+    ),
+    ("empty-producing-seed", _discovery_variant(producing_seed=""), False),
+    ("seed-as-int", _discovery_variant(producing_seed=18), False),
+    (
+        "producing-attempt-ordinal-zero",
+        _discovery_variant(producing_attempt_ordinal=0),
+        False,
+    ),
+    (
+        "bool-producing-attempt-ordinal",
+        _discovery_variant(producing_attempt_ordinal=True),
+        False,
+    ),
+    ("empty-discovery-text", _discovery_variant(text=""), False),
+    ("missing-discovery-key", _discovery_variant_without("text"), False),
+    ("evidence-not-finished", _evidence_variant(run_status="completed"), False),
+    (
+        "evidence-digest-trailing-newline",
+        _evidence_variant(core_receipt_digest="sha256:" + "a" * 64 + "\n"),
+        False,
+    ),
+    (
+        "evidence-digest-uppercase",
+        _evidence_variant(llm_receipt_digest="sha256:" + "A" * 64),
+        False,
+    ),
+    (
+        "evidence-digest-short",
+        _evidence_variant(core_receipt_digest="sha256:" + "a" * 63),
+        False,
+    ),
+    ("evidence-digest-null", _evidence_variant(llm_receipt_digest=None), False),
+    (
+        "duplicate-discovery-identity",
+        _context_variant(
+            discoveries=[
+                _discovery_entry("a", "e1", 0),
+                _discovery_entry("a", "e1", 0),
+            ]
+        ),
+        False,
+    ),
+    ("extra-top-key", _context_variant(extra=1), False),
+)
+
+
+class TestMirrorParity(unittest.TestCase):
+    """PR #18 blocker 3: the harness mirror must accept and reject EXACTLY
+    like the core AMEND-4A-3 validator on the same samples (isolation means
+    the rules are deliberately duplicated; parity is proven, not assumed)."""
+
+    def test_mirror_and_core_agree_on_every_sample(self):
+        for name, sample, should_pass in PARITY_SAMPLES:
+            with self.subTest(sample=name):
+                mirror_error = None
+                core_error = None
+                try:
+                    strategy_context.validate_context(copy.deepcopy(sample))
+                except strategy_context.ContextError as error:
+                    mirror_error = error
+                try:
+                    core_llm.validate_strategy_context(copy.deepcopy(sample))
+                except ValueError as error:
+                    core_error = error
+                self.assertEqual(
+                    mirror_error is None,
+                    core_error is None,
+                    f"{name}: mirror={mirror_error!r} core={core_error!r}",
+                )
+                self.assertEqual(
+                    core_error is None,
+                    should_pass,
+                    f"{name}: expected valid={should_pass}, core disagrees",
+                )
+
+    def test_mirror_normalization_matches_core_canonical_order(self):
+        context = _context_variant(
+            guidance=[_guidance_entry()],
+            discoveries=[
+                _discovery_entry("b", "e1", 0),
+                _discovery_entry("a", "e2", 1),
+                _discovery_entry("a", "e1", 0),
+            ],
+        )
+        mirrored = strategy_context.normalize_context(copy.deepcopy(context))
+        canonical = core_llm.canonical_strategy_context(copy.deepcopy(context))
+        self.assertEqual(
+            strategy_context.canonical_json_bytes(mirrored),
+            core_llm.canonical_json(canonical).encode("utf-8"),
+        )
+        self.assertEqual(
+            strategy_context.digest_json(mirrored),
+            core_llm.strategy_context_digest(canonical),
+        )
 
 
 if __name__ == "__main__":

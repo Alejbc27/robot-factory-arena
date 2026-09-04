@@ -4,6 +4,12 @@ Byte-compatible mirror of the core canonical-JSON authority (sorted keys,
 compact separators, UTF-8, no trailing newline) for external artifact
 validation only; this package never imports ``robot_factory_arena``.
 
+The §2.1 validation below is a DELIBERATE duplicate of the core
+AMEND-4A-3 contract (``robot_factory_arena.policies.llm``): harness
+isolation forbids importing the core, so every rule is mirrored here and
+a parity-test table (tests may import the core) proves the mirror and
+the core accept and reject identical samples.
+
 Mandatory audit chain (maintainer acceptance, PR #16 review):
 canonical StrategyContext -> SHA-256 -> strategy_context_digest ->
 CLI reported digest -> policy_digest -> logical_run_id / receipt.
@@ -61,8 +67,9 @@ def _nonempty(value):
     return isinstance(value, str) and value != ""
 
 
-def _ordinal(value):
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+def _natural_int(value, minimum):
+    """Mirror of the core ordinal rule: int, never bool, >= minimum."""
+    return not isinstance(value, bool) and isinstance(value, int) and value >= minimum
 
 
 def _require(condition, message):
@@ -73,33 +80,64 @@ def _require(condition, message):
 def validate_context(value):
     """Design §2.1: canonical ``null`` or the exact schema-versioned object.
 
-    Compact foundation form; Unit 5 owns the full per-field TRIANGULATE pass.
+    Exact mirror of the core ``validate_strategy_context`` (PR #18
+    blocker 3): bool-rejecting schema_version, non-empty string identities
+    and text, R3-only producing conditions, string seeds, per-field
+    ordinal minima (producing_attempt_ordinal >= 1), guidance and
+    discovery identity uniqueness, finished-only evidence, and canonical
+    digest syntax (fullmatch: no trailing-newline tolerance).
     """
     if value is None:
         return
-    _require(isinstance(value, dict) and set(value) == _TOP_KEYS, "context keys")
+    if not isinstance(value, dict):
+        raise ContextError("context must be JSON null or an object")
+    _require(set(value) == _TOP_KEYS, "context keys")
+    version = value["schema_version"]
     _require(
-        value["schema_version"] == versions.CONTEXT_SCHEMA_VERSION, "schema_version"
+        not isinstance(version, bool)
+        and isinstance(version, int)
+        and version == versions.CONTEXT_SCHEMA_VERSION,
+        "schema_version must be exactly the context schema version",
     )
     _require(_nonempty(value["source_tournament_id"]), "source_tournament_id")
-    for records, keys in (
-        (value["guidance"], _GUIDANCE_KEYS),
-        (value["discoveries"], _DISCOVERY_KEYS),
-    ):
-        _require(isinstance(records, list), "context lists")
-        for record in records:
-            _require(
-                isinstance(record, dict) and set(record) == keys, "record exact keys"
-            )
-            _require(_nonempty(record.get("text", "")), "non-empty text")
-            for field in (
-                "guidance_ordinal",
-                "discovery_ordinal",
-                "producing_attempt_ordinal",
-            ):
-                if field in record:
-                    _require(_ordinal(record[field]), f"{field} must be a natural int")
+    _require(isinstance(value["guidance"], list), "guidance must be a list")
+    _require(isinstance(value["discoveries"], list), "discoveries must be a list")
+    guidance_identities = set()
+    for record in value["guidance"]:
+        _require(
+            isinstance(record, dict) and set(record) == _GUIDANCE_KEYS,
+            "guidance exact keys",
+        )
+        _require(_nonempty(record["guidance_id"]), "guidance_id")
+        _require(_nonempty(record["author_id"]), "author_id")
+        _require(_natural_int(record["guidance_ordinal"], 0), "guidance_ordinal")
+        _require(_nonempty(record["text"]), "guidance text")
+        identity = (record["guidance_ordinal"], record["guidance_id"])
+        _require(
+            identity not in guidance_identities,
+            "guidance identities must be unique",
+        )
+        guidance_identities.add(identity)
+    discovery_identities = set()
     for record in value["discoveries"]:
+        _require(
+            isinstance(record, dict) and set(record) == _DISCOVERY_KEYS,
+            "discovery exact keys",
+        )
+        _require(_nonempty(record["source_attempt_id"]), "source_attempt_id")
+        _require(_nonempty(record["explorer_id"]), "explorer_id")
+        _require(_natural_int(record["discovery_ordinal"], 0), "discovery_ordinal")
+        _require(
+            record["producing_condition"] == "R3",
+            "producing_condition must be exactly 'R3'",
+        )
+        _require(_nonempty(record["producing_agent_id"]), "producing_agent_id")
+        _require(_nonempty(record["producing_seed"]), "producing_seed")
+        _require(
+            _natural_int(record["producing_attempt_ordinal"], 1),
+            "producing_attempt_ordinal",
+        )
+        _require(_nonempty(record["text"]), "discovery text")
         evidence = record["evidence"]
         _require(
             isinstance(evidence, dict) and set(evidence) == _EVIDENCE_KEYS,
@@ -109,11 +147,22 @@ def validate_context(value):
             evidence["run_status"] == "finished",
             "discovery evidence must cite a finished run",
         )
-        _require(
-            bool(DIGEST_RE.match(evidence["core_receipt_digest"]))
-            and bool(DIGEST_RE.match(evidence["llm_receipt_digest"])),
-            "evidence digest syntax",
+        for name in ("core_receipt_digest", "llm_receipt_digest"):
+            digest = evidence[name]
+            _require(
+                isinstance(digest, str) and bool(DIGEST_RE.fullmatch(digest)),
+                f"evidence {name} must be sha256:<64 lowercase hex>",
+            )
+        identity = (
+            record["source_attempt_id"],
+            record["explorer_id"],
+            record["discovery_ordinal"],
         )
+        _require(
+            identity not in discovery_identities,
+            "discovery identities must be unique",
+        )
+        discovery_identities.add(identity)
 
 
 def normalize_context(value):
