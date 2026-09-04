@@ -6,6 +6,7 @@ reference files and are never parsed for score/outcome (design §4); the single
 extracted ``strategy_context_digest`` line is identity binding only.
 """
 
+import json
 import re
 import subprocess
 import sys
@@ -116,15 +117,56 @@ def register_launch(tournament_root, attempt_id, metadata):
     return stored
 
 
-def run_launch(tournament_root, attempt_id, argv, runner=local_runner, timeout=None):
-    if not launch_is_registered(tournament_root, attempt_id):
+def _load_registered_launch(tournament_root, attempt_id):
+    """The immutable launch.json; loading fails closed on absence/corruption."""
+    path = _attempt_dir(tournament_root, attempt_id) / "launch.json"
+    if not path.exists():
         raise LaunchError("cannot launch before registration")
-    result = runner(argv, timeout=timeout)
+    try:
+        registered = json.loads(path.read_bytes())
+    except json.JSONDecodeError as exc:
+        raise LaunchError(f"launch metadata unreadable: {path}") from exc
+    if not isinstance(registered, dict):
+        raise LaunchError(f"launch metadata must be a JSON object: {path}")
+    return registered
+
+
+def run_launch(tournament_root, attempt_id, argv, runner=local_runner, timeout=None):
+    """Single-shot execution bound to its registration (PR #18 blocker 2).
+
+    The argv argument must equal the registered argv exactly; the frozen
+    context snapshot is re-verified just before spawning; and an attempt
+    that already has observed evidence is never re-run or overwritten —
+    recovery/retry is an explicit new attempt/event.
+    """
     directory = _attempt_dir(tournament_root, attempt_id)
+    registered = _load_registered_launch(tournament_root, attempt_id)
+    if registered.get("argv") != list(argv):
+        raise LaunchError(f"argv does not match the registered launch: {attempt_id}")
+    for evidence_name in ("observed.json", "stdout.bin", "stderr.bin"):
+        if (directory / evidence_name).exists():
+            raise LaunchError(
+                f"attempt {attempt_id} already has observed evidence "
+                f"({evidence_name}); a retry requires a new attempt"
+            )
+    context_path = registered.get("context_path")
+    context_digest = registered.get("context_digest")
+    if not isinstance(context_path, str) or not isinstance(context_digest, str):
+        raise LaunchError("registered launch lacks context identity")
+    context_file = Path(context_path)
+    if not context_file.exists():
+        raise LaunchError(
+            f"frozen context snapshot missing just before spawn: {context_path}"
+        )
+    if sha256_digest(context_file.read_bytes()) != context_digest:
+        raise LaunchError(
+            f"context snapshot mutated since registration: {context_path}"
+        )
+    result = runner(argv, timeout=timeout)
     stdout_ref = directory / "stdout.bin"
     stderr_ref = directory / "stderr.bin"
-    stdout_ref.write_bytes(result.stdout)
-    stderr_ref.write_bytes(result.stderr)
+    atomic_write_bytes(stdout_ref, result.stdout)
+    atomic_write_bytes(stderr_ref, result.stderr)
     observed = {
         "schema_version": versions.LAUNCH_SCHEMA_VERSION,
         "attempt_id": attempt_id,

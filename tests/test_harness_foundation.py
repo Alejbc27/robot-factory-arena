@@ -229,7 +229,7 @@ class TestCheckpoints(Base):
 
 
 class TestSubprocessAdapter(Base):
-    def _launch(self, root, stdout_text=b""):
+    def _register(self, root):
         context_path = root / "contexts" / "strategy-context-000.json"
         context_path.parent.mkdir(parents=True, exist_ok=True)
         frozen = strategy_context.freeze_snapshot(SAMPLE_CONTEXT, context_path)
@@ -240,17 +240,6 @@ class TestSubprocessAdapter(Base):
             context_path=context_path,
             core_root=root / "core",
         )
-        calls = []
-
-        def runner(argv, timeout=None):
-            calls.append(list(argv))
-            self.assertTrue(
-                subprocess_adapter.launch_is_registered(root, "attempt-000")
-            )
-            return subprocess_adapter.RunnerResult(
-                exit_code=0, timed_out=False, stdout=stdout_text, stderr=b""
-            )
-
         meta = subprocess_adapter.register_launch(
             root,
             "attempt-000",
@@ -264,6 +253,21 @@ class TestSubprocessAdapter(Base):
                 "context_digest": frozen["digest"],
             },
         )
+        return frozen, meta, argv
+
+    def _launch(self, root, stdout_text=b""):
+        frozen, meta, argv = self._register(root)
+        calls = []
+
+        def runner(argv, timeout=None):
+            calls.append(list(argv))
+            self.assertTrue(
+                subprocess_adapter.launch_is_registered(root, "attempt-000")
+            )
+            return subprocess_adapter.RunnerResult(
+                exit_code=0, timed_out=False, stdout=stdout_text, stderr=b""
+            )
+
         result = subprocess_adapter.run_launch(
             root, "attempt-000", argv, runner, timeout=60
         )
@@ -287,6 +291,80 @@ class TestSubprocessAdapter(Base):
             subprocess_adapter.register_launch(
                 self.root, "attempt-000", {"condition": "R1"}
             )
+
+    def _silent_runner(self, calls):
+        def runner(argv, timeout=None):
+            calls.append(list(argv))
+            return subprocess_adapter.RunnerResult(
+                exit_code=0, timed_out=False, stdout=b"", stderr=b""
+            )
+
+        return runner
+
+    def test_run_launch_rejects_unregistered_argv(self):
+        # PR #18 blocker 2: execution is bound to the registered argv.
+        _, meta, argv = self._register(self.root)
+        calls = []
+        tampered = list(argv)
+        tampered[tampered.index("18")] = "24"
+        with self.assertRaises(subprocess_adapter.LaunchError):
+            subprocess_adapter.run_launch(
+                self.root, "attempt-000", tampered, self._silent_runner(calls)
+            )
+        self.assertEqual(calls, [])
+        result = subprocess_adapter.run_launch(
+            self.root,
+            "attempt-000",
+            argv,
+            self._silent_runner(calls),
+            timeout=60,
+        )
+        self.assertEqual(result.exit_code, 0)
+
+    def test_run_launch_rejects_context_mutated_after_registration(self):
+        # PR #18 blocker 2: the snapshot is re-verified JUST BEFORE spawn.
+        _, meta, argv = self._register(self.root)
+        path = Path(meta["context_path"])
+        path.write_bytes(path.read_bytes() + b" ")
+        calls = []
+        with self.assertRaises(subprocess_adapter.LaunchError):
+            subprocess_adapter.run_launch(
+                self.root, "attempt-000", argv, self._silent_runner(calls)
+            )
+        self.assertEqual(calls, [])
+
+    def test_run_launch_rejects_missing_context_snapshot(self):
+        _, meta, argv = self._register(self.root)
+        Path(meta["context_path"]).unlink()
+        calls = []
+        with self.assertRaises(subprocess_adapter.LaunchError):
+            subprocess_adapter.run_launch(
+                self.root, "attempt-000", argv, self._silent_runner(calls)
+            )
+        self.assertEqual(calls, [])
+
+    def test_second_run_launch_never_overwrites_evidence(self):
+        # PR #18 blocker 2: a second run for an attempt that already has
+        # observed evidence is rejected; recovery is a new attempt.
+        _, meta, result, _ = self._launch(self.root, b"first run stdout\n")
+        stdout_before = result.stdout_ref.read_bytes()
+        with self.assertRaises(subprocess_adapter.LaunchError):
+            subprocess_adapter.run_launch(
+                self.root, "attempt-000", meta["argv"], None, timeout=60
+            )
+        self.assertEqual(result.stdout_ref.read_bytes(), stdout_before)
+
+    def test_partial_evidence_from_crash_still_blocks_overwrite(self):
+        _, _, argv = self._register(self.root)
+        directory = self.root / "attempts" / "attempt-000"
+        directory.joinpath("stdout.bin").write_bytes(b"orphan output\n")
+        with self.assertRaises(subprocess_adapter.LaunchError):
+            subprocess_adapter.run_launch(
+                self.root, "attempt-000", argv, None, timeout=60
+            )
+        self.assertEqual(
+            directory.joinpath("stdout.bin").read_bytes(), b"orphan output\n"
+        )
 
     def test_context_mutation_after_hashing_rejected(self):
         frozen, _, result, _ = self._launch(self.root)
