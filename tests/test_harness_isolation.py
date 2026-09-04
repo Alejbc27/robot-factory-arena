@@ -103,6 +103,23 @@ class TestGateWorkflowSplit(unittest.TestCase):
         self.assertIn("[harness]", job.group(0))
         self.assertIn("test_harness", job.group(0))
 
+    def test_harness_gate_runs_all_five_harness_modules(self):
+        # PR #20 blocker 4: the harness-gate job must execute every harness
+        # module WITH langgraph installed, so test_build_graph_compiles
+        # reports ok there instead of being skipped everywhere.
+        text = GATE.read_text(encoding="utf-8")
+        job = re.search(r"harness-gate:.*?(?=\n  \w[-\w]*:|\Z)", text, re.S)
+        if job is None:
+            self.fail("harness-gate job missing from gate.yml")
+        for module in (
+            "tests.test_harness_foundation",
+            "tests.test_harness_isolation",
+            "tests.test_harness_evidence",
+            "tests.test_harness_r2",
+            "tests.test_harness_leaderboard",
+        ):
+            self.assertIn(module, job.group(0))
+
 
 if __name__ == "__main__":
     unittest.main()
