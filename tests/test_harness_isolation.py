@@ -6,6 +6,7 @@ a core job without the optional extra plus a separate harness job.
 """
 
 import ast
+import importlib.util
 import re
 import unittest
 from pathlib import Path
@@ -14,12 +15,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 HARNESS_DIR = REPO_ROOT / "harness"
 GATE = REPO_ROOT / ".github" / "workflows" / "gate.yml"
 
-try:  # Optional extra: harness tests must skip cleanly when it is absent.
-    import langgraph  # noqa: F401
-
-    LANGGRAPH_AVAILABLE = True
-except ImportError:
-    LANGGRAPH_AVAILABLE = False
+# Optional extra: harness tests must skip cleanly when it is absent.
+# find_spec avoids a static import the local resolver cannot satisfy.
+LANGGRAPH_AVAILABLE = importlib.util.find_spec("langgraph") is not None
 
 
 def _harness_sources():
