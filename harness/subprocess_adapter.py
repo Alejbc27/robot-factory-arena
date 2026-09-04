@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import versions
 from .strategy_context import (
+    DIGEST_RE,
     atomic_write_bytes,
     canonical_json_bytes,
     sha256_digest,
@@ -159,9 +160,19 @@ def extract_reported_context_digest(stdout_text):
 
 
 def bind_identity(launch_meta, reported, core_config, receipt):
-    """Post-run binding record for the append-only attempt log (audit chain)."""
+    """Post-run binding record for the append-only attempt log (audit chain).
+
+    Fail-closed (PR #18 blocker 1): a run whose CLI printed no digest line
+    (``reported is None``) or a malformed one can never produce the
+    mandatory binding that :func:`strategy_context.verify_context_chain`
+    requires.
+    """
     if reported is None:
         raise LaunchError("no strategy_context_digest line reported by the CLI")
+    if reported != "null" and not (
+        isinstance(reported, str) and DIGEST_RE.fullmatch(reported)
+    ):
+        raise LaunchError(f"CLI reported a malformed digest line: {reported!r}")
     return {
         "context_digest": launch_meta["context_digest"],
         "reported_digest": reported,

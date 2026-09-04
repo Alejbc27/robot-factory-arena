@@ -314,10 +314,65 @@ class TestSubprocessAdapter(Base):
         }
         chain = subprocess_adapter.bind_identity(meta, reported, core_config, receipt)
         self.assertEqual(chain["context_digest"], frozen["digest"])
+        self.assertEqual(chain["reported_digest"], digest)
         self.assertEqual(chain["logical_run_id"], "logical-run-1")
         strategy_context.verify_context_chain(
-            Path(meta["context_path"]), meta, core_config, receipt
+            Path(meta["context_path"]), meta, chain, core_config, receipt
         )
+
+    def test_chain_requires_the_cli_reported_digest_line(self):
+        # PR #18 blocker 1: removing the ``strategy_context_digest:`` stdout
+        # line from the simulated CLI output must break the chain; it can
+        # never pass without a CLI report.
+        frozen, meta, result, _ = self._launch(self.root, b"no digest line here\n")
+        reported = subprocess_adapter.extract_reported_context_digest(
+            result.stdout_ref.read_bytes().decode()
+        )
+        self.assertIsNone(reported)
+        with self.assertRaises(subprocess_adapter.LaunchError):
+            subprocess_adapter.bind_identity(
+                meta,
+                reported,
+                {"policy_digest": "sha256:" + "d" * 64},
+                {"logical_run_id": "logical-run-1"},
+            )
+
+    def test_chain_without_post_run_binding_raises(self):
+        digest = strategy_context.digest_json(SAMPLE_CONTEXT)
+        frozen, meta, _, _ = self._launch(
+            self.root, f"strategy_context_digest: {digest}\n".encode()
+        )
+        good_cfg = {"policy_digest": "sha256:" + "d" * 64}
+        good_rcpt = {
+            "logical_run_id": "logical-run-1",
+            "policy_digest": "sha256:" + "d" * 64,
+        }
+        context_path = Path(meta["context_path"])
+        for broken_binding in (
+            None,
+            {},
+            {"context_digest": meta["context_digest"]},
+            {
+                "context_digest": meta["context_digest"],
+                "reported_digest": None,
+                "policy_digest": good_cfg["policy_digest"],
+                "logical_run_id": "logical-run-1",
+            },
+        ):
+            with self.assertRaises(strategy_context.ContextError):
+                strategy_context.verify_context_chain(
+                    context_path, meta, broken_binding, good_cfg, good_rcpt
+                )
+        unbound = {
+            "context_digest": meta["context_digest"],
+            "reported_digest": digest,
+            "policy_digest": good_cfg["policy_digest"],
+            "logical_run_id": "other-run",
+        }
+        with self.assertRaises(strategy_context.ContextError):
+            strategy_context.verify_context_chain(
+                context_path, meta, unbound, good_cfg, good_rcpt
+            )
 
     def test_chain_fails_closed_on_each_broken_link(self):
         digest = strategy_context.digest_json(SAMPLE_CONTEXT)
@@ -329,29 +384,32 @@ class TestSubprocessAdapter(Base):
             "logical_run_id": "logical-run-1",
             "policy_digest": "sha256:" + "d" * 64,
         }
+        chain = subprocess_adapter.bind_identity(meta, digest, good_cfg, good_rcpt)
         context_path = Path(meta["context_path"])
-        strategy_context.verify_context_chain(context_path, meta, good_cfg, good_rcpt)
-        wrong_cli = dict(meta, reported_digest="sha256:" + "e" * 64)
+        strategy_context.verify_context_chain(
+            context_path, meta, chain, good_cfg, good_rcpt
+        )
+        wrong_cli = dict(chain, reported_digest="sha256:" + "e" * 64)
         with self.assertRaises(strategy_context.ContextError):
             strategy_context.verify_context_chain(
-                context_path, wrong_cli, good_cfg, good_rcpt
+                context_path, meta, wrong_cli, good_cfg, good_rcpt
             )
         tampered = context_path.read_bytes() + b" "
         context_path.write_bytes(tampered)
         with self.assertRaises(strategy_context.ContextError):
             strategy_context.verify_context_chain(
-                context_path, meta, good_cfg, good_rcpt
+                context_path, meta, chain, good_cfg, good_rcpt
             )
         context_path.write_bytes(context_path.read_bytes()[:-1])
         drifted_cfg = {"policy_digest": "sha256:" + "f" * 64}
         with self.assertRaises(strategy_context.ContextError):
             strategy_context.verify_context_chain(
-                context_path, meta, drifted_cfg, good_rcpt
+                context_path, meta, chain, drifted_cfg, good_rcpt
             )
         drifted_rcpt = dict(good_rcpt, policy_digest="sha256:" + "f" * 64)
         with self.assertRaises(strategy_context.ContextError):
             strategy_context.verify_context_chain(
-                context_path, meta, good_cfg, drifted_rcpt
+                context_path, meta, chain, good_cfg, drifted_rcpt
             )
 
     def test_identity_separation_same_vs_different_context(self):

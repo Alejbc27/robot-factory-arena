@@ -163,46 +163,86 @@ def verify_snapshot(path, expected_digest):
         raise ContextError(f"context snapshot mutated after hashing: {path}")
 
 
-def verify_context_chain(path, launch_meta, core_config, receipt):
-    """Fail-closed verification of the full audit chain.
+def _is_reported_digest(value):
+    return value == "null" or (
+        isinstance(value, str) and bool(DIGEST_RE.fullmatch(value))
+    )
 
-    Links: frozen snapshot bytes -> recorded digest; CLI-reported
-    strategy_context_digest -> frozen snapshot; run-config policy_digest ->
-    receipt policy_digest; receipt -> logical_run_id.
+
+def verify_context_chain(path, launch_meta, binding, core_config, receipt):
+    """Fail-closed verification of the full audit chain (PR #18 blocker 1).
+
+    ``binding`` is the MANDATORY post-run record produced by
+    :func:`subprocess_adapter.bind_identity`; the chain has no optional
+    skip path, so a run whose CLI printed no
+    ``strategy_context_digest:`` line can never verify.
+
+    Links: frozen snapshot bytes -> launch-registered digest; binding ->
+    registration; CLI-reported strategy_context_digest -> frozen snapshot;
+    binding policy_digest -> run config -> receipt; binding
+    logical_run_id -> receipt.
     """
+    _require(isinstance(binding, dict), "post-run identity binding missing")
+    for key in (
+        "context_digest",
+        "reported_digest",
+        "policy_digest",
+        "logical_run_id",
+    ):
+        _require(key in binding, f"post-run binding missing: {key}")
     data = Path(path).read_bytes()
     actual = sha256_digest(data)
     _require(
         actual == launch_meta["context_digest"],
         f"context snapshot mutated after hashing: {path}",
     )
-    reported = launch_meta.get("reported_digest")
-    if reported is not None:
-        try:
-            value = json.loads(data)
-        except json.JSONDecodeError as exc:
-            raise ContextError(f"frozen snapshot is not JSON: {path}") from exc
-        _require(
-            reported == ("null" if value is None else actual),
-            "CLI-reported strategy_context_digest disagrees with the frozen snapshot",
-        )
+    _require(
+        binding["context_digest"] == launch_meta["context_digest"],
+        "post-run binding context_digest disagrees with the launch registration",
+    )
+    reported = binding["reported_digest"]
+    _require(
+        _is_reported_digest(reported),
+        "no CLI-reported strategy_context_digest (the chain requires the binding)",
+    )
+    try:
+        value = json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise ContextError(f"frozen snapshot is not JSON: {path}") from exc
+    _require(
+        reported == ("null" if value is None else actual),
+        "CLI-reported strategy_context_digest disagrees with the frozen snapshot",
+    )
+    binding_policy = binding["policy_digest"]
+    _require(
+        isinstance(binding_policy, str) and bool(DIGEST_RE.fullmatch(binding_policy)),
+        "binding policy_digest missing or malformed",
+    )
     policy_digest = core_config.get("policy_digest")
     _require(
-        isinstance(policy_digest, str) and DIGEST_RE.match(policy_digest),
+        isinstance(policy_digest, str) and bool(DIGEST_RE.fullmatch(policy_digest)),
         "run config policy_digest missing or malformed",
+    )
+    _require(
+        binding_policy == policy_digest,
+        "binding policy_digest disagrees with the run config",
     )
     _require(
         policy_digest == receipt.get("policy_digest"),
         "receipt policy_digest disagrees with the run config",
     )
-    _require(_nonempty(receipt.get("logical_run_id")), "receipt logical_run_id")
+    _require(_nonempty(binding["logical_run_id"]), "binding logical_run_id empty")
+    _require(
+        binding["logical_run_id"] == receipt.get("logical_run_id"),
+        "binding logical_run_id disagrees with the receipt",
+    )
 
 
 def assert_identity_separation(digest_to_policy):
     """One context digest must bind exactly one policy_digest: context identity
     drives policy identity, so collisions or splits break comparability."""
     for context_digest, policy_digests in digest_to_policy.items():
-        _require(DIGEST_RE.match(context_digest), "context digest syntax")
+        _require(DIGEST_RE.fullmatch(context_digest), "context digest syntax")
         _require(
             len(policy_digests) == 1,
             f"context {context_digest} bound to multiple policy digests",
