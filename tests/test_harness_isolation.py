@@ -70,9 +70,15 @@ class TestPackageBoundary(unittest.TestCase):
 )
 class TestOptionalExtra(unittest.TestCase):
     def test_langgraph_imports_when_extra_installed(self):
-        import langgraph
+        import importlib
+        import importlib.metadata
 
-        self.assertTrue(hasattr(langgraph, "__version__"))
+        module = importlib.import_module("langgraph")
+        self.assertIsNotNone(module)
+        # Namespace packages expose no top-level __version__; the
+        # distribution metadata is the authoritative version source.
+        version = importlib.metadata.version("langgraph")
+        self.assertRegex(version, r"^\d+\.\d+\.\d+")
 
 
 class TestGateWorkflowSplit(unittest.TestCase):
