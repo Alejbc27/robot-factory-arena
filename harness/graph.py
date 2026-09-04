@@ -10,10 +10,19 @@ route. R2 is autonomous: one agent, no human prompt, no discoveries, no
 silent fallback. Retry semantics: only failures, timeouts, non-zero exits,
 and missing/invalid/unresolved evidence route to a NEW attempt ordinal,
 until exactly K launched attempts; a first valid receipt — completed or a
-safe abort — is terminal and is never rerun. The registered-but-unbound
-crash window is ambiguous: it is counted as a launch, never rerun under the
-same ``attempt_id``, and recovery records an explicit event plus a new
-ordinal.
+safe abort — is terminal and is never rerun.
+
+Pair progress is reconstructed EXPLICITLY from the append-only attempt log
+(PR #20): the latest launch with no evidence resolution is collected and
+bound whether or not launch_observed exists; a latest launch with
+evidence_bound is pair-terminal and the seed advances; evidence_unresolved
+with launches < K yields a new attempt ordinal; evidence_unresolved at
+exactly K is pair-terminal evidence_invalid and the seed advances. Every
+crash window therefore resumes to the identical decision: the same
+attempt_id is never relaunched, a bound terminal receipt is never repeated,
+and the exact-K limit is never exceeded. The registered-but-unbound window
+stays ambiguous: it is counted as a launch, never rerun under the same
+``attempt_id``, and recovery records an explicit event.
 """
 
 import json
@@ -40,6 +49,12 @@ _RETRY_ROUTES = {
     "retry": "register_launch",
     "next_work": "plan_context",
     "work_done": "aggregate_leaderboard",
+}
+
+_PLAN_ROUTES = {
+    "merge_and_freeze_context": "merge_and_freeze_context",
+    "collect_and_bind_evidence": "collect_and_bind_evidence",
+    "retry_or_finish": "retry_or_finish",
 }
 
 
@@ -124,24 +139,43 @@ def _run_dirs(core_root):
     return found
 
 
-def _pending_attempt(deps, launches):
-    observed = {
-        r["attempt_id"]
-        for r in deps.attempt_log.records()
-        if r.get("event") == "launch_observed"
-    }
-    resolved = {
-        r["attempt_id"]
-        for r in deps.attempt_log.records()
-        if r.get("event") in ("evidence_bound", "evidence_unresolved")
-    }
-    for record in reversed(launches):
-        if (
-            record["attempt_id"] not in observed
-            and record["attempt_id"] not in resolved
+def _resolved_event(deps, attempt_id):
+    """The latest evidence resolution record for attempt_id, or None."""
+    found = None
+    for record in deps.attempt_log.records():
+        if record.get("attempt_id") == attempt_id and record.get("event") in (
+            "evidence_bound",
+            "evidence_unresolved",
         ):
-            return record
-    return None
+            found = record
+    return found
+
+
+def _pair_state(deps, condition, seed):
+    """Reconstruct (condition, seed) progress from the append-only log (PR #20).
+
+    Returns exactly one of:
+
+    ``fresh``    — no launch registered yet;
+    ``collect``  — the latest launch has NO evidence resolution: collect and
+                   bind whether or not launch_observed exists (crash windows);
+    ``retry``    — the latest launch is evidence_unresolved and launches < K;
+    ``terminal`` — the latest launch is evidence_bound (receipt terminal,
+                   never rerun) or evidence_unresolved at exactly K (pair
+                   terminal evidence_invalid); the seed advances.
+    """
+    launches = _pair_launches(deps, condition, seed)
+    if not launches:
+        return "fresh", None
+    latest = launches[-1]
+    resolution = _resolved_event(deps, latest["attempt_id"])
+    if resolution is None:
+        return "collect", latest
+    if resolution["event"] == "evidence_bound":
+        return "terminal", latest
+    if len(launches) < deps.config["k_attempts"]:
+        return "retry", latest
+    return "terminal", latest
 
 
 def _record_unresolved(state, deps, launch_record, reason):
@@ -347,6 +381,20 @@ def node_collect_and_bind_evidence(state, deps):
         return _record_unresolved(
             state, deps, target, f"observed.json unreadable: {exc}"
         )
+    if not isinstance(observed, dict):
+        return _record_unresolved(state, deps, target, "observed.json is not an object")
+    # A timeout or non-zero exit resolves the evidence BEFORE any artifact
+    # binding (PR #20): a runner that writes a perfectly valid run triple
+    # and then fails must never produce terminal evidence_bound.
+    for field in ("exit_code", "timed_out"):
+        if field not in observed:
+            return _record_unresolved(
+                state, deps, target, f"observed.json missing field: {field}"
+            )
+    if observed["timed_out"]:
+        return _record_unresolved(state, deps, target, "subprocess_timeout")
+    if observed["exit_code"] != 0:
+        return _record_unresolved(state, deps, target, "subprocess_nonzero_exit")
     launch_meta = subprocess_adapter.load_registration(deps.tournament_root, attempt_id)
     new_dirs = [
         d
@@ -414,38 +462,54 @@ def node_collect_and_bind_evidence(state, deps):
     return set_current(state, last_evidence=last, status="evidence_collected")
 
 
-def node_retry_or_finish(state, deps):
-    """First valid receipt (any outcome) is terminal; only failures retry to K."""
-    condition, seed = state["condition"], state["semilla"]
-    launches = _pair_launches(deps, condition, seed)
-    last = state.get("last_evidence") or {}
-    if last.get("status") == "bound":
-        deps.decision_log.append(
-            {
-                "event": "attempt_terminal",
-                "attempt_id": state["attempt_id"],
-                "outcome": last["outcome"],
-            }
-        )
-    elif len(launches) >= deps.config["k_attempts"]:
-        deps.decision_log.append(
-            {
-                "event": "attempt_terminal",
-                "attempt_id": state.get("attempt_id"),
-                "reason": "k_exhausted",
-                "launched": len(launches),
-            }
-        )
+def _record_pair_terminal(deps, latest, launches):
+    """Idempotent per terminal attempt: a restart after a terminal crash must
+    not append a second decision for the same pair."""
+    if any(
+        record.get("event") == "attempt_terminal"
+        and record.get("attempt_id") == latest["attempt_id"]
+        for record in deps.decision_log.records()
+    ):
+        return
+    resolution = _resolved_event(deps, latest["attempt_id"])
+    record = {"event": "attempt_terminal", "attempt_id": latest["attempt_id"]}
+    if resolution is not None and resolution["event"] == "evidence_bound":
+        record["outcome"] = resolution.get("outcome")
     else:
-        deps.decision_log.append(
-            {
-                "event": "retry_decision",
-                "condition": condition,
-                "seed": seed,
-                "next_attempt_ordinal": len(launches) + 1,
-            }
-        )
+        record["reason"] = "k_exhausted"
+        record["launched"] = len(launches)
+    deps.decision_log.append(record)
+
+
+def node_retry_or_finish(state, deps):
+    """The append-only log is the single source of truth for terminal vs retry
+    (PR #20), so a crash before this node resumes to the identical decision —
+    recorded exactly once per pair."""
+    condition, seed = state["condition"], state["semilla"]
+    kind, latest = _pair_state(deps, condition, seed)
+    launches = _pair_launches(deps, condition, seed)
+    if kind == "retry":
+        if not any(
+            record.get("event") == "retry_decision"
+            and record.get("condition") == condition
+            and record.get("seed") == seed
+            and record.get("next_attempt_ordinal") == len(launches) + 1
+            for record in deps.decision_log.records()
+        ):
+            deps.decision_log.append(
+                {
+                    "event": "retry_decision",
+                    "condition": condition,
+                    "seed": seed,
+                    "next_attempt_ordinal": len(launches) + 1,
+                }
+            )
         return set_current(state, status="retry")
+    if kind != "terminal":
+        raise HarnessGraphError(
+            f"retry_or_finish reached with pair state {kind!r} for seed {seed}"
+        )
+    _record_pair_terminal(deps, latest, launches)
     index = state["work_index"] + 1
     if index < state["work_count"]:
         return set_current(state, work_index=index, status="next_work")
@@ -463,10 +527,13 @@ def node_aggregate_leaderboard(state, deps):
 
 
 def route_after_plan(state, deps):
-    """A registered attempt with no observation/evidence record routes to collect."""
-    launches = _pair_launches(deps, state["condition"], state["semilla"])
-    if _pending_attempt(deps, launches) is not None:
+    """Routes purely from the reconstructed pair state — never in-memory state
+    — so a restart resumes to the identical edge (PR #20)."""
+    kind, _ = _pair_state(deps, state["condition"], state["semilla"])
+    if kind == "collect":
         return "collect_and_bind_evidence"
+    if kind == "terminal":
+        return "retry_or_finish"
     return "merge_and_freeze_context"
 
 
@@ -506,10 +573,7 @@ def build_graph(deps):
     builder.add_conditional_edges(
         "plan_context",
         lambda current: route_after_plan(current, deps),
-        {
-            "merge_and_freeze_context": "merge_and_freeze_context",
-            "collect_and_bind_evidence": "collect_and_bind_evidence",
-        },
+        _PLAN_ROUTES,
     )
     builder.add_edge("merge_and_freeze_context", "register_launch")
     builder.add_edge("register_launch", "launch_subprocess")

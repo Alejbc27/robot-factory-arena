@@ -3,6 +3,13 @@ no discoveries, no silent fallback. First valid completed receipt stops; only
 failures/timeouts/unresolved evidence retry, into NEW attempt ordinals until
 exactly K; the registered-but-unbound crash window is ambiguous, never rerun,
 and recovery creates an explicit event plus a new attempt.
+
+PR #20 remediation: pair progress is reconstructed EXPLICITLY from the
+append-only log, so a crash after launch_observed binds the existing
+attempt, a crash after evidence_bound never reruns the terminal receipt,
+and a crash after the K-th evidence_unresolved never exceeds K. A timeout
+or non-zero exit classifies evidence_unresolved BEFORE any artifact is
+bound, even when the runner left a perfectly valid run dir behind.
 """
 
 import hashlib
@@ -124,13 +131,17 @@ def _script_fn(script):
         "static_then_complete": lambda seed, n: ("static", None, None)
         if (seed == "18" and n == 1)
         else ("ok", "completed", 100),
+        "valid_then_timeout": lambda seed, n: ("valid-timeout", None, None),
+        "valid_then_exit1": lambda seed, n: ("valid-exit1", None, None),
         "never": lambda seed, n: (_ for _ in ()).throw(
             AssertionError("runner invoked")
         ),
     }[script]
 
 
-def fake_runner(script):
+def fake_runner(script, tag=""):
+    """tag makes execution ids unique per runner instance, so a restart runner
+    never collides with run dirs written before the simulated crash."""
     fn = _script_fn(script)
     calls = []
 
@@ -145,13 +156,19 @@ def fake_runner(script):
             return subprocess_adapter.RunnerResult(1, False, stdout, b"boom")
         if action == "timeout":
             return subprocess_adapter.RunnerResult(None, True, stdout, b"")
+        if action == "valid-timeout":
+            _write_triple(root, seed, f"exec-{tag}{n:02d}", "completed", 100)
+            return subprocess_adapter.RunnerResult(None, True, stdout, b"")
+        if action == "valid-exit1":
+            _write_triple(root, seed, f"exec-{tag}{n:02d}", "completed", 100)
+            return subprocess_adapter.RunnerResult(1, False, stdout, b"")
         if action == "static":
             shutil.copytree(
                 SEALED_FIXTURE, root / "runs" / STATIC_LR / "sealed-fixture-01"
             )
             return subprocess_adapter.RunnerResult(0, False, stdout, b"")
         prompt = PROMPT if action != "drift" else "sha256:" + "e" * 64
-        _write_triple(root, seed, f"exec-{n:02d}", outcome, score, prompt)
+        _write_triple(root, seed, f"exec-{tag}{n:02d}", outcome, score, prompt)
         return subprocess_adapter.RunnerResult(0, False, stdout, b"")
 
     runner.calls = calls
@@ -164,14 +181,18 @@ def drive(state_value, deps):
     state_value = graph.node_assign_work(state_value, deps)
     state_value = graph.node_plan_context(state_value, deps)
     for _ in range(200):
-        if graph.route_after_plan(state_value, deps) == "collect_and_bind_evidence":
+        plan_route = graph.route_after_plan(state_value, deps)
+        if plan_route == "collect_and_bind_evidence":
             state_value = graph.node_collect_and_bind_evidence(state_value, deps)
+            state_value = graph.node_retry_or_finish(state_value, deps)
+        elif plan_route == "retry_or_finish":
+            state_value = graph.node_retry_or_finish(state_value, deps)
         else:
             state_value = graph.node_merge_and_freeze_context(state_value, deps)
             state_value = graph.node_register_launch(state_value, deps)
             state_value = graph.node_launch_subprocess(state_value, deps)
             state_value = graph.node_collect_and_bind_evidence(state_value, deps)
-        state_value = graph.node_retry_or_finish(state_value, deps)
+            state_value = graph.node_retry_or_finish(state_value, deps)
         route = graph.route_after_retry(state_value)
         if route == "aggregate_leaderboard":
             return graph.node_aggregate_leaderboard(state_value, deps)
@@ -386,6 +407,149 @@ class TestCrashWindow(Base):
         self.assertEqual(rows["18"]["status"], "evidence_invalid")
         self.assertEqual(rows["18"]["outcome"], "completed")
         self.assertIsNone(rows["18"]["input_tokens"])
+
+
+class TestSubprocessResultPrecedesBinding(Base):
+    """PR #20 blocker 2: timeout / non-zero exit resolve evidence BEFORE any
+    artifact binding, even when the runner left a perfectly valid run dir."""
+
+    def test_timeout_with_valid_run_dir_is_unresolved_before_binding(self):
+        drive(state.initial_state(), self.deps("valid_then_timeout"))
+        records = self.attempt_records()
+        self.assertEqual(
+            [r for r in records if r["event"] == "evidence_bound"],
+            [],
+            "a timed-out launch must never bind evidence",
+        )
+        reasons = [
+            r["reason"]
+            for r in records
+            if r["event"] == "evidence_unresolved" and r["seed"] == "18"
+        ]
+        self.assertEqual(reasons, ["subprocess_timeout"] * 3)
+        row = {r["seed"]: r for r in self.rows(None)}["18"]
+        self.assertEqual(row["status"], "evidence_invalid")
+        self.assertIsNone(row["verified_score"])  # receipt score never official
+
+    def test_nonzero_exit_with_valid_run_dir_is_unresolved_before_binding(self):
+        drive(state.initial_state(), self.deps("valid_then_exit1"))
+        records = self.attempt_records()
+        self.assertEqual(
+            [r for r in records if r["event"] == "evidence_bound"],
+            [],
+            "a non-zero exit must never bind evidence",
+        )
+        reasons = [
+            r["reason"]
+            for r in records
+            if r["event"] == "evidence_unresolved" and r["seed"] == "18"
+        ]
+        self.assertEqual(reasons, ["subprocess_nonzero_exit"] * 3)
+        row = {r["seed"]: r for r in self.rows(None)}["18"]
+        self.assertEqual(row["status"], "evidence_invalid")
+        self.assertIsNone(row["verified_score"])
+
+
+class TestRestartRecovery(Base):
+    """PR #20 blocker 1: pair state is reconstructed from the append-only log,
+    so every crash window resumes to the identical pair decision."""
+
+    def _run_to(self, deps, node):
+        state_value = state.initial_state()
+        state_value = graph.node_freeze_tournament_config(state_value, deps)
+        state_value = graph.node_assign_work(state_value, deps)
+        state_value = graph.node_plan_context(state_value, deps)
+        for step in ("merge", "register", "launch", "collect"):
+            if step == "merge":
+                state_value = graph.node_merge_and_freeze_context(state_value, deps)
+            elif step == "register":
+                state_value = graph.node_register_launch(state_value, deps)
+            elif step == "launch":
+                state_value = graph.node_launch_subprocess(state_value, deps)
+            elif step == "collect":
+                state_value = graph.node_collect_and_bind_evidence(state_value, deps)
+            if step == node:
+                return state_value
+        return state_value
+
+    def test_crash_after_launch_observed_binds_the_existing_attempt(self):
+        deps = self.deps("complete")
+        self._run_to(deps, "launch")  # crash: observed, no evidence resolution
+        restart = fake_runner("complete", tag="r2-")
+        deps2 = graph.build_deps(self.root, CONFIG, runner=restart)
+        drive(state.initial_state(), deps2)
+        seed18 = [r for r in self.attempt_records(deps2) if r.get("seed") == "18"]
+        registered = [
+            r["attempt_id"] for r in seed18 if r["event"] == "launch_registered"
+        ]
+        # invariant: the same attempt_id is never relaunched — the observed
+        # attempt binds its existing evidence instead of a new ordinal
+        self.assertEqual(registered, ["r2-agent-01-seed-18-attempt-01"])
+        bound = [r["attempt_id"] for r in seed18 if r["event"] == "evidence_bound"]
+        self.assertEqual(bound, ["r2-agent-01-seed-18-attempt-01"])
+        self.assertEqual(
+            [c for c in restart.calls if c[c.index("--seed") + 1] == "18"], []
+        )
+        row = {r["seed"]: r for r in self.rows(deps2)}["18"]
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["attempts_used"], 1)
+        self.assertEqual(row["verified_score"], 100)
+
+    def test_crash_after_evidence_bound_never_reruns_the_terminal_receipt(self):
+        deps = self.deps("complete")
+        self._run_to(deps, "collect")  # crash: bound, seed never advanced
+        restart = fake_runner("complete", tag="r2-")
+        deps2 = graph.build_deps(self.root, CONFIG, runner=restart)
+        drive(state.initial_state(), deps2)
+        seed18 = [r for r in self.attempt_records(deps2) if r.get("seed") == "18"]
+        registered = [
+            r["attempt_id"] for r in seed18 if r["event"] == "launch_registered"
+        ]
+        # invariant: a bound terminal receipt is never repeated
+        self.assertEqual(registered, ["r2-agent-01-seed-18-attempt-01"])
+        self.assertEqual(
+            [c for c in restart.calls if c[c.index("--seed") + 1] == "18"], []
+        )
+        terminals = [
+            r
+            for r in deps2.decision_log.records()
+            if r.get("event") == "attempt_terminal"
+            and r.get("attempt_id") == "r2-agent-01-seed-18-attempt-01"
+        ]
+        self.assertEqual(len(terminals), 1)
+        self.assertEqual(terminals[0]["outcome"], "completed")
+        rows = {r["seed"]: r for r in self.rows(deps2)}
+        self.assertEqual(rows["18"]["status"], "completed")
+        self.assertEqual(rows["18"]["attempts_used"], 1)
+        self.assertEqual(sorted(rows), ["18", "24", "30"])
+
+    def test_crash_after_kth_unresolved_is_terminal_and_never_exceeds_k(self):
+        deps = self.deps("always_fail")
+        for _ in range(3):  # exactly K launches, none routed through retry_or_finish
+            self._run_to(deps, "collect")
+        # --- crash: K-th evidence_unresolved recorded, no terminal decision ---
+        restart = fake_runner("always_fail", tag="r2-")
+        deps2 = graph.build_deps(self.root, CONFIG, runner=restart)
+        drive(state.initial_state(), deps2)
+        registered = [
+            r["attempt_id"]
+            for r in self.attempt_records(deps2)
+            if r["event"] == "launch_registered" and r["seed"] == "18"
+        ]
+        # invariant: the exact-K limit is never exceeded
+        self.assertEqual(len(registered), 3)
+        self.assertEqual(registered[-1], "r2-agent-01-seed-18-attempt-03")
+        terminals = [
+            r
+            for r in deps2.decision_log.records()
+            if r.get("event") == "attempt_terminal"
+            and r.get("attempt_id") == "r2-agent-01-seed-18-attempt-03"
+        ]
+        self.assertEqual(len(terminals), 1)
+        self.assertEqual(terminals[0]["reason"], "k_exhausted")
+        row = {r["seed"]: r for r in self.rows(deps2)}["18"]
+        self.assertEqual(row["attempts_used"], 3)
+        self.assertEqual(row["status"], "evidence_invalid")
 
 
 @unittest.skipUnless(
