@@ -1,15 +1,21 @@
 """Durable checkpoints at the design §8 recovery boundaries.
 
 The five R1/launch/receipt boundary hooks (``pre_prompt`` .. ``post_binding``)
-are exposed now so Units 3-4 persist at exactly those points; recovery reloads
+are exposed so Units 3-4 persist at exactly those points; recovery reloads
 the latest checkpoint and fails closed on a corrupt one.
+
+PR #18 blocker 4: the store is gap-fail-closed. Full 0..n filename and
+record continuity is validated before ANY read or write; ``next_seq`` is
+``last_seq + 1`` (never ``len``); an existing destination is never
+overwritten; and writes stay atomic.
 """
 
 import json
+import re
 from pathlib import Path
 
 from . import versions
-from .strategy_context import canonical_json_bytes
+from .strategy_context import atomic_write_bytes, canonical_json_bytes
 
 PRE_PROMPT = "pre_prompt"
 POST_ANSWER = "post_answer"
@@ -18,9 +24,12 @@ POST_REGISTRATION = "post_registration"
 POST_BINDING = "post_binding"
 BOUNDARIES = (PRE_PROMPT, POST_ANSWER, PRE_LAUNCH, POST_REGISTRATION, POST_BINDING)
 
+_CHECKPOINT_NAME = re.compile(r"checkpoint-(\d+)\.json")
+
 
 class CheckpointError(ValueError):
-    """A checkpoint file is unreadable; recovery must fail closed."""
+    """A checkpoint is unreadable, discontinuous, or already exists;
+    recovery must fail closed."""
 
 
 class CheckpointStore:
@@ -32,26 +41,56 @@ class CheckpointStore:
             return []
         return sorted(self.directory.glob("checkpoint-*.json"))
 
+    def _validated_records(self):
+        """Full 0..n continuity check before ANY read or write (blocker 4)."""
+        records = []
+        for index, path in enumerate(self._paths()):
+            match = _CHECKPOINT_NAME.fullmatch(path.name)
+            if match is None:
+                raise CheckpointError(f"unexpected checkpoint filename: {path.name}")
+            try:
+                seq = int(match.group(1))
+            except ValueError as exc:  # e.g. CPython's int-str digit limit
+                raise CheckpointError(
+                    f"unparsable checkpoint sequence number: {path.name}"
+                ) from exc
+            if seq != index:
+                raise CheckpointError(
+                    f"checkpoint gap or discontinuity at {path.name}: "
+                    f"expected seq {index}"
+                )
+            try:
+                record = json.loads(path.read_bytes())
+            except (json.JSONDecodeError, OSError) as exc:
+                raise CheckpointError(f"checkpoint unreadable: {path}") from exc
+            if not isinstance(record, dict) or record.get("seq") != seq:
+                raise CheckpointError(
+                    f"checkpoint seq field disagrees with its filename: {path.name}"
+                )
+            records.append(record)
+        return records
+
     def write(self, boundary, state_snapshot):
         if boundary not in BOUNDARIES:
             raise CheckpointError(f"unknown checkpoint boundary: {boundary}")
-        seq = len(self._paths())
+        records = self._validated_records()
+        seq = records[-1]["seq"] + 1 if records else 0
+        path = self.directory / f"checkpoint-{seq:03d}.json"
+        if path.exists():
+            raise CheckpointError(
+                f"refusing to overwrite an existing checkpoint: {path.name}"
+            )
         record = {
             "schema_version": versions.CHECKPOINT_SCHEMA_VERSION,
             "seq": seq,
             "boundary": boundary,
             "state": state_snapshot,
         }
-        path = self.directory / f"checkpoint-{seq:03d}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(canonical_json_bytes(record))
+        atomic_write_bytes(path, canonical_json_bytes(record))
         return path
 
     def latest(self):
-        paths = self._paths()
-        if not paths:
+        records = self._validated_records()
+        if not records:
             return None
-        try:
-            return json.loads(paths[-1].read_bytes())
-        except (json.JSONDecodeError, OSError) as exc:
-            raise CheckpointError(f"latest checkpoint unreadable: {paths[-1]}") from exc
+        return records[-1]

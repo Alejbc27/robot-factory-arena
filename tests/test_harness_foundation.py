@@ -229,6 +229,60 @@ class TestCheckpoints(Base):
         with self.assertRaises(checkpointing.CheckpointError):
             store.latest()
 
+    def test_gap_fails_closed_on_write_and_latest(self):
+        # PR #18 blocker 4: a missing middle checkpoint is a gap; both
+        # writes and reads fail closed instead of recomputing the next
+        # seq from len() and silently overwriting the tail.
+        store = checkpointing.CheckpointStore(self.root / "checkpoints")
+        for boundary in checkpointing.BOUNDARIES:
+            store.write(boundary, {"step": boundary})
+        (self.root / "checkpoints" / "checkpoint-002.json").unlink()
+        surviving = (self.root / "checkpoints" / "checkpoint-004.json").read_bytes()
+        with self.assertRaises(checkpointing.CheckpointError):
+            store.write(checkpointing.POST_BINDING, {"retry": True})
+        with self.assertRaises(checkpointing.CheckpointError):
+            store.latest()
+        self.assertEqual(
+            surviving,
+            (self.root / "checkpoints" / "checkpoint-004.json").read_bytes(),
+        )
+
+    def test_write_never_overwrites_existing_destination(self):
+        # Simulates the race the guard exists for: the destination file
+        # appears between continuity validation and the write.
+        store = checkpointing.CheckpointStore(self.root / "checkpoints")
+        store.write(checkpointing.PRE_PROMPT, {"n": 0})
+        original = store._validated_records
+
+        def validate_with_race():
+            records = original()
+            (self.root / "checkpoints" / "checkpoint-001.json").write_bytes(b"{}")
+            return records
+
+        store._validated_records = validate_with_race
+        with self.assertRaises(checkpointing.CheckpointError):
+            store.write(checkpointing.POST_ANSWER, {"n": 1})
+
+    def test_unexpected_checkpoint_filename_fails_closed(self):
+        store = checkpointing.CheckpointStore(self.root / "checkpoints")
+        directory = self.root / "checkpoints"
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.joinpath("checkpoint-junk.json").write_bytes(b"{}")
+        with self.assertRaises(checkpointing.CheckpointError):
+            store.latest()
+        with self.assertRaises(checkpointing.CheckpointError):
+            store.write(checkpointing.PRE_PROMPT, {})
+
+    def test_checkpoint_seq_field_mismatch_fails_closed(self):
+        store = checkpointing.CheckpointStore(self.root / "checkpoints")
+        store.write(checkpointing.PRE_PROMPT, {"n": 0})
+        target = self.root / "checkpoints" / "checkpoint-000.json"
+        record = json.loads(target.read_bytes())
+        record["seq"] = 7
+        target.write_bytes(strategy_context.canonical_json_bytes(record))
+        with self.assertRaises(checkpointing.CheckpointError):
+            store.latest()
+
 
 class TestSubprocessAdapter(Base):
     def _register(self, root):
