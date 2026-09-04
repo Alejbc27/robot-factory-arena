@@ -75,6 +75,13 @@ def _consistent_receipt(run_dir, mutate):
     _canonical(receipt_path, receipt)
 
 
+def _rewrite(path, mutate):
+    """Apply a structural mutation and re-canonicalize the artifact bytes."""
+    value = json.loads(path.read_bytes())
+    mutate(value)
+    _canonical(path, value)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile_dir()
@@ -281,6 +288,65 @@ class TestAdversarialMatrix(Base):
         result = self.bind()
         self.assertEqual(result.status, "bound")
         self.assertEqual(result.verified_score, 100)
+
+
+class TestStructuralValidation(Base):
+    """PR #20 blocker 3: nested content errors must classify invalid — never
+    escape the binder as KeyError/TypeError."""
+
+    def _cases(self):
+        provider_run = self.run_dir / "llm" / "provider-run.json"
+        receipt = self.run_dir / "receipt.json"
+        return [
+            (
+                "request_missing_policy_step",
+                lambda: _rewrite(
+                    provider_run, lambda v: v["requests"][0].pop("policy_step")
+                ),
+                "policy_step",
+            ),
+            (
+                "request_missing_usage",
+                lambda: _rewrite(provider_run, lambda v: v["requests"][0].pop("usage")),
+                "usage",
+            ),
+            (
+                "usage_missing_token_field",
+                lambda: _rewrite(
+                    provider_run,
+                    lambda v: v["requests"][0]["usage"].pop("input_tokens"),
+                ),
+                "input_tokens",
+            ),
+            (
+                "request_not_an_object",
+                lambda: _rewrite(provider_run, lambda v: v.update(requests=["nope"])),
+                "object",
+            ),
+            (
+                "logical_run_id_not_a_string",
+                lambda: _rewrite(receipt, lambda v: v.update(logical_run_id=12345)),
+                "lr_ plus 64 hex",
+            ),
+            (
+                "outcome_not_a_string",
+                lambda: _rewrite(receipt, lambda v: v.update(outcome=["completed"])),
+                "outcome",
+            ),
+        ]
+
+    def test_structural_content_errors_classify_invalid_without_raising(self):
+        for name, mutate, reason in self._cases():
+            with self.subTest(case=name):
+                shutil.rmtree(self.run_dir)
+                shutil.copytree(FIXTURE, self.run_dir)
+                mutate()
+                result = self.bind()  # must not raise for content
+                self.assertEqual(result.status, "invalid", name)
+                self.assertIsInstance(result.reason, str, name)
+                self.assertIn(reason, result.reason or "", name)
+                self.assertIsNone(result.verified_score, name)
+                self.assertIsNone(result.input_tokens, name)
 
 
 if __name__ == "__main__":

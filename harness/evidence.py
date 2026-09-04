@@ -152,32 +152,63 @@ def load_receipt(run_dir):
     return _read_canonical(Path(run_dir) / RECEIPT_NAME, _RECEIPT_REQUIRED)[0]
 
 
+# Required keys of every provider-run request record (tool_call/error stay
+# optional nullable objects, mirroring the core sidecar writer).
+_REQUEST_KEYS = (
+    "policy_step",
+    "provider",
+    "model",
+    "request_id",
+    "usage",
+    "latency_ms",
+    "raw_visible_response",
+)
+_USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens")
+
+
 def _validate_receipt(receipt):
     if isinstance(receipt["schema_version"], bool) or receipt["schema_version"] != 1:
         raise EvidenceError("receipt schema_version must be 1")
-    if not _LOGICAL_RUN_ID_RE.fullmatch(receipt["logical_run_id"] or ""):
+    logical_run_id = receipt["logical_run_id"]
+    if not isinstance(logical_run_id, str) or not _LOGICAL_RUN_ID_RE.fullmatch(
+        logical_run_id
+    ):
         raise EvidenceError("receipt logical_run_id must be lr_ plus 64 hex")
     for key in ("execution_id", "seed", "policy_id"):
         if not _nonempty(receipt[key]):
             raise EvidenceError(f"receipt {key} must be a non-empty string")
     if not _is_digest(receipt["policy_digest"]):
         raise EvidenceError("receipt policy_digest malformed")
-    if receipt["outcome"] not in OUTCOMES:
-        raise EvidenceError("outcome not in the core outcome vocabulary")
+    if not isinstance(receipt["outcome"], str) or receipt["outcome"] not in OUTCOMES:
+        raise EvidenceError("outcome must be a string in the core outcome vocabulary")
     _index(receipt["verified_score"], "verified_score")
     verification = receipt["verification"]
     if not isinstance(verification, dict) or verification.get("status") != "valid":
         raise EvidenceError("receipt verification is not valid")
-    if verification.get("verified_score") != receipt["verified_score"]:
+    if "verified_score" not in verification:
+        raise EvidenceError("receipt verification missing field: verified_score")
+    _index(verification["verified_score"], "verification verified_score")
+    if verification["verified_score"] != receipt["verified_score"]:
         raise EvidenceError("verification verified_score disagrees with the receipt")
 
 
 def _validate_provider_run(provider_run):
-    if provider_run["schema_version"] != 1:
+    if (
+        isinstance(provider_run["schema_version"], bool)
+        or provider_run["schema_version"] != 1
+    ):
         raise EvidenceError("provider-run schema_version must be 1")
-    if not provider_run["requests"] or not isinstance(provider_run["requests"], list):
+    requests = provider_run["requests"]
+    if not isinstance(requests, list) or not requests:
         raise EvidenceError("provider-run requires a non-empty requests list")
-    for request in provider_run["requests"]:
+    for position, request in enumerate(requests):
+        if not isinstance(request, dict):
+            raise EvidenceError(f"provider-run request {position} must be an object")
+        missing = [key for key in _REQUEST_KEYS if key not in request]
+        if missing:
+            raise EvidenceError(
+                f"provider-run request {position} missing fields: {missing}"
+            )
         _index(request["policy_step"], "policy_step")
         for key in ("provider", "model", "request_id"):
             if not _nonempty(request[key]):
@@ -185,10 +216,12 @@ def _validate_provider_run(provider_run):
         usage = request["usage"]
         if not isinstance(usage, dict):
             raise EvidenceError("usage must be an object")
-        for key in ("input_tokens", "output_tokens", "total_tokens"):
+        for key in _USAGE_KEYS:
+            if key not in usage:
+                raise EvidenceError(f"usage missing field: {key}")
             _index(usage[key], key)
         _index(request["latency_ms"], "latency_ms")
-        if not isinstance(request.get("raw_visible_response"), str):
+        if not isinstance(request["raw_visible_response"], str):
             raise EvidenceError("raw_visible_response must be a string")
         for key in ("tool_call", "error"):
             if request.get(key) is not None and not isinstance(request[key], dict):
@@ -196,7 +229,10 @@ def _validate_provider_run(provider_run):
 
 
 def _validate_llm_receipt(llm_receipt):
-    if llm_receipt["schema_version"] != 1:
+    if (
+        isinstance(llm_receipt["schema_version"], bool)
+        or llm_receipt["schema_version"] != 1
+    ):
         raise EvidenceError("llm-receipt schema_version must be 1")
     for key in ("logical_run_id", "execution_id", "provider", "model"):
         if not _nonempty(llm_receipt[key]):
