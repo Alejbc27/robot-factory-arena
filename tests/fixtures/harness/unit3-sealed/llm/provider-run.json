@@ -1,0 +1,1 @@
+{"execution_id":"sealed-fixture-01","logical_run_id":"lr_3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a","requests":[{"error":null,"latency_ms":42,"model":"fake-v1","policy_step":0,"provider":"fake","raw_visible_response":"ok","request_id":"req-0","tool_call":null,"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}],"schema_version":1}
