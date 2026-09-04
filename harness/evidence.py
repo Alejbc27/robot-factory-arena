@@ -155,7 +155,7 @@ def _read_canonical(path, required):
     except json.JSONDecodeError as exc:
         raise EvidenceError(f"malformed JSON: {path.name}") from exc
     if _contains_float(value):
-        raise EvidenceError(f"non-canonical float value: {path.name}")
+        raise EvidenceError(f"non-canonical numeric type (float): {path.name}")
     if not isinstance(value, dict) or canonical_json_bytes(value) != raw:
         raise EvidenceError(f"non-canonical JSON bytes: {path.name}")
     missing = [key for key in required if key not in value]
