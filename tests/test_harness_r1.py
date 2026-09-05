@@ -688,5 +688,63 @@ class TestLaunchWindowRestart(Base):
         self.assertEqual(row["verified_score"], 100)
 
 
+class TestAnswerExactKeyContract(Base):
+    """PR #22 blocker 1: the seam fails closed on incomplete answers.
+
+    The exact contract: ``yes`` and ``no`` carry exactly ``{"decision"}``;
+    ``edit`` carries exactly ``{"decision", "guidance"}`` with guidance a list
+    of non-empty strings (``[]`` is legal and clears the pending guidance).
+    A missing or null guidance on an edit answer must be rejected HERE, so the
+    graph node can never crash on it outside the contract.
+    """
+
+    def test_edit_requires_exactly_decision_and_guidance(self):
+        for bad in (
+            {"decision": "edit"},
+            {"decision": "edit", "guidance": None},
+        ):
+            with self.assertRaises(interruption.InterruptionError):
+                interruption.validate_answer(bad)
+        # [] clears the pending guidance: legal, freezes the canonical null
+        self.assertEqual(
+            interruption.validate_answer({"decision": "edit", "guidance": []}),
+            "edit",
+        )
+        self.assertEqual(
+            interruption.validate_answer(
+                {"decision": "edit", "guidance": [GUIDANCE_A]}
+            ),
+            "edit",
+        )
+
+    def test_guidance_exists_only_with_the_edit_decision(self):
+        for bad in (
+            {"decision": "yes", "guidance": None},
+            {"decision": "no", "guidance": None},
+            {"decision": "yes", "guidance": [GUIDANCE_A]},
+        ):
+            with self.assertRaises(interruption.InterruptionError):
+                interruption.validate_answer(bad)
+        self.assertEqual(interruption.validate_answer({"decision": "yes"}), "yes")
+        self.assertEqual(interruption.validate_answer({"decision": "no"}), "no")
+
+    def test_incomplete_edit_answer_fails_closed_end_to_end(self):
+        terminal = scripted_terminal([{"decision": "edit"}])
+        with self.assertRaises(interruption.InterruptionError):
+            drive(state.initial_state(), self.deps("complete", terminal))
+        grants = [
+            r for r in self.decision_records() if r.get("event") == "approval_granted"
+        ]
+        self.assertEqual(grants, [])
+        self.assertEqual(
+            [
+                r
+                for r in self.attempt_records()
+                if r.get("condition") == "R1" and r["event"] == "launch_registered"
+            ],
+            [],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

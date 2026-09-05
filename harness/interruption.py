@@ -1,8 +1,9 @@
 """R1 human-interruption seam: approval answers enter as controlled data only.
 
 The approval terminal is injected through the graph deps (design §6/§8); its
-answers are validated against an exact-key contract BEFORE any side effect, so
-guidance can enter the pipeline ONLY as text that the canonical StrategyContext
+answers are validated against an exact-key contract before any side effect
+beyond the pre-prompt checkpoint, so guidance can enter the pipeline ONLY as
+text that the canonical StrategyContext
 builder (``harness.strategy_context``, the AMEND-4A-3 mirror) later validates,
 normalizes, freezes, and digests. There is no field a terminal could set to
 reach the prompt, the observation, the provider request, or the score path
@@ -27,32 +28,46 @@ def _nonempty_text(value):
 
 
 def validate_answer(answer):
-    """Exact-key answer contract; unknown keys are rejected as side channels.
+    """Exact-key answer contract; any other shape is rejected as a side channel.
 
-    ``guidance`` is only accepted with an ``edit`` decision and must be a list
-    of non-empty strings. It is a REPLACEMENT (revision) of the pending
-    guidance list for the proposal — never a direct prompt fragment.
+    ``yes`` and ``no`` carry exactly ``{"decision"}``. ``edit`` carries
+    exactly ``{"decision", "guidance"}`` where guidance is a list of
+    non-empty strings — a REPLACEMENT (revision) of the pending guidance
+    list for the proposal, never a direct prompt fragment. ``[]`` is legal
+    and clears the pending guidance; a missing or null guidance on an edit
+    answer is rejected here so an incomplete answer can never reach the
+    graph node and crash it outside this contract, and ``guidance`` exists
+    ONLY with ``edit`` — even a null guidance alongside ``yes``/``no`` is
+    rejected (PR #22 blocker 1).
     """
     if not isinstance(answer, dict):
         raise InterruptionError("approval answer must be a JSON object")
-    unknown = sorted(set(answer) - ANSWER_KEYS)
-    if unknown:
-        raise InterruptionError(
-            f"approval answer has non-contract keys (side channel): {unknown}"
-        )
     if "decision" not in answer:
         raise InterruptionError("approval answer requires 'decision'")
     decision = answer["decision"]
     if decision not in DECISIONS:
         raise InterruptionError(f"decision must be one of {DECISIONS}")
-    guidance = answer.get("guidance")
-    if guidance is not None:
-        if decision != "edit":
-            raise InterruptionError("guidance is only accepted with an 'edit' decision")
+    if decision == "edit":
+        if "guidance" not in answer:
+            raise InterruptionError(
+                "an edit answer requires 'guidance' (use [] to clear it)"
+            )
+        if set(answer) != {"decision", "guidance"}:
+            raise InterruptionError(
+                "an edit answer has non-contract keys (side channel): "
+                f"{sorted(set(answer) - ANSWER_KEYS)}"
+            )
+        guidance = answer["guidance"]
         if not isinstance(guidance, list) or not all(
             _nonempty_text(text) for text in guidance
         ):
             raise InterruptionError("guidance must be a list of non-empty strings")
+    elif set(answer) != {"decision"}:
+        raise InterruptionError(
+            f"a {decision!r} answer has non-contract keys (side channel): "
+            f"{sorted(set(answer) - ANSWER_KEYS)}; guidance exists only "
+            "with an 'edit' decision"
+        )
     return decision
 
 
