@@ -131,6 +131,11 @@ def _load_registered_launch(tournament_root, attempt_id):
     return registered
 
 
+def load_registration(tournament_root, attempt_id):
+    """Public fail-closed view of the immutable registration (Unit 3)."""
+    return _load_registered_launch(tournament_root, attempt_id)
+
+
 def run_launch(tournament_root, attempt_id, argv, runner=local_runner, timeout=None):
     """Single-shot execution bound to its registration (PR #18 blocker 2).
 

@@ -37,7 +37,7 @@ def _imported_roots(tree):
 class TestPackageBoundary(unittest.TestCase):
     def test_every_harness_source_is_discovered(self):
         sources = _harness_sources()
-        self.assertGreaterEqual(len(sources), 8)
+        self.assertGreaterEqual(len(sources), 11)
         for expected in (
             "__init__.py",
             "state.py",
@@ -47,6 +47,9 @@ class TestPackageBoundary(unittest.TestCase):
             "logs.py",
             "versions.py",
             "strategy_context.py",
+            "evidence.py",
+            "leaderboard.py",
+            "graph.py",
         ):
             self.assertIn(HARNESS_DIR / expected, sources)
 
@@ -56,11 +59,15 @@ class TestPackageBoundary(unittest.TestCase):
             bad = _imported_roots(tree) & {"robot_factory_arena"}
             self.assertEqual(bad, set(), f"{path.name} imports core: {bad}")
 
-    def test_no_harness_source_imports_langgraph(self):
-        # Foundation is pure TypedDict + stdlib; LangGraph wiring is Unit 3+.
+    def test_langgraph_imports_are_scoped_to_graph_py(self):
+        # graph.py is the ONLY LangGraph home (lazy import behind the optional
+        # extra); every other harness source stays stdlib-only, and NO source
+        # may import the core.
         for path in _harness_sources():
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            self.assertNotIn("langgraph", _imported_roots(tree), str(path))
+            self.assertNotIn("robot_factory_arena", _imported_roots(tree), str(path))
+            if path.name != "graph.py":
+                self.assertNotIn("langgraph", _imported_roots(tree), str(path))
 
 
 @unittest.skipUnless(
@@ -95,6 +102,23 @@ class TestGateWorkflowSplit(unittest.TestCase):
             self.fail("harness-gate job missing from gate.yml")
         self.assertIn("[harness]", job.group(0))
         self.assertIn("test_harness", job.group(0))
+
+    def test_harness_gate_runs_all_five_harness_modules(self):
+        # PR #20 blocker 4: the harness-gate job must execute every harness
+        # module WITH langgraph installed, so test_build_graph_compiles
+        # reports ok there instead of being skipped everywhere.
+        text = GATE.read_text(encoding="utf-8")
+        job = re.search(r"harness-gate:.*?(?=\n  \w[-\w]*:|\Z)", text, re.S)
+        if job is None:
+            self.fail("harness-gate job missing from gate.yml")
+        for module in (
+            "tests.test_harness_foundation",
+            "tests.test_harness_isolation",
+            "tests.test_harness_evidence",
+            "tests.test_harness_r2",
+            "tests.test_harness_leaderboard",
+        ):
+            self.assertIn(module, job.group(0))
 
 
 if __name__ == "__main__":

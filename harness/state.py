@@ -29,6 +29,10 @@ REPLACE_FIELDS = (
     "agent_id",
     "context_snapshot_ref",
     "status",
+    "work_index",
+    "work_count",
+    "attempt_id",
+    "last_evidence",
 )
 SORT_KEYS = {
     "historial": ("attempt_ordinal", "seq"),

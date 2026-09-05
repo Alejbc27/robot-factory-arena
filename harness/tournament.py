@@ -49,6 +49,9 @@ def validate_config(config):
     missing = [field for field in FROZEN_FIELDS if field not in config]
     if missing:
         raise TournamentError(f"missing frozen fields: {missing}")
+    extra = sorted(set(config) - set(FROZEN_FIELDS))
+    if extra:
+        raise TournamentError(f"unknown config fields: {extra}")
     checks = (
         (config["schema_version"] == versions.CONFIG_SCHEMA_VERSION, "schema_version"),
         (
