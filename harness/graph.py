@@ -34,6 +34,19 @@ checkpoint stores the full validated answer write-ahead (guidance
 included), and a restart replays an answer whose decision event never
 reached the append-only log — the human is never re-prompted for an answer
 already given, and the replay is idempotent (PR #22).
+
+The R3 round barrier opens a round r > 1 only when every fixed branch EITHER
+is terminal from an earlier round OR has launched and resolved its round-(r-1)
+attempt: a prior-round launch without evidence resolution waits
+(``evidence_pending``) and a fresh active branch that never launched its prior
+round also blocks the round (``missing_prior_round``) — the barrier drains
+deterministically to that branch's own plan/launch flow so its missing attempt
+runs and resolves before the round can freeze (PR #24 review round 2). R3
+discovery admission is write-ahead: the candidate channel is validated once
+and sealed into the append-only discovery log (``discovery_prepared``) BEFORE
+the terminal ``evidence_bound`` append, so a crash in the bind→admit window
+promotes exactly once from the sealed bytes on restart and discoveries.json is
+never re-read after the bind.
 """
 
 import json
@@ -90,6 +103,7 @@ _APPROVAL_ROUTES = {
 _BARRIER_ROUTES = {
     "register_launch": "register_launch",
     "collect_and_bind_evidence": "collect_and_bind_evidence",
+    "plan_context": "plan_context",
 }
 _ANSWER_EVENTS = ("approval_edit", "approval_granted", "launch_declined")
 
@@ -614,38 +628,80 @@ def _round_snapshot_ref(deps, round_number):
 
 
 def _r3_round_pending(deps, round_number):
-    """Branches still blocking the round barrier: any earlier-round launch
-    whose evidence never resolved (explicit waiting, never a silent skip)."""
+    """Branches still blocking the round barrier for the opening round
+    ``round_number``. For every round r > 1 each fixed branch must EITHER be
+    terminal from an earlier round (completed or K-exhausted) OR have launched
+    AND resolved its required prior attempt (ordinal r - 1): a prior-round
+    launch whose evidence never resolved waits with ``evidence_pending``, and
+    a fresh active branch that never launched its prior round waits with
+    ``missing_prior_round`` — a round can never freeze without every branch's
+    prior-round evidence (explicit waiting, never a silent skip)."""
     waiting = []
-    for seed in deps.config["seeds"]:
-        for launch in _pair_launches(deps, "R3", str(seed)):
-            if launch["attempt_ordinal"] >= round_number:
-                continue
-            if _resolved_event(deps, launch["attempt_id"]) is None:
+    for raw_seed in deps.config["seeds"]:
+        seed = str(raw_seed)
+        required = round_number - 1
+        launches = _pair_launches(deps, "R3", seed)
+        prior = next(
+            (item for item in launches if item["attempt_ordinal"] == required),
+            None,
+        )
+        if prior is not None:
+            if _resolved_event(deps, prior["attempt_id"]) is None:
                 waiting.append(
                     {
-                        "seed": str(seed),
-                        "attempt_id": launch["attempt_id"],
+                        "seed": seed,
+                        "attempt_id": prior["attempt_id"],
                         "reason": "evidence_pending",
                     }
                 )
+            continue
+        kind, latest = _pair_state(deps, "R3", seed)
+        if kind == "terminal":
+            continue
+        if kind == "collect":
+            if latest is None:
+                raise HarnessGraphError(
+                    f"R3 round {round_number} collect state cannot be "
+                    f"reconstructed for seed {seed}"
+                )
+            waiting.append(
+                {
+                    "seed": seed,
+                    "attempt_id": latest["attempt_id"],
+                    "reason": "evidence_pending",
+                }
+            )
+            continue
+        if required >= 1:
+            waiting.append(
+                {
+                    "seed": seed,
+                    "attempt_id": None,
+                    "reason": "missing_prior_round",
+                }
+            )
     return waiting
 
 
 def _r3_first_pending(deps, round_number):
-    """The first prior-round launch without evidence resolution, ordered by
+    """The first entry blocking the round barrier, ordered by
     ``(attempt_ordinal, seed)`` — the deterministic barrier drain target;
     None while the round is not blocked."""
-    pending = [
-        (launch["attempt_ordinal"], str(seed), launch)
-        for seed in deps.config["seeds"]
-        for launch in _pair_launches(deps, "R3", str(seed))
-        if launch["attempt_ordinal"] < round_number
-        and _resolved_event(deps, launch["attempt_id"]) is None
-    ]
-    if not pending:
+    entries = _r3_round_pending(deps, round_number)
+    if not entries:
         return None
-    return min(pending, key=lambda item: (item[0], item[1]))[2]
+    ranked = []
+    for entry in entries:
+        if entry["attempt_id"] is None:
+            ranked.append((round_number - 1, entry["seed"], entry))
+            continue
+        launch = next(
+            item
+            for item in _pair_launches(deps, "R3", entry["seed"])
+            if item["attempt_id"] == entry["attempt_id"]
+        )
+        ranked.append((launch["attempt_ordinal"], entry["seed"], entry))
+    return min(ranked, key=lambda item: (item[0], item[1]))[2]
 
 
 _CANDIDATE_KEYS = {"schema_version", "discoveries"}
@@ -743,21 +799,94 @@ def _enriched_discovery(deps, launch, candidate, bound):
     return record
 
 
+def _prepared_discoveries(deps, attempt_id):
+    """The immutable sealed discovery content for one attempt (the write-ahead
+    seam), or None while the attempt never sealed anything. Multiple identical
+    ``discovery_prepared`` records collapse to one; conflicting content fails
+    closed."""
+    prepared = []
+    for record in deps.discovery_log.records():
+        if (
+            record.get("event") == "discovery_prepared"
+            and record.get("attempt_id") == attempt_id
+        ):
+            discoveries = record.get("discoveries")
+            if not isinstance(discoveries, list):
+                raise HarnessGraphError(
+                    f"sealed discovery record for {attempt_id} is malformed"
+                )
+            prepared.append(discoveries)
+    if not prepared:
+        return None
+    first = prepared[0]
+    for other in prepared[1:]:
+        if strategy_context.canonical_json_bytes(
+            other
+        ) != strategy_context.canonical_json_bytes(first):
+            raise HarnessGraphError(
+                f"conflicting sealed discovery content for {attempt_id}"
+            )
+    return first
+
+
+def _seal_discoveries(deps, launch, result):
+    """Write-ahead admission seam (PR #24 review round 2): the attempt's
+    candidate channel is validated ONCE and its enriched records are SEALED
+    into the append-only discovery log BEFORE the terminal evidence_bound
+    append. A crash in the bind→admit window can therefore always promote the
+    discovery from these immutable bytes on restart, and the mutable
+    discoveries.json is never re-read after the bind. Sealing is idempotent
+    per attempt: an identical repeat skips, conflicting content fails
+    closed."""
+    attempt_id = launch["attempt_id"]
+    digests = {
+        "core_receipt_digest": result.core_receipt_digest,
+        "llm_receipt_digest": result.llm_receipt_digest,
+    }
+    enriched = [
+        _enriched_discovery(deps, launch, candidate, digests)
+        for candidate in _load_candidates(deps, attempt_id)
+    ]
+    if not enriched:
+        return
+    prior = _prepared_discoveries(deps, attempt_id)
+    if prior is not None:
+        if strategy_context.canonical_json_bytes(
+            prior
+        ) != strategy_context.canonical_json_bytes(enriched):
+            raise HarnessGraphError(
+                f"conflicting sealed discovery content for {attempt_id}"
+            )
+        return
+    deps.discovery_log.append(
+        {
+            "event": "discovery_prepared",
+            "attempt_id": attempt_id,
+            "condition": "R3",
+            "seed": launch["seed"],
+            "agent_id": launch["agent_id"],
+            "attempt_ordinal": launch["attempt_ordinal"],
+            "discoveries": enriched,
+        }
+    )
+
+
 def record_discoveries(deps, attempt_id=None):
-    """Admit candidates for every finished receipt-bound R3 run (§8 node 9).
+    """Promote every finished receipt-bound R3 run's SEALED discovery content
+    into the DiscoveryStore exactly once (§8 node 9).
 
     ADMISSION into the DiscoveryStore is separate from NEXT-ROUND SNAPSHOT
-    creation: admission is deterministic at R3 attempt bind time (the
-    collector admits the just-bound attempt's candidates immediately), with
-    a mandatory idempotent terminal sweep before the leaderboard as the
-    crash-window backstop, so even a final-round discovery persists without
-    any later launch. The round barrier composes ONLY already-admitted
-    records — a late-appearing candidate file can never slip into a later
-    snapshot, and a late admission never mutates a frozen snapshot.
-    Admission is idempotent per declared identity: an identical repeat
-    skips, and conflicting content under one identity fails closed.
-    ``attempt_id`` targets one just-bound attempt (the default sweeps every
-    bound attempt); a targeted unbound attempt fails closed."""
+    creation. Admission content comes ONLY from the immutable
+    ``discovery_prepared`` records that the write-ahead seam sealed before
+    each bind (see :func:`_seal_discoveries`): the mutable discoveries.json is
+    never re-read after the bind, so a late-appearing or mutated candidate
+    file can never change what an admission — and therefore a snapshot —
+    contains, and a bound attempt without sealed content has nothing to
+    admit. The round barrier composes ONLY already-admitted records.
+    Admission is idempotent per declared identity: an identical repeat skips,
+    and conflicting content under one identity fails closed. ``attempt_id``
+    targets one bound attempt (the default sweeps every bound attempt); a
+    targeted unbound attempt fails closed."""
     existing = {}
     for record in deps.discovery_log.records():
         if record.get("event") == "discovery_admitted":
@@ -790,10 +919,12 @@ def record_discoveries(deps, attempt_id=None):
         if r.get("event") == "launch_registered" and r.get("condition") == "R3"
     }
     admitted = 0
-    for attempt_id in sorted(bound):
-        launch = launched[attempt_id]
-        for candidate in _load_candidates(deps, attempt_id):
-            enriched = _enriched_discovery(deps, launch, candidate, bound[attempt_id])
+    for bound_id in sorted(bound):
+        launch = launched[bound_id]
+        sealed = _prepared_discoveries(deps, bound_id)
+        if sealed is None:
+            continue
+        for enriched in sealed:
             identity = _discovery_identity(enriched)
             prior = existing.get(identity)
             if prior is not None:
@@ -807,7 +938,7 @@ def record_discoveries(deps, attempt_id=None):
             deps.discovery_log.append(
                 {
                     "event": "discovery_admitted",
-                    "attempt_id": attempt_id,
+                    "attempt_id": bound_id,
                     "condition": "R3",
                     "seed": launch["seed"],
                     "discovery": enriched,
@@ -859,19 +990,24 @@ def _r3_round_context(deps):
 
 def node_barrier_merge_r3(state, deps):
     """R3 round barrier (design §6). The deterministic merge runs ONLY after
-    every contributing branch round is resolved: a PRIOR-ROUND LAUNCH WITHOUT
-    EVIDENCE RESOLUTION blocks the merge — the barrier records explicit
-    ``round_barrier_waiting`` evidence and then DRAINS deterministically by
-    routing to the first pending attempt by ``(attempt_ordinal, seed)`` so
-    its collector resolves it (a bind, or the fail-closed U3 crash-window
-    classification for the registered-unobserved window); an already-resolved
-    retry pair never blocks — it participates in the next round. The merge
-    composes only ALREADY-ADMITTED records (admission happens at each
-    attempt's bind, with a mandatory terminal sweep before the leaderboard);
-    it sorts by declared identity
-    ``(source_attempt_id, explorer_id, discovery_ordinal)`` with no LLM
-    coordinator, ranking, dedup-by-content, or completion-timing input; and
-    ONE identical snapshot per round is frozen before any branch of that
+    every contributing branch round is resolved: for the opening round r > 1,
+    every fixed branch must EITHER be terminal from an earlier round OR have
+    launched and resolved its round-(r-1) attempt. A PRIOR-ROUND LAUNCH
+    WITHOUT EVIDENCE RESOLUTION blocks the merge with ``evidence_pending``
+    waiting evidence, and a fresh active branch that never launched its prior
+    round blocks it with ``missing_prior_round`` — the barrier then DRAINS
+    deterministically by routing to the first pending entry by
+    ``(attempt_ordinal, seed)``: to that attempt's collector (a bind, or the
+    fail-closed U3 crash-window classification for the registered-unobserved
+    window), or to the branch's own plan/launch flow so its missing attempt
+    runs and resolves before the round can freeze. An already-resolved retry
+    pair never blocks — it participates in the next round. Before composing,
+    the barrier promotes every bound attempt's SEALED discovery content
+    exactly once (the restart crash window of the write-ahead admission seam),
+    so the merge composes only ALREADY-ADMITTED records; it sorts by declared
+    identity ``(source_attempt_id, explorer_id, discovery_ordinal)`` with no
+    LLM coordinator, ranking, dedup-by-content, or completion-timing input;
+    and ONE identical snapshot per round is frozen before any branch of that
     round launches, so an in-flight run can never contribute to (or see) its
     own round's snapshot. The merge is restart-idempotent: a crash after the
     atomic file write but before the frozen event rewrites byte-identical
@@ -879,6 +1015,10 @@ def node_barrier_merge_r3(state, deps):
     reference from the log."""
     condition, seed = state["condition"], state["semilla"]
     round_number = len(_pair_launches(deps, condition, seed)) + 1
+    # restart crash-window promotion (write-ahead admission seam): a bind
+    # whose targeted admission was interrupted promotes exactly once from the
+    # sealed bytes BEFORE the round composes or drains
+    record_discoveries(deps)
     ref = _round_snapshot_ref(deps, round_number)
     if ref is not None:
         return set_current(state, context_snapshot_ref=ref, status="context_frozen")
@@ -905,6 +1045,23 @@ def node_barrier_merge_r3(state, deps):
                 f"reconstructed: {waiting}"
             )
         kind, latest = _pair_state(deps, "R3", pending["seed"])
+        if pending["reason"] == "missing_prior_round":
+            # the branch never launched its prior round: route through its
+            # own plan/launch flow so the missing attempt runs and resolves
+            # BEFORE this round can freeze
+            if kind not in ("fresh", "retry"):
+                raise HarnessGraphError(
+                    f"R3 round {round_number} pending launch cannot be "
+                    f"reconstructed: {waiting}"
+                )
+            return set_current(
+                state,
+                condition="R3",
+                semilla=pending["seed"],
+                agent_id=_agent_id(deps.config, "R3", pending["seed"]),
+                work_index=work_items(deps.config).index(("R3", pending["seed"])),
+                status="barrier_missing_round",
+            )
         if (
             kind != "collect"
             or latest is None
@@ -1116,6 +1273,14 @@ def node_collect_and_bind_evidence(state, deps):
     if result.status == "bound":
         deps.expectations = evidence.absorb_expectations(deps.expectations, result)
         _record_expectations_once(deps)
+        if condition == "R3":
+            # write-ahead admission seam (PR #24 review round 2): the
+            # candidate channel is validated ONCE and its enriched records
+            # are sealed into the append-only discovery log BEFORE the
+            # terminal evidence_bound append, so a crash in the bind→admit
+            # window can always promote exactly once from the sealed bytes
+            # on restart — discoveries.json is never re-read after the bind
+            _seal_discoveries(deps, target, result)
         deps.attempt_log.append(
             {
                 "event": "evidence_bound",
@@ -1275,6 +1440,8 @@ def route_after_approval(state):
 
 
 def route_after_barrier(state):
+    if state["status"] == "barrier_missing_round":
+        return "plan_context"
     if state["status"] == "barrier_drain":
         return "collect_and_bind_evidence"
     return "register_launch"

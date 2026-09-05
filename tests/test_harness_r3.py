@@ -4,14 +4,20 @@ barriers. The merge is deterministic — ordered by declared identity
 timing — with no LLM coordinator, no ranking, no deduplication by content, and
 no semantic filtering. The barrier runs only when every contributing branch
 round is resolved: a PRIOR-ROUND LAUNCH WITHOUT EVIDENCE RESOLUTION blocks
-the merge — the barrier records explicit waiting evidence and drains
-deterministically by routing to the first pending attempt's collector, while
-an already-resolved retry pair simply participates in the next round. Only
-finished receipt-bound runs admit candidate
+the merge, and so does a fresh active branch that never launched its prior
+round (``missing_prior_round``) — the barrier records explicit waiting
+evidence and drains deterministically by routing to the first pending
+attempt's collector or, for a missing prior round, to that branch's own
+plan/launch flow, while an already-resolved retry pair simply participates in
+the next round. Only finished receipt-bound runs admit candidate
 discoveries, and the same merged DiscoverySnapshot is frozen once per round for
 every branch's next launch, so an in-flight run can never see its own
-same-round discovery. Restarts reconstruct deterministically from the
-append-only logs under the Unit-3 pair-state contracts.
+same-round discovery. Admission is write-ahead: candidates are sealed into
+the append-only discovery log before the terminal bind append, and a crash
+in the bind→admit window promotes exactly once from the sealed bytes — the
+mutable candidate channel is never re-read after the bind. Restarts
+reconstruct deterministically from the append-only logs under the Unit-3
+pair-state contracts.
 """
 
 import importlib.util
@@ -19,6 +25,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from harness import graph, logs, state, strategy_context, tournament
 from tests.test_harness_r1 import decline_terminal, scripted_terminal
@@ -135,12 +142,19 @@ def _walk(deps, terminal, crash=None):
             value = first(value, deps)
             if crash == (value["condition"], value["semilla"], first_name):
                 return value
-            if (
-                plan_route == "barrier_merge_r3"
-                and graph.route_after_barrier(value) == "collect_and_bind_evidence"
-            ):
+            barrier_route = (
+                graph.route_after_barrier(value)
+                if plan_route == "barrier_merge_r3"
+                else None
+            )
+            if barrier_route == "collect_and_bind_evidence":
                 # barrier drain: resolve the pending prior-round launch first
                 value = graph.node_collect_and_bind_evidence(value, deps)
+            elif barrier_route == "plan_context":
+                # barrier drain: a branch missing its prior-round work is
+                # routed through its own plan/launch flow (conditional edge)
+                value = graph.node_plan_context(value, deps)
+                continue
             else:
                 for function, name in steps_by_route[plan_route][1:]:
                     value = function(value, deps)
@@ -380,7 +394,12 @@ class TestBarrierMerge(Base):
                     "seed": "24",
                     "attempt_id": "r3-agent-02-seed-24-attempt-01",
                     "reason": "evidence_pending",
-                }
+                },
+                {
+                    "seed": "30",
+                    "attempt_id": None,
+                    "reason": "missing_prior_round",
+                },
             ],
         )
         self.assertEqual(drained["status"], "barrier_drain")
@@ -425,6 +444,9 @@ class TestBarrierMerge(Base):
         waiting = [
             r for r in self.decisions(cfg) if r["event"] == "round_barrier_waiting"
         ]
+        # one waiting event carrying BOTH kinds of pending work: draining 24
+        # makes it terminal, so the queue reaches 30's own round-1 barrier
+        # (reuse) before any second round-2 visit can block again
         self.assertEqual(len(waiting), 1)
         self.assertEqual(waiting[0]["round"], 2)
         self.assertEqual(
@@ -434,7 +456,12 @@ class TestBarrierMerge(Base):
                     "seed": "24",
                     "attempt_id": "r3-agent-02-seed-24-attempt-01",
                     "reason": "evidence_pending",
-                }
+                },
+                {
+                    "seed": "30",
+                    "attempt_id": None,
+                    "reason": "missing_prior_round",
+                },
             ],
         )
         self.assertEqual(
@@ -501,6 +528,100 @@ class TestBarrierMerge(Base):
             if r["event"] == "context_snapshot_frozen" and r.get("round") == 2
         ]
         self.assertEqual(len(round_two), 1)
+        self.assertEqual(self.row("R3", "24", cfg)["attempts_used"], 2)
+        # ordering contract: seed-30's round-1 attempt launches AND resolves
+        # before the round-2 snapshot freezes, and no branch's attempt-2
+        # registration precedes it (the fixed three-branch round contract)
+        attempts = self.attempts(cfg)
+
+        def first_index(predicate):
+            return next(i for i, r in enumerate(attempts) if predicate(r))
+
+        resolve_30 = first_index(
+            lambda r: r.get("event") == "evidence_bound"
+            and r.get("attempt_id") == "r3-agent-03-seed-30-attempt-01"
+        )
+        attempt_two = [
+            i
+            for i, r in enumerate(attempts)
+            if r.get("event") == "launch_registered"
+            and r.get("condition") == "R3"
+            and r.get("attempt_ordinal") == 2
+        ]
+        self.assertTrue(attempt_two)
+        self.assertGreater(min(attempt_two), resolve_30)
+
+    def test_missing_prior_round_branch_drains_to_its_own_launch_flow(self):
+        """18 retry + 24 registered-unobserved + 30 FRESH: a round-2 snapshot
+        must never freeze without seed-30's round-1 evidence. The barrier
+        blocks with ``missing_prior_round``, drains deterministically to seed
+        30's own plan/launch flow, and only then opens round 2 — 30 attempt-1
+        launches and resolves BEFORE any round-2 freeze and before any branch's
+        attempt-2 registration."""
+        cfg = config()
+        runner = r3_runner({"18": [("timeout", None, None)]}, tag="b0-")
+        _walk(
+            self.deps(runner, cfg), decline_terminal(), crash=("R3", "24", "register")
+        )
+        deps2 = self.deps(r3_runner(tag="b1-"), cfg)
+        original = deps2.decision_log.append
+        freeze_order = []
+
+        def append(record):
+            if (
+                record.get("event") == "context_snapshot_frozen"
+                and record.get("condition") == "R3"
+                and record.get("round") == 2
+            ):
+                freeze_order.append(len(deps2.attempt_log.records()))
+            return original(record)
+
+        deps2.decision_log.append = append
+        drive(state.initial_state(), deps2)
+        self.assertEqual(len(freeze_order), 1)
+        # explicit waiting evidence carries the missing prior-round work
+        waiting = [
+            r for r in self.decisions(cfg) if r["event"] == "round_barrier_waiting"
+        ]
+        self.assertTrue(
+            any(
+                {
+                    "seed": "30",
+                    "attempt_id": None,
+                    "reason": "missing_prior_round",
+                }
+                in w["waiting"]
+                for w in waiting
+            )
+        )
+        attempts = self.attempts(cfg)
+
+        def first_index(predicate):
+            return next(i for i, r in enumerate(attempts) if predicate(r))
+
+        launch_30 = first_index(
+            lambda r: r.get("event") == "launch_registered"
+            and r.get("attempt_id") == "r3-agent-03-seed-30-attempt-01"
+        )
+        resolve_30 = first_index(
+            lambda r: r.get("event") == "evidence_bound"
+            and r.get("attempt_id") == "r3-agent-03-seed-30-attempt-01"
+        )
+        self.assertLess(resolve_30, freeze_order[0])
+        # no attempt-2 of any branch may precede seed-30 attempt-1's resolution
+        attempt_two = [
+            i
+            for i, r in enumerate(attempts)
+            if r.get("event") == "launch_registered"
+            and r.get("condition") == "R3"
+            and r.get("attempt_ordinal") == 2
+        ]
+        self.assertTrue(attempt_two)
+        self.assertGreater(min(attempt_two), resolve_30)
+        self.assertGreater(min(attempt_two), launch_30)
+        self.assertEqual(self.row("R3", "30", cfg)["attempts_used"], 1)
+        self.assertEqual(self.row("R3", "30", cfg)["status"], "completed")
+        self.assertEqual(self.row("R3", "18", cfg)["attempts_used"], 2)
         self.assertEqual(self.row("R3", "24", cfg)["attempts_used"], 2)
 
     def test_double_restart_never_livelocks_or_repeats_attempt_ids(self):
@@ -595,7 +716,7 @@ class TestDiscoveryAdmission(Base):
             },
         )
 
-    def test_equal_duplicate_identity_admits_once_and_conflict_fails_closed(self):
+    def test_equal_duplicate_identity_admits_once(self):
         twin = {
             "schema_version": 1,
             "discoveries": [
@@ -621,28 +742,60 @@ class TestDiscoveryAdmission(Base):
             and d["source_attempt_id"] == "r3-agent-02-seed-24-attempt-01"
         ]
         self.assertEqual(len(twins), 1)
-        # restart with the same identity now carrying DIFFERENT text
-        conflict = {
-            "schema_version": 1,
-            "discoveries": [
-                {
-                    "explorer_id": "explorer-01",
-                    "discovery_ordinal": 0,
-                    "text": "tampered text",
-                }
-            ],
-        }
-        self.write_candidates("r3-agent-02-seed-24-attempt-01", cfg, conflict)
-        with self.assertRaises(graph.HarnessGraphError):
-            graph.record_discoveries(self.deps(r3_runner(), cfg))
-        twins = [
-            d
-            for d in self.admitted()
-            if d["explorer_id"] == "explorer-01"
-            and d["source_attempt_id"] == "r3-agent-02-seed-24-attempt-01"
-        ]
-        self.assertEqual(len(twins), 1)
         self.assertEqual(twins[0]["text"], "same text")
+
+    def test_conflicting_reseal_fails_closed_and_first_seal_wins(self):
+        """The sealed record is immutable: a re-seal carrying different
+        candidate content for the same attempt fails closed and the first
+        seal stands; an identical re-seal is an idempotent skip."""
+        cfg = config()
+        self.write_candidates("r3-agent-02-seed-24-attempt-01", cfg)
+        self.full_lineage(cfg=cfg)
+        deps = self.deps(r3_runner(), cfg)
+        launch = next(
+            r
+            for r in self.attempts(cfg)
+            if r["event"] == "launch_registered"
+            and r["attempt_id"] == "r3-agent-02-seed-24-attempt-01"
+        )
+        bound = next(
+            r
+            for r in self.attempts(cfg)
+            if r["event"] == "evidence_bound"
+            and r["attempt_id"] == "r3-agent-02-seed-24-attempt-01"
+        )
+        result = SimpleNamespace(
+            core_receipt_digest=bound["core_receipt_digest"],
+            llm_receipt_digest=bound["llm_receipt_digest"],
+        )
+
+        def prepared():
+            return [
+                r
+                for r in self.records("discoveries.jsonl", cfg)
+                if r["event"] == "discovery_prepared"
+            ]
+
+        graph._seal_discoveries(deps, launch, result)
+        self.assertEqual(len(prepared()), 1)
+        self.write_candidates(
+            "r3-agent-02-seed-24-attempt-01",
+            cfg,
+            {
+                "schema_version": 1,
+                "discoveries": [
+                    {
+                        "explorer_id": "explorer-01",
+                        "discovery_ordinal": 0,
+                        "text": "tampered text",
+                    }
+                ],
+            },
+        )
+        with self.assertRaises(graph.HarnessGraphError):
+            graph._seal_discoveries(deps, launch, result)
+        self.assertEqual(len(prepared()), 1)
+        self.assertEqual(len(prepared()[0]["discoveries"]), 2)
 
     def test_malformed_candidates_fail_closed(self):
         bad_payloads = (
@@ -680,20 +833,20 @@ class TestDiscoveryAdmission(Base):
                     with self.assertRaises(graph.HarnessGraphError):
                         graph._load_candidates(deps, "r3-agent-02-seed-24-attempt-01")
 
-    def test_tampered_bound_candidate_fails_closed_end_to_end(self):
+    def test_sealed_bytes_win_over_a_mutated_candidate_channel(self):
+        """A mutated candidate artifact for a BOUND attempt is inert: the
+        record sealed before the bind is immutable, the mutable channel is
+        never re-read after the bind, and admission is unaffected."""
         cfg = config()
         self.write_candidates("r3-agent-02-seed-24-attempt-01", cfg)
         self.full_lineage(cfg=cfg)
         self.assertEqual(len(self.admitted(cfg)), 2)
-        # a tampered candidate artifact for a BOUND attempt fails the restart
-        # sweep closed instead of being silently skipped
         self.write_candidates(
             "r3-agent-02-seed-24-attempt-01",
             cfg,
             b'{"schema_version": 1, "discoveries": [{"explorer_id": "e"}]}',
         )
-        with self.assertRaises(graph.HarnessGraphError):
-            graph.record_discoveries(self.deps(r3_runner(), cfg))
+        self.assertEqual(graph.record_discoveries(self.deps(r3_runner(), cfg)), 0)
         self.assertEqual(len(self.admitted(cfg)), 2)
         self.assertEqual(
             [d["text"] for d in self.admitted(cfg)],
@@ -767,7 +920,10 @@ class TestDiscoveryAdmission(Base):
         # snapshot predates the attempt-02 admission
         self.assertEqual(self.row("R3", "18", cfg)["attempts_used"], 2)
 
-    def test_late_admission_never_mutates_a_frozen_snapshot(self):
+    def test_post_bind_candidate_changes_never_enter_any_snapshot(self):
+        """Candidate content changes for a BOUND attempt after the bind are
+        inert: the record sealed before the bind won, nothing new is admitted,
+        and no frozen snapshot can change."""
         cfg = config()
         for attempt_id in (
             "r3-agent-01-seed-18-attempt-02",
@@ -779,7 +935,8 @@ class TestDiscoveryAdmission(Base):
         round_two_before = self.snapshot(4, cfg)
         round_one_before = self.snapshot(3, cfg)
         # a NEW valid candidate identity appears for a bound attempt AFTER
-        # the tournament completed: the log grows, frozen snapshots do not
+        # the tournament completed: the sealed bytes won at bind time, so the
+        # late identity is never admitted and the snapshots never change
         extra = {
             "schema_version": 1,
             "discoveries": [
@@ -802,33 +959,13 @@ class TestDiscoveryAdmission(Base):
             ],
         }
         self.write_candidates("r3-agent-02-seed-24-attempt-01", cfg, extra)
-        admitted = graph.record_discoveries(self.deps(r3_runner(), cfg))
-        self.assertEqual(admitted, 1)
-        self.assertEqual(self.snapshot(4, cfg), round_two_before)
-        self.assertEqual(self.snapshot(3, cfg), round_one_before)
+        self.assertEqual(graph.record_discoveries(self.deps(r3_runner(), cfg)), 0)
         self.assertEqual(
             [d for d in self.admitted(cfg) if d["explorer_id"] == "explorer-03"],
-            [
-                {
-                    "source_attempt_id": "r3-agent-02-seed-24-attempt-01",
-                    "explorer_id": "explorer-03",
-                    "discovery_ordinal": 2,
-                    "producing_condition": "R3",
-                    "producing_agent_id": "agent-02",
-                    "producing_seed": "24",
-                    "producing_attempt_ordinal": 1,
-                    "evidence": {
-                        "run_status": "finished",
-                        "core_receipt_digest": late["evidence"]["core_receipt_digest"],
-                        "llm_receipt_digest": late["evidence"]["llm_receipt_digest"],
-                    },
-                    "text": "A late candidate discovered after the final freeze",
-                }
-                for late in [
-                    d for d in self.admitted(cfg) if d["explorer_id"] == "explorer-03"
-                ]
-            ],
+            [],
         )
+        self.assertEqual(self.snapshot(4, cfg), round_two_before)
+        self.assertEqual(self.snapshot(3, cfg), round_one_before)
 
     def test_unregistered_attempt_files_are_never_read(self):
         cfg = config()
@@ -1076,11 +1213,13 @@ class TestR3Restart(Base):
 
 
 class TestFrozenSnapshotOverwrite(Base):
-    """The freeze crash window can never overwrite a snapshot with different
-    bytes: identical bytes are reused (the missing frozen event is
-    re-appended) and different bytes fail closed without replacement."""
+    """The freeze crash window reconstructs deterministically: identical bytes
+    are reused (the missing frozen event is re-appended). With the write-ahead
+    admission seam, candidate mutations between the crash and the restart can
+    no longer change the would-be frozen bytes at all — the sealed records
+    reproduce the identical snapshot."""
 
-    def test_restart_with_a_new_admission_fails_closed_and_preserves_bytes(self):
+    def test_restart_after_post_crash_candidate_mutation_is_byte_identical(self):
         cfg = config()
         for attempt_id in (
             "r3-agent-01-seed-18-attempt-02",
@@ -1128,26 +1267,152 @@ class TestFrozenSnapshotOverwrite(Base):
             ],
         }
         self.write_candidates("r3-agent-02-seed-24-attempt-01", cfg, extra)
+        # the restart composes from the SEALED records: the mutated identity
+        # never enters, the identical bytes are reused, and the restart completes
+        drive(state.initial_state(), self.deps(r3_runner(tag="o1-"), cfg))
+        self.assertEqual(self.snapshot(4, cfg), pre_crash)
         self.assertEqual(
-            graph.record_discoveries(
-                self.deps(r3_runner(), cfg), "r3-agent-02-seed-24-attempt-01"
+            [d for d in self.admitted(cfg) if d["explorer_id"] == "explorer-03"],
+            [],
+        )
+        self.assertEqual(
+            len(
+                [
+                    r
+                    for r in self.decisions(cfg)
+                    if r["event"] == "context_snapshot_frozen" and r.get("round") == 2
+                ]
             ),
             1,
         )
-        # the restart would freeze DIFFERENT bytes over the SAME path: fail
-        # closed, keep the original snapshot bytes, never replace the file
-        with self.assertRaises(graph.HarnessGraphError):
-            drive(state.initial_state(), self.deps(r3_runner(tag="o1-"), cfg))
-        self.assertEqual(self.snapshot(4, cfg), pre_crash)
-        self.assertEqual(self.context_names(cfg)[-1], "strategy-context-004.json")
+
+
+class TestWriteAheadAdmission(Base):
+    """PR #24 review round 2, blocker 2: the write-ahead admission seam.
+    Candidates are validated once and sealed into the append-only discovery
+    log BEFORE the terminal evidence_bound append, so a crash in the
+    bind→admit window promotes exactly once from the sealed bytes on restart —
+    the mutable discoveries.json is never re-read after the bind, the attempt
+    never reruns, and the next-round snapshot is byte-identical to the
+    no-crash control."""
+
+    def test_crash_after_bind_before_admission_promotes_sealed_bytes(self):
+        cfg = config()
+        self.write_candidates("r3-agent-02-seed-24-attempt-01", cfg)
+        deps = self.deps(self.lineage_runner(), cfg)
+        original = deps.discovery_log.append
+
+        def append(record):
+            if (
+                record.get("event") == "discovery_admitted"
+                and record.get("attempt_id") == "r3-agent-02-seed-24-attempt-01"
+            ):
+                raise _CrashBeforeAdmission()
+            return original(record)
+
+        deps.discovery_log.append = append
+        with self.assertRaises(_CrashBeforeAdmission):
+            drive(state.initial_state(), deps)
+        # crash window reached exactly: sealed + bound, never admitted
+        prepared = [
+            r
+            for r in self.records("discoveries.jsonl", cfg)
+            if r["event"] == "discovery_prepared"
+            and r["attempt_id"] == "r3-agent-02-seed-24-attempt-01"
+        ]
+        self.assertEqual(len(prepared), 1)
+        self.assertEqual(len(prepared[0]["discoveries"]), 2)
         self.assertEqual(
             [
                 r
-                for r in self.decisions(cfg)
-                if r["event"] == "context_snapshot_frozen" and r.get("round") == 2
+                for r in self.records("discoveries.jsonl", cfg)
+                if r["event"] == "discovery_admitted"
             ],
             [],
         )
+        self.assertEqual(
+            [
+                r["attempt_id"]
+                for r in self.attempts(cfg)
+                if r["event"] == "evidence_bound" and r["condition"] == "R3"
+            ],
+            # the crash fires during seed-24's bind-time promotion, so only
+            # seed-24 is bound: 18 timed out and 30 never launched yet
+            ["r3-agent-02-seed-24-attempt-01"],
+        )
+        # the no-crash control run in a separate root (identical config,
+        # candidates, and runner scripts)
+        with tempfile.TemporaryDirectory() as control_dir:
+            control_layout = tournament.expected_layout(
+                Path(control_dir), cfg["tournament_id"], cfg["artifact_root"]
+            )
+            # the control is seeded IDENTICALLY: same candidates in its own
+            # root before the drive seals them at bind time
+            control_candidates = (
+                control_layout["attempts"]
+                / "r3-agent-02-seed-24-attempt-01"
+                / "discoveries.json"
+            )
+            control_candidates.parent.mkdir(parents=True, exist_ok=True)
+            strategy_context.atomic_write_bytes(
+                control_candidates,
+                strategy_context.canonical_json_bytes(DISCOVERIES_FIXTURE),
+            )
+            control_deps = graph.build_deps(
+                Path(control_dir),
+                cfg,
+                runner=self.lineage_runner(),
+                approval=decline_terminal(),
+            )
+            drive(state.initial_state(), control_deps)
+            # restart: the sealed record promotes exactly once, the attempt
+            # never reruns, and the round-2 snapshot contains the discovery
+            drive(state.initial_state(), self.deps(r3_runner(tag="wa1-"), cfg))
+            registrations = [
+                r["attempt_id"]
+                for r in self.attempts(cfg)
+                if r["event"] == "launch_registered"
+                and r["condition"] == "R3"
+                and r["seed"] == "24"
+            ]
+            self.assertEqual(registrations, ["r3-agent-02-seed-24-attempt-01"])
+            recovered = [
+                r
+                for r in self.records("discoveries.jsonl", cfg)
+                if r["event"] == "discovery_admitted"
+                and r["attempt_id"] == "r3-agent-02-seed-24-attempt-01"
+            ]
+            self.assertEqual(
+                [r["discovery"]["explorer_id"] for r in recovered],
+                ["explorer-01", "explorer-02"],
+            )
+            round_two = next(
+                r
+                for r in self.decisions(cfg)
+                if r["event"] == "context_snapshot_frozen" and r.get("round") == 2
+            )
+            snapshot = self.snapshot(round_two["snapshot_ordinal"], cfg)
+            self.assertIn("r3-agent-02-seed-24-attempt-01", snapshot.decode())
+            control_snapshot = (
+                control_layout["contexts"]
+                / f"strategy-context-{round_two['snapshot_ordinal']:03d}.json"
+            ).read_bytes()
+            self.assertEqual(snapshot, control_snapshot)
+            # a second restart adds no duplicate admission
+            before = len(self.records("discoveries.jsonl", cfg))
+            drive(state.initial_state(), self.deps(r3_runner(tag="wa2-"), cfg))
+            self.assertEqual(len(self.records("discoveries.jsonl", cfg)), before)
+            self.assertEqual(
+                len(
+                    [
+                        r
+                        for r in self.records("discoveries.jsonl", cfg)
+                        if r["event"] == "discovery_admitted"
+                        and r["attempt_id"] == "r3-agent-02-seed-24-attempt-01"
+                    ]
+                ),
+                2,
+            )
 
 
 class TestR3Coexistence(Base):
@@ -1244,6 +1509,11 @@ class _CrashBeforeRoundFreezeEvent(Exception):
 
 class _CrashAfterRoundFreezeEvent(Exception):
     """Simulated process death right after the round's frozen event."""
+
+
+class _CrashBeforeAdmission(Exception):
+    """Simulated process death between the evidence_bound append and the
+    discovery_admitted promotion."""
 
 
 @unittest.skipUnless(

@@ -564,9 +564,15 @@ class TestLaunchWindowRestart(Base):
                 value = function(value, deps)
                 if crash == (value["condition"], value["semilla"], name):
                     return value
-                if graph.route_after_barrier(value) == "collect_and_bind_evidence":
+                barrier_route = graph.route_after_barrier(value)
+                if barrier_route == "collect_and_bind_evidence":
                     # barrier drain: resolve the pending prior-round launch
                     value = graph.node_collect_and_bind_evidence(value, deps)
+                elif barrier_route == "plan_context":
+                    # barrier drain: a branch missing its prior-round work
+                    # is routed through its own plan/launch flow
+                    value = graph.node_plan_context(value, deps)
+                    continue
                 else:
                     for name, function in barrier_steps[1:]:
                         value = function(value, deps)
