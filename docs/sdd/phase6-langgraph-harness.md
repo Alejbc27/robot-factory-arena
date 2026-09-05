@@ -32,7 +32,7 @@ stderr), `2` usage or config error.
 |------|---------|
 | `--config FILE` | Required. Frozen tournament config JSON (§5 fields; validated and sealed before any launch). |
 | `--root DIR` | Directory that receives `artifacts/` (default: cwd). |
-| `--runner fake\|core` | `fake` = deterministic zero-cost subprocess CLI wrapper (acceptance only); `core` = the real `python3 -m robot_factory_arena.cli` subprocess. There is **no fallback** between them. |
+| `--runner fake\|core` | Bound to the frozen `(provider, model)` pair: `fake` (deterministic zero-cost subprocess CLI wrapper, acceptance only) is legal **only** for `fake/fake-v1`; `core` (the real `python3 -m robot_factory_arena.cli` subprocess) only for `openai/gpt-5.6-luna` or `glm/glm-5.3-flash`. A mismatch exits `2` **before any artifact is created**. There is **no fallback** between them. |
 | `--non-interactive` | R1 terminal auto-declines every proposal (explicit logged declines; R1 rows are `declined`, R2/R3 still complete). |
 | `--answers FILE` | Scripted R1 answers: a JSON list of `{"decision": "yes"/"no"}` or `{"decision": "edit", "guidance": [...]}` objects, validated **before** any side effect, replayed in prompt order, defaulting to `yes` when exhausted (the Unit-4 seam). |
 | `--timeout N` | Optional subprocess timeout in seconds. |
@@ -79,8 +79,16 @@ Any other provider/model pair, or any other `generation` payload for a supported
 pair, is rejected with the supported table named in the error. Widen these tables
 only when the core or an adapter actually executes the new condition.
 
+The runner is bound to the same frozen identity
+(`harness.tournament.RUNNER_BINDINGS`): the fake wrapper fabricates provider
+evidence, so it may only fabricate it for the fake identity — stamped onto a real
+provider/model it would forge artifacts for a run that never happened — and
+`--runner core` executes only live-accepted provider identities (`fake/fake-v1`
+requires `--runner fake`). The binding is validated after config validation and
+before any tournament artifact is created (mismatch → exit `2`).
+
 ## What the fake acceptance proves
-    
+
 `python3 -m unittest tests.test_harness_acceptance` (or the command above) runs one
 full R1+R2+R3 tournament over seeds 18/24/30 with K=3 using the fake wrapper, which
 writes valid canonical receipt triples (`receipt.json`, `llm/provider-run.json`,
