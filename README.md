@@ -76,6 +76,27 @@ Four signals per run, each 0–100, **reported separately — never collapsed in
 3. **Robustness** — behavior under injected faults.
 4. **Contract hygiene** — permission violations, idempotency breaches, audit completeness.
 
+## Tournament harness (optional — Phase 6)
+
+An optional LangGraph orchestration layer (`harness/`, installed via `pip install -e ".[harness]"`) runs R1/R2/R3 **tournaments** over the frozen core: one immutable config per tournament, every core launch a registered subprocess with a frozen StrategyContext snapshot, fail-closed evidence binding, and exactly one authoritative leaderboard row per `(condition, seed)`. The core itself stays stdlib-only and is never imported by the harness — the only interface is the CLI subprocess plus sealed JSON artifacts.
+
+```text
+# zero-cost deterministic acceptance: full R1+R2+R3 over seeds 18/24/30
+python3 -m pip install -e ".[harness]"
+python3 -m harness --config tests/fixtures/harness/unit6-acceptance-config.json \
+    --runner fake --non-interactive --root /tmp/harness-demo
+```
+
+Exit codes: 0 complete, 1 fail-closed (evidence paths printed), 2 usage/config. Re-running the same tournament id resumes under the recovery contracts and never reruns receipt-bound work. R1 approvals are injectable: `--non-interactive` (auto-decline), `--answers FILE` (scripted), or the default stdin terminal. Full operator contract — Luna live-acceptance procedure, artifact layout, R1/R2/R3 semantics, recovery windows — lives in `docs/sdd/phase6-langgraph-harness.md`.
+
+What the harness guarantees, and what it does not:
+
+- **Deterministic tournaments**: identical runs produce byte-identical leaderboards; one tournament freezes one provider/model — no cross-provider mixing and no fallback.
+- **Receipt authority**: scores come only from sealed `receipt.json`, tokens only from digest-bound provider evidence; stdout claims are never official and fail-closed rows carry explicit nulls, never zeros.
+- **Honest logs** — binding precision note: "Checkpoint/logs give SEQUENCE/CONTINUITY validation and replay revalidation — NOT general tamper-evidence/authenticity: a valid-to-valid external substitution of content is not cryptographically bound."
+- **Internal identity consistency** — binding precision note: "First-bind-wins for prompt_digest/tool_schema_digest is INTERNAL consistency after the first run — not a pre-frozen tournament expectation recorded before the tournament."
+- **No composite score** and no scientific/security/exactly-once claims; replay never calls an LLM.
+
 ## Roadmap
 
 | Phase | Deliverable | Exit criteria |
