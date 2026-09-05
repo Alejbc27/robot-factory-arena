@@ -89,6 +89,12 @@ class CheckpointStore:
         atomic_write_bytes(path, canonical_json_bytes(record))
         return path
 
+    def records(self):
+        """All checkpoint records in sequence order (public read access for
+        the restart replay); full continuity is validated before any read.
+        """
+        return self._validated_records()
+
     def latest(self):
         records = self._validated_records()
         if not records:

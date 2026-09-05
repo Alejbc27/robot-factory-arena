@@ -10,6 +10,11 @@ attempt, a crash after evidence_bound never reruns the terminal receipt,
 and a crash after the K-th evidence_unresolved never exceeds K. A timeout
 or non-zero exit classifies evidence_unresolved BEFORE any artifact is
 bound, even when the runner left a perfectly valid run dir behind.
+
+Unit 4 update: R1 joins R2 in the same wiring. These tests run the R1 pairs
+with the deterministic auto-decline terminal, so every R1 deferral is an
+explicit logged decline event and the R2 loop below behaves exactly as in
+Unit 3 (rows are filtered to condition R2 by default).
 """
 
 import hashlib
@@ -20,7 +25,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness import graph, logs, state, strategy_context, subprocess_adapter, tournament
+from harness import (
+    graph,
+    interruption,
+    logs,
+    state,
+    strategy_context,
+    subprocess_adapter,
+    tournament,
+)
 from tests.test_harness_evidence import FIXTURE as SEALED_FIXTURE
 
 LANGGRAPH_AVAILABLE = importlib.util.find_spec("langgraph") is not None
@@ -182,7 +195,20 @@ def drive(state_value, deps):
     state_value = graph.node_plan_context(state_value, deps)
     for _ in range(200):
         plan_route = graph.route_after_plan(state_value, deps)
-        if plan_route == "collect_and_bind_evidence":
+        if plan_route == "approve_r1":
+            state_value = graph.node_approve_r1(state_value, deps)
+            approval_route = graph.route_after_approval(state_value)
+            if approval_route == "approve_r1":
+                continue
+            if approval_route == "retry_or_finish":
+                state_value = graph.node_retry_or_finish(state_value, deps)
+            else:
+                state_value = graph.node_merge_and_freeze_context(state_value, deps)
+                state_value = graph.node_register_launch(state_value, deps)
+                state_value = graph.node_launch_subprocess(state_value, deps)
+                state_value = graph.node_collect_and_bind_evidence(state_value, deps)
+                state_value = graph.node_retry_or_finish(state_value, deps)
+        elif plan_route == "collect_and_bind_evidence":
             state_value = graph.node_collect_and_bind_evidence(state_value, deps)
             state_value = graph.node_retry_or_finish(state_value, deps)
         elif plan_route == "retry_or_finish":
@@ -208,7 +234,12 @@ class Base(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def deps(self, script, config=None):
-        return graph.build_deps(self.root, config or CONFIG, runner=fake_runner(script))
+        return graph.build_deps(
+            self.root,
+            config or CONFIG,
+            runner=fake_runner(script),
+            approval=interruption.auto_decline,
+        )
 
     def attempt_records(self, deps=None):
         deps = deps or self.deps("never")
@@ -216,10 +247,11 @@ class Base(unittest.TestCase):
             tournament.expected_layout(self.root, ID)["attempt-log.jsonl"]
         ).records()
 
-    def rows(self, deps):
-        return json.loads(
+    def rows(self, deps, condition="R2"):
+        all_rows = json.loads(
             tournament.expected_layout(self.root, ID)["leaderboard.json"].read_bytes()
         )["rows"]
+        return [row for row in all_rows if row["condition"] == condition]
 
 
 class TestFreezeAndRouting(Base):
@@ -250,12 +282,17 @@ class TestFreezeAndRouting(Base):
                 state.initial_state(), self.deps("complete", config=drifted)
             )
 
-    def test_r2_is_the_only_implemented_route_and_is_recorded(self):
+    def test_r1_and_r2_are_implemented_and_r3_is_deferred(self):
         deps = self.deps("complete")
         state_value = graph.node_assign_work(state.initial_state(), deps)
-        self.assertEqual(state_value["work_count"], 3)
-        events = [r["event"] for r in deps.decision_log.records()]
-        self.assertIn("routes_deferred", events)
+        # deterministic work queue: R2 pairs first, then R1; R3 defers (Unit 5)
+        self.assertEqual(state_value["work_count"], 6)
+        deferred = [
+            r["conditions"]
+            for r in deps.decision_log.records()
+            if r["event"] == "routes_deferred"
+        ]
+        self.assertEqual(deferred, [["R3"]])
 
 
 class TestR2Loop(Base):
@@ -382,7 +419,12 @@ class TestCrashWindow(Base):
         state_value = graph.node_register_launch(state_value, deps)
         # --- crash: no launch, no observation, no evidence ---
         runner = fake_runner("complete")
-        deps2 = graph.build_deps(self.root, CONFIG, runner=runner)
+        deps2 = graph.build_deps(
+            self.root,
+            CONFIG,
+            runner=runner,
+            approval=interruption.auto_decline,
+        )
         drive(state.initial_state(), deps2)
         records = [r for r in self.attempt_records(deps2) if r.get("seed") == "18"]
         registered = [
@@ -476,7 +518,12 @@ class TestRestartRecovery(Base):
         deps = self.deps("complete")
         self._run_to(deps, "launch")  # crash: observed, no evidence resolution
         restart = fake_runner("complete", tag="r2-")
-        deps2 = graph.build_deps(self.root, CONFIG, runner=restart)
+        deps2 = graph.build_deps(
+            self.root,
+            CONFIG,
+            runner=restart,
+            approval=interruption.auto_decline,
+        )
         drive(state.initial_state(), deps2)
         seed18 = [r for r in self.attempt_records(deps2) if r.get("seed") == "18"]
         registered = [
@@ -499,7 +546,12 @@ class TestRestartRecovery(Base):
         deps = self.deps("complete")
         self._run_to(deps, "collect")  # crash: bound, seed never advanced
         restart = fake_runner("complete", tag="r2-")
-        deps2 = graph.build_deps(self.root, CONFIG, runner=restart)
+        deps2 = graph.build_deps(
+            self.root,
+            CONFIG,
+            runner=restart,
+            approval=interruption.auto_decline,
+        )
         drive(state.initial_state(), deps2)
         seed18 = [r for r in self.attempt_records(deps2) if r.get("seed") == "18"]
         registered = [
@@ -529,7 +581,12 @@ class TestRestartRecovery(Base):
             self._run_to(deps, "collect")
         # --- crash: K-th evidence_unresolved recorded, no terminal decision ---
         restart = fake_runner("always_fail", tag="r2-")
-        deps2 = graph.build_deps(self.root, CONFIG, runner=restart)
+        deps2 = graph.build_deps(
+            self.root,
+            CONFIG,
+            runner=restart,
+            approval=interruption.auto_decline,
+        )
         drive(state.initial_state(), deps2)
         registered = [
             r["attempt_id"]

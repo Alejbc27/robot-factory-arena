@@ -50,6 +50,7 @@ class TestPackageBoundary(unittest.TestCase):
             "evidence.py",
             "leaderboard.py",
             "graph.py",
+            "interruption.py",
         ):
             self.assertIn(HARNESS_DIR / expected, sources)
 
@@ -103,10 +104,12 @@ class TestGateWorkflowSplit(unittest.TestCase):
         self.assertIn("[harness]", job.group(0))
         self.assertIn("test_harness", job.group(0))
 
-    def test_harness_gate_runs_all_five_harness_modules(self):
+    def test_harness_gate_runs_all_harness_modules(self):
         # PR #20 blocker 4: the harness-gate job must execute every harness
         # module WITH langgraph installed, so test_build_graph_compiles
-        # reports ok there instead of being skipped everywhere.
+        # reports ok there instead of being skipped everywhere. Unit 4 adds
+        # the R1 approval-path module and the recovery continuity module to
+        # the same gate.
         text = GATE.read_text(encoding="utf-8")
         job = re.search(r"harness-gate:.*?(?=\n  \w[-\w]*:|\Z)", text, re.S)
         if job is None:
@@ -117,6 +120,8 @@ class TestGateWorkflowSplit(unittest.TestCase):
             "tests.test_harness_evidence",
             "tests.test_harness_r2",
             "tests.test_harness_leaderboard",
+            "tests.test_harness_r1",
+            "tests.test_harness_recovery",
         ):
             self.assertIn(module, job.group(0))
 
