@@ -86,6 +86,14 @@ _RETRY_ROUTES = {
     "next_work": "plan_context",
     "work_done": "aggregate_leaderboard",
 }
+# LangGraph's path_map is indexed by the ROUTER'S RETURN VALUE. The retry
+# router returns the mapped DESTINATION (the walker/driver contract), so the
+# compiled path_map must be identity over destinations — passing the
+# status-keyed _RETRY_ROUTES makes langgraph raise KeyError on the first
+# routed destination ("plan_context") in the compiled path only.
+_RETRY_PATH_ROUTES = {
+    destination: destination for destination in _RETRY_ROUTES.values()
+}
 
 _PLAN_ROUTES = {
     "merge_and_freeze_context": "merge_and_freeze_context",
@@ -99,6 +107,12 @@ _APPROVAL_ROUTES = {
     "approval_granted": "merge_and_freeze_context",
     "approval_edited": "approve_r1",
     "launch_declined": "retry_or_finish",
+}
+# LangGraph path_map is indexed by the ROUTER'S RETURN VALUE; approval and
+# retry routers return mapped DESTINATIONS, so their compiled path maps must
+# be identity over destinations (see _RETRY_PATH_ROUTES below).
+_APPROVAL_PATH_ROUTES = {
+    destination: destination for destination in _APPROVAL_ROUTES.values()
 }
 _BARRIER_ROUTES = {
     "register_launch": "register_launch",
@@ -1490,7 +1504,7 @@ def build_graph(deps):
     builder.add_conditional_edges(
         "approve_r1",
         route_after_approval,
-        _APPROVAL_ROUTES,
+        _APPROVAL_PATH_ROUTES,
     )
     builder.add_edge("merge_and_freeze_context", "register_launch")
     builder.add_conditional_edges(
@@ -1501,6 +1515,8 @@ def build_graph(deps):
     builder.add_edge("register_launch", "launch_subprocess")
     builder.add_edge("launch_subprocess", "collect_and_bind_evidence")
     builder.add_edge("collect_and_bind_evidence", "retry_or_finish")
-    builder.add_conditional_edges("retry_or_finish", route_after_retry, _RETRY_ROUTES)
+    builder.add_conditional_edges(
+        "retry_or_finish", route_after_retry, _RETRY_PATH_ROUTES
+    )
     builder.add_edge("aggregate_leaderboard", END)
     return builder.compile()
