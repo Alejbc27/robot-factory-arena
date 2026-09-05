@@ -215,9 +215,13 @@ def drive(state_value, deps):
             state_value = graph.node_retry_or_finish(state_value, deps)
         elif plan_route == "barrier_merge_r3":
             state_value = graph.node_barrier_merge_r3(state_value, deps)
-            state_value = graph.node_register_launch(state_value, deps)
-            state_value = graph.node_launch_subprocess(state_value, deps)
-            state_value = graph.node_collect_and_bind_evidence(state_value, deps)
+            if graph.route_after_barrier(state_value) == "collect_and_bind_evidence":
+                # barrier drain: resolve the pending prior-round launch first
+                state_value = graph.node_collect_and_bind_evidence(state_value, deps)
+            else:
+                state_value = graph.node_register_launch(state_value, deps)
+                state_value = graph.node_launch_subprocess(state_value, deps)
+                state_value = graph.node_collect_and_bind_evidence(state_value, deps)
             state_value = graph.node_retry_or_finish(state_value, deps)
         else:
             state_value = graph.node_merge_and_freeze_context(state_value, deps)

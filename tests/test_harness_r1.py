@@ -560,10 +560,18 @@ class TestLaunchWindowRestart(Base):
             elif plan_route == "retry_or_finish":
                 value = graph.node_retry_or_finish(value, deps)
             elif plan_route == "barrier_merge_r3":
-                for name, function in barrier_steps:
-                    value = function(value, deps)
-                    if crash == (value["condition"], value["semilla"], name):
-                        return value
+                name, function = barrier_steps[0]
+                value = function(value, deps)
+                if crash == (value["condition"], value["semilla"], name):
+                    return value
+                if graph.route_after_barrier(value) == "collect_and_bind_evidence":
+                    # barrier drain: resolve the pending prior-round launch
+                    value = graph.node_collect_and_bind_evidence(value, deps)
+                else:
+                    for name, function in barrier_steps[1:]:
+                        value = function(value, deps)
+                        if crash == (value["condition"], value["semilla"], name):
+                            return value
                 # fixed graph edge: collect always flows into retry_or_finish
                 value = graph.node_retry_or_finish(value, deps)
             else:

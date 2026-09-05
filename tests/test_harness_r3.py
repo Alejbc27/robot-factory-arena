@@ -3,8 +3,11 @@ barriers. The merge is deterministic — ordered by declared identity
 ``(source_attempt_id, explorer_id, discovery_ordinal)``, never by completion
 timing — with no LLM coordinator, no ranking, no deduplication by content, and
 no semantic filtering. The barrier runs only when every contributing branch
-round is resolved; a non-terminal pair blocks it with an explicit waiting
-event, never a silent skip. Only finished receipt-bound runs admit candidate
+round is resolved: a PRIOR-ROUND LAUNCH WITHOUT EVIDENCE RESOLUTION blocks
+the merge — the barrier records explicit waiting evidence and drains
+deterministically by routing to the first pending attempt's collector, while
+an already-resolved retry pair simply participates in the next round. Only
+finished receipt-bound runs admit candidate
 discoveries, and the same merged DiscoverySnapshot is frozen once per round for
 every branch's next launch, so an in-flight run can never see its own
 same-round discovery. Restarts reconstruct deterministically from the
@@ -128,10 +131,21 @@ def _walk(deps, terminal, crash=None):
             if plan_route == "collect_and_bind_evidence":
                 value = graph.node_retry_or_finish(value, deps)
         else:
-            for function, name in steps_by_route[plan_route]:
-                value = function(value, deps)
-                if crash == (value["condition"], value["semilla"], name):
-                    return value
+            first, first_name = steps_by_route[plan_route][0]
+            value = first(value, deps)
+            if crash == (value["condition"], value["semilla"], first_name):
+                return value
+            if (
+                plan_route == "barrier_merge_r3"
+                and graph.route_after_barrier(value) == "collect_and_bind_evidence"
+            ):
+                # barrier drain: resolve the pending prior-round launch first
+                value = graph.node_collect_and_bind_evidence(value, deps)
+            else:
+                for function, name in steps_by_route[plan_route][1:]:
+                    value = function(value, deps)
+                    if crash == (value["condition"], value["semilla"], name):
+                        return value
             value = graph.node_retry_or_finish(value, deps)
         retry_route = graph.route_after_retry(value)
         if retry_route == "aggregate_leaderboard":
@@ -338,18 +352,22 @@ class TestBarrierMerge(Base):
         self.assertEqual(len({digest for digest, _ in digests}), 1)
         self.assertEqual(len({data for _, data in digests}), 1)
 
-    def test_non_terminal_pair_blocks_the_merge_with_explicit_waiting(self):
-        # agent-01 completes round 1; agent-02 is observed but uncollected
+    def test_barrier_keeps_waiting_evidence_and_drains_to_the_pending_collector(
+        self,
+    ):
+        # agent-01's round-1 launch resolved unresolved (retry pair);
+        # agent-02 is observed but uncollected — the pending prior round
         _walk(
-            self.deps(r3_runner(tag="w0-"), tournament_id="tournament-unit5-r3"),
+            self.deps(self.lineage_runner(tag="w0-")),
             decline_terminal(),
             crash=("R3", "24", "launch"),
         )
         blocked_state = state.set_current(
             state.initial_state(), condition="R3", semilla="18"
         )
-        with self.assertRaises(graph.HarnessGraphError) as raised:
-            graph.node_barrier_merge_r3(blocked_state, self.deps(r3_runner()))
+        drained = graph.node_barrier_merge_r3(blocked_state, self.deps(r3_runner()))
+        # the barrier keeps its explicit waiting evidence, then drains to
+        # the FIRST pending (unbound) prior-round attempt instead of raising
         waiting_events = [
             r for r in self.decisions() if r["event"] == "round_barrier_waiting"
         ]
@@ -365,7 +383,11 @@ class TestBarrierMerge(Base):
                 }
             ],
         )
-        self.assertIn("r3-agent-02-seed-24-attempt-01", str(raised.exception))
+        self.assertEqual(drained["status"], "barrier_drain")
+        self.assertEqual((drained["condition"], drained["semilla"]), ("R3", "24"))
+        self.assertEqual(
+            graph.route_after_barrier(drained), "collect_and_bind_evidence"
+        )
         self.assertEqual(
             [
                 r
@@ -375,6 +397,142 @@ class TestBarrierMerge(Base):
             [],
         )
         self.assertNotIn("strategy-context-004.json", self.context_names())
+        # the drained collector resolves the pending attempt exactly once
+        bound_state = graph.node_collect_and_bind_evidence(
+            drained, self.deps(r3_runner())
+        )
+        self.assertEqual(bound_state["status"], "evidence_collected")
+        self.assertEqual(
+            [
+                r["attempt_id"]
+                for r in self.attempts()
+                if r["event"] == "evidence_bound"
+                and r["condition"] == "R3"
+                and r["seed"] == "24"
+            ],
+            ["r3-agent-02-seed-24-attempt-01"],
+        )
+
+    def test_pending_prior_round_launch_drains_deterministically(self):
+        """18 unresolved/retry + 24 observed-unbound: the restart collects 24
+        and the round-2 barrier eventually opens (never livelocks)."""
+        cfg = config()
+        runner = r3_runner(
+            {"18": [("timeout", None, None), ("ok", "completed", 100)]}, tag="w1-"
+        )
+        _walk(self.deps(runner, cfg), decline_terminal(), crash=("R3", "24", "launch"))
+        drive(state.initial_state(), self.deps(r3_runner(tag="r1-"), cfg))
+        waiting = [
+            r for r in self.decisions(cfg) if r["event"] == "round_barrier_waiting"
+        ]
+        self.assertEqual(len(waiting), 1)
+        self.assertEqual(waiting[0]["round"], 2)
+        self.assertEqual(
+            waiting[0]["waiting"],
+            [
+                {
+                    "seed": "24",
+                    "attempt_id": "r3-agent-02-seed-24-attempt-01",
+                    "reason": "evidence_pending",
+                }
+            ],
+        )
+        self.assertEqual(
+            [
+                r["attempt_id"]
+                for r in self.attempts(cfg)
+                if r["event"] == "evidence_bound"
+                and r["condition"] == "R3"
+                and r["seed"] == "24"
+            ],
+            ["r3-agent-02-seed-24-attempt-01"],
+        )
+        round_two = [
+            r
+            for r in self.decisions(cfg)
+            if r["event"] == "context_snapshot_frozen" and r.get("round") == 2
+        ]
+        self.assertEqual(len(round_two), 1)
+        second = self.launch("r3-agent-01-seed-18-attempt-02", cfg)
+        self.assertEqual(second["context_digest"], round_two[0]["context_digest"])
+        self.assertEqual(self.row("R3", "18", cfg)["attempts_used"], 2)
+
+    def test_registered_unobserved_pending_classifies_crash_window_and_progresses(
+        self,
+    ):
+        """18 retry + 24 registered-unobserved: the U3 crash-window
+        classification applies, the retry gets a new ordinal where
+        appropriate, and the barrier still eventually progresses."""
+        cfg = config()
+        runner = r3_runner(
+            {"18": [("timeout", None, None), ("ok", "completed", 100)]}, tag="w2-"
+        )
+        _walk(
+            self.deps(runner, cfg), decline_terminal(), crash=("R3", "24", "register")
+        )
+        drive(state.initial_state(), self.deps(r3_runner(tag="r2-"), cfg))
+        unresolved = {
+            (r["attempt_id"], r["reason"])
+            for r in self.attempts(cfg)
+            if r["event"] == "evidence_unresolved"
+        }
+        self.assertIn(
+            ("r3-agent-02-seed-24-attempt-01", "crash_window_unobserved"),
+            unresolved,
+        )
+        self.assertTrue(
+            any(
+                r["event"] == "recovery"
+                and r.get("attempt_id") == "r3-agent-02-seed-24-attempt-01"
+                for r in self.decisions(cfg)
+            )
+        )
+        ordinals = sorted(
+            r["attempt_ordinal"]
+            for r in self.attempts(cfg)
+            if r["event"] == "launch_registered"
+            and r["condition"] == "R3"
+            and r["seed"] == "24"
+        )
+        self.assertEqual(ordinals, [1, 2])
+        round_two = [
+            r
+            for r in self.decisions(cfg)
+            if r["event"] == "context_snapshot_frozen" and r.get("round") == 2
+        ]
+        self.assertEqual(len(round_two), 1)
+        self.assertEqual(self.row("R3", "24", cfg)["attempts_used"], 2)
+
+    def test_double_restart_never_livelocks_or_repeats_attempt_ids(self):
+        cfg = config()
+        runner = r3_runner(
+            {"18": [("timeout", None, None), ("ok", "completed", 100)]}, tag="w3-"
+        )
+        _walk(self.deps(runner, cfg), decline_terminal(), crash=("R3", "24", "launch"))
+        deps2 = self.deps(r3_runner(tag="r3a-"), cfg)
+        original = deps2.decision_log.append
+
+        def append(record):
+            if (
+                record.get("event") == "context_snapshot_frozen"
+                and record.get("round") == 2
+            ):
+                raise _RestartCrash()
+            return original(record)
+
+        deps2.decision_log.append = append
+        with self.assertRaises(_RestartCrash):
+            drive(state.initial_state(), deps2)
+        drive(state.initial_state(), self.deps(r3_runner(tag="r3b-"), cfg))
+        registrations = [
+            r["attempt_id"]
+            for r in self.attempts(cfg)
+            if r["event"] == "launch_registered" and r["condition"] == "R3"
+        ]
+        self.assertEqual(len(registrations), len(set(registrations)))
+        self.assertEqual(self.row("R3", "18", cfg)["attempts_used"], 2)
+        self.assertEqual(self.row("R3", "24", cfg)["attempts_used"], 1)
+        self.assertEqual(self.row("R3", "30", cfg)["attempts_used"], 1)
 
     def test_one_identical_snapshot_per_round_for_every_branch(self):
         cfg = config()
@@ -871,6 +1029,10 @@ class TestR3Coexistence(Base):
         self.assertEqual(
             strategy_context.sha256_digest(self.snapshot(3, cfg)), NULL_DIGEST
         )
+
+
+class _RestartCrash(Exception):
+    """Simulated process death during a restart drive."""
 
 
 class _CrashBeforeRoundFreezeEvent(Exception):

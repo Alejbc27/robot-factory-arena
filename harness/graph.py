@@ -87,6 +87,10 @@ _APPROVAL_ROUTES = {
     "approval_edited": "approve_r1",
     "launch_declined": "retry_or_finish",
 }
+_BARRIER_ROUTES = {
+    "register_launch": "register_launch",
+    "collect_and_bind_evidence": "collect_and_bind_evidence",
+}
 _ANSWER_EVENTS = ("approval_edit", "approval_granted", "launch_declined")
 
 
@@ -628,6 +632,22 @@ def _r3_round_pending(deps, round_number):
     return waiting
 
 
+def _r3_first_pending(deps, round_number):
+    """The first prior-round launch without evidence resolution, ordered by
+    ``(attempt_ordinal, seed)`` — the deterministic barrier drain target;
+    None while the round is not blocked."""
+    pending = [
+        (launch["attempt_ordinal"], str(seed), launch)
+        for seed in deps.config["seeds"]
+        for launch in _pair_launches(deps, "R3", str(seed))
+        if launch["attempt_ordinal"] < round_number
+        and _resolved_event(deps, launch["attempt_id"]) is None
+    ]
+    if not pending:
+        return None
+    return min(pending, key=lambda item: (item[0], item[1]))[2]
+
+
 _CANDIDATE_KEYS = {"schema_version", "discoveries"}
 _CANDIDATE_RECORD_KEYS = {"explorer_id", "discovery_ordinal", "text"}
 
@@ -811,12 +831,17 @@ def _r3_round_context(deps):
 
 def node_barrier_merge_r3(state, deps):
     """R3 round barrier (design §6). The deterministic merge runs ONLY after
-    every contributing branch round is resolved; a non-terminal pair blocks it
-    with an explicit ``round_barrier_waiting`` event and a fail-closed error,
-    never a silent skip. Admission is swept first; the merge sorts by declared
-    identity ``(source_attempt_id, explorer_id, discovery_ordinal)`` with no
-    LLM coordinator, ranking, dedup-by-content, or completion-timing input;
-    and ONE identical snapshot per round is frozen before any branch of that
+    every contributing branch round is resolved: a PRIOR-ROUND LAUNCH WITHOUT
+    EVIDENCE RESOLUTION blocks the merge — the barrier records explicit
+    ``round_barrier_waiting`` evidence and then DRAINS deterministically by
+    routing to the first pending attempt by ``(attempt_ordinal, seed)`` so
+    its collector resolves it (a bind, or the fail-closed U3 crash-window
+    classification for the registered-unobserved window); an already-resolved
+    retry pair never blocks — it participates in the next round. Admission is
+    swept first; the merge sorts by declared identity
+    ``(source_attempt_id, explorer_id, discovery_ordinal)`` with no LLM
+    coordinator, ranking, dedup-by-content, or completion-timing input; and
+    ONE identical snapshot per round is frozen before any branch of that
     round launches, so an in-flight run can never contribute to (or see) its
     own round's snapshot. The merge is restart-idempotent: a crash after the
     atomic file write but before the frozen event rewrites byte-identical
@@ -843,9 +868,28 @@ def node_barrier_merge_r3(state, deps):
                     "waiting": waiting,
                 }
             )
-        raise HarnessGraphError(
-            f"R3 round {round_number} barrier is blocked by non-terminal "
-            f"branches: {waiting}"
+        pending = _r3_first_pending(deps, round_number)
+        if pending is None:
+            raise HarnessGraphError(
+                f"R3 round {round_number} pending launch cannot be "
+                f"reconstructed: {waiting}"
+            )
+        kind, latest = _pair_state(deps, "R3", pending["seed"])
+        if (
+            kind != "collect"
+            or latest is None
+            or latest["attempt_id"] != pending["attempt_id"]
+        ):
+            raise HarnessGraphError(
+                f"R3 round {round_number} pending launch cannot be "
+                f"reconstructed: {waiting}"
+            )
+        return set_current(
+            state,
+            condition="R3",
+            semilla=pending["seed"],
+            agent_id=_agent_id(deps.config, "R3", pending["seed"]),
+            status="barrier_drain",
         )
     record_discoveries(deps)
     context = _r3_round_context(deps)
@@ -1182,6 +1226,12 @@ def route_after_approval(state):
     return _APPROVAL_ROUTES[state["status"]]
 
 
+def route_after_barrier(state):
+    if state["status"] == "barrier_drain":
+        return "collect_and_bind_evidence"
+    return "register_launch"
+
+
 def route_after_retry(state):
     return _RETRY_ROUTES[state["status"]]
 
@@ -1228,7 +1278,11 @@ def build_graph(deps):
         _APPROVAL_ROUTES,
     )
     builder.add_edge("merge_and_freeze_context", "register_launch")
-    builder.add_edge("barrier_merge_r3", "register_launch")
+    builder.add_conditional_edges(
+        "barrier_merge_r3",
+        route_after_barrier,
+        _BARRIER_ROUTES,
+    )
     builder.add_edge("register_launch", "launch_subprocess")
     builder.add_edge("launch_subprocess", "collect_and_bind_evidence")
     builder.add_edge("collect_and_bind_evidence", "retry_or_finish")
