@@ -29,7 +29,11 @@ stays ambiguous: it is counted as a launch, never rerun under the same
 ``attempt_id``, and recovery records an explicit event. R1 approval state is
 reconstructed from the decision log under the same contract: a standing
 approval grant is never re-prompted after a crash, and a decline is never
-silently re-proposed.
+silently re-proposed. The answer itself is durable first: the POST_ANSWER
+checkpoint stores the full validated answer write-ahead (guidance
+included), and a restart replays an answer whose decision event never
+reached the append-only log — the human is never re-prompted for an answer
+already given, and the replay is idempotent (PR #22).
 """
 
 import json
@@ -81,6 +85,7 @@ _APPROVAL_ROUTES = {
     "approval_edited": "approve_r1",
     "launch_declined": "retry_or_finish",
 }
+_ANSWER_EVENTS = ("approval_edit", "approval_granted", "launch_declined")
 
 
 class HarnessGraphError(ValueError):
@@ -379,6 +384,87 @@ def _proposal_round(deps, condition, seed):
     )
 
 
+def _has_answer_event(deps, condition, seed, round_number):
+    """Whether the decision event for this exact prompt slot already exists."""
+    return any(
+        record.get("event") in _ANSWER_EVENTS
+        and record.get("condition") == condition
+        and record.get("seed") == seed
+        and record.get("proposal_round") == round_number
+        for record in deps.decision_log.records()
+    )
+
+
+def _unconsumed_post_answer(deps, condition, seed, round_number):
+    """The durable write-ahead answer for this prompt slot, if any (PR #22).
+
+    POST_ANSWER is written BEFORE its decision event, so a crash in that
+    window would lose the human's answer to a re-prompt. The record for this
+    exact (condition, seed, proposal_round) slot is returned only while its
+    decision event is still absent from the append-only log; once the event
+    lands, the record is consumed and restart routing reads the log.
+    """
+    if _has_answer_event(deps, condition, seed, round_number):
+        return None
+    found = None
+    for record in deps.checkpoints.records():
+        if record.get("boundary") != POST_ANSWER:
+            continue
+        snapshot = record.get("state")
+        if not isinstance(snapshot, dict):
+            continue
+        if (
+            snapshot.get("condition") == condition
+            and snapshot.get("seed") == seed
+            and snapshot.get("proposal_round") == round_number
+        ):
+            found = snapshot
+    if found is None:
+        return None
+    answer = found.get("answer")
+    if not isinstance(answer, dict):
+        raise HarnessGraphError(
+            "durable POST_ANSWER record carries no replayable answer object"
+        )
+    return answer
+
+
+def _record_answer(deps, condition, seed, round_number, answer):
+    """The single decision-log write door for one answered prompt: the live
+    terminal path and the write-ahead replay append exactly this event."""
+    decision = answer["decision"]
+    if decision == "yes":
+        deps.decision_log.append(
+            {
+                "event": "approval_granted",
+                "condition": condition,
+                "seed": seed,
+                "proposal_round": round_number,
+            }
+        )
+        return "approval_granted"
+    if decision == "edit":
+        deps.decision_log.append(
+            {
+                "event": "approval_edit",
+                "condition": condition,
+                "seed": seed,
+                "proposal_round": round_number,
+                "guidance": list(answer["guidance"]),
+            }
+        )
+        return "approval_edited"
+    deps.decision_log.append(
+        {
+            "event": "launch_declined",
+            "condition": condition,
+            "seed": seed,
+            "proposal_round": round_number,
+        }
+    )
+    return "launch_declined"
+
+
 def node_approve_r1(state, deps):
     """R1 interruption: the injectable terminal answers a controlled proposal.
 
@@ -390,6 +476,13 @@ def node_approve_r1(state, deps):
     one proposal; ``edit`` logs the revision BEFORE its follow-up prompt;
     ``no`` records ``launch_declined`` — a real orchestration outcome, never
     a silent skip — and no subprocess attempt is allocated.
+
+    The validated answer is persisted write-ahead in the POST_ANSWER
+    checkpoint (the full answer, guidance included) BEFORE its decision
+    event is appended. A restart that finds a POST_ANSWER whose decision
+    event never reached the append-only log replays that exact durable
+    answer instead of re-prompting the human (PR #22); the replay is
+    idempotent, so a double restart never duplicates the event.
     """
     if deps.approval is None:
         raise HarnessGraphError(
@@ -398,6 +491,13 @@ def node_approve_r1(state, deps):
         )
     condition, seed = state["condition"], state["semilla"]
     round_number = _proposal_round(deps, condition, seed)
+    durable = _unconsumed_post_answer(deps, condition, seed, round_number)
+    if durable is not None:
+        interruption.validate_answer(durable)
+        return set_current(
+            state,
+            status=_record_answer(deps, condition, seed, round_number, durable),
+        )
     view = {
         "condition": condition,
         "seed": seed,
@@ -432,39 +532,12 @@ def node_approve_r1(state, deps):
             "condition": condition,
             "seed": seed,
             "proposal_round": round_number,
-            "decision": answer["decision"],
+            "answer": dict(answer),
         },
     )
-    if answer["decision"] == "yes":
-        deps.decision_log.append(
-            {
-                "event": "approval_granted",
-                "condition": condition,
-                "seed": seed,
-                "proposal_round": round_number,
-            }
-        )
-        return set_current(state, status="approval_granted")
-    if answer["decision"] == "edit":
-        deps.decision_log.append(
-            {
-                "event": "approval_edit",
-                "condition": condition,
-                "seed": seed,
-                "proposal_round": round_number,
-                "guidance": list(answer["guidance"]),
-            }
-        )
-        return set_current(state, status="approval_edited")
-    deps.decision_log.append(
-        {
-            "event": "launch_declined",
-            "condition": condition,
-            "seed": seed,
-            "proposal_round": round_number,
-        }
+    return set_current(
+        state, status=_record_answer(deps, condition, seed, round_number, answer)
     )
-    return set_current(state, status="launch_declined")
 
 
 def _next_snapshot_ordinal(deps):

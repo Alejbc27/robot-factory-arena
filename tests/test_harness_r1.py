@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 
 from harness import (
+    checkpointing,
     graph,
     interruption,
     logs,
@@ -744,6 +745,195 @@ class TestAnswerExactKeyContract(Base):
             ],
             [],
         )
+
+
+class _CrashAfterPostAnswer(Exception):
+    """Simulated process death in the POST_ANSWER write-ahead window."""
+
+
+def _crash_after_post_answer(deps, condition, seed):
+    """The POST_ANSWER checkpoint write completes, then the process dies —
+    the crash window between the durable answer and its decision-log append."""
+    original = deps.checkpoints.write
+
+    def write(boundary, snapshot):
+        written = original(boundary, snapshot)
+        if (
+            boundary == checkpointing.POST_ANSWER
+            and snapshot.get("condition") == condition
+            and snapshot.get("seed") == seed
+        ):
+            raise _CrashAfterPostAnswer()
+        return written
+
+    deps.checkpoints.write = write
+    return deps
+
+
+def _never_reprompted_terminal(condition, seed):
+    """Serves yes for every OTHER pair; AssertionError if the already-answered
+    prompt of (condition, seed) is ever re-shown (the test-locked invariant)."""
+
+    def terminal(view):
+        if view["condition"] == condition and view["seed"] == seed:
+            raise AssertionError(
+                f"approval terminal re-prompted the already-answered "
+                f"{condition}/{seed} prompt"
+            )
+        return {"decision": "yes"}
+
+    return terminal
+
+
+class TestWriteAheadAnswerRestart(Base):
+    """PR #22 blocker 2: the POST_ANSWER checkpoint is a write-ahead answer
+    record consumed on restart. A crash between the durable answer write and
+    the decision-log append replays the EXACT answer instead of re-prompting
+    the human; the replay is idempotent under a double restart."""
+
+    def _restart_deps(self, config, terminal, tag):
+        return graph.build_deps(
+            self.root,
+            config,
+            runner=make_runner("complete", tag=tag),
+            approval=terminal,
+        )
+
+    def test_crash_after_post_answer_yes_grants_exactly_once(self):
+        terminal = scripted_terminal([{"decision": "yes"}])
+        deps = self.deps("complete", terminal)
+        with self.assertRaises(_CrashAfterPostAnswer):
+            drive(state.initial_state(), _crash_after_post_answer(deps, "R1", "18"))
+        # restart: the pending yes is replayed — the terminal is NEVER invoked
+        # for R1/18 again (a regression re-prompts and the invariant fires)
+        drive(
+            state.initial_state(),
+            self._restart_deps(
+                FIXTURE_CONFIG, _never_reprompted_terminal("R1", "18"), "wa1-"
+            ),
+        )
+        grants = [
+            r
+            for r in self.decision_records()
+            if r["event"] == "approval_granted"
+            and r.get("condition") == "R1"
+            and r.get("seed") == "18"
+        ]
+        self.assertEqual(len(grants), 1)
+        self.assertEqual(grants[0]["proposal_round"], 0)
+        registered = [
+            r["attempt_id"]
+            for r in self.attempt_records()
+            if r.get("condition") == "R1"
+            and r.get("seed") == "18"
+            and r["event"] == "launch_registered"
+        ]
+        self.assertEqual(registered, ["r1-agent-01-seed-18-attempt-01"])
+        row = self.row_for("R1", "18")
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["attempts_used"], 1)
+        # double restart: the consumed record never duplicates the event
+        drive(
+            state.initial_state(),
+            self._restart_deps(
+                FIXTURE_CONFIG, _never_reprompted_terminal("R1", "18"), "wa2-"
+            ),
+        )
+        grants = [
+            r
+            for r in self.decision_records()
+            if r["event"] == "approval_granted"
+            and r.get("condition") == "R1"
+            and r.get("seed") == "18"
+        ]
+        self.assertEqual(len(grants), 1)
+        self.assertEqual(self.row_for("R1", "18")["attempts_used"], 1)
+
+    def test_crash_after_post_answer_no_declines_once_with_zero_attempts(self):
+        terminal = scripted_terminal([{"decision": "no"}])
+        deps = self.deps("complete", terminal)
+        with self.assertRaises(_CrashAfterPostAnswer):
+            drive(state.initial_state(), _crash_after_post_answer(deps, "R1", "18"))
+        drive(
+            state.initial_state(),
+            self._restart_deps(
+                FIXTURE_CONFIG, _never_reprompted_terminal("R1", "18"), "wn1-"
+            ),
+        )
+        events = [
+            r["event"]
+            for r in self.decision_records()
+            if r.get("condition") == "R1" and r.get("seed") == "18"
+        ]
+        self.assertEqual(events.count("launch_declined"), 1)
+        self.assertEqual(events.count("pair_declined"), 1)
+        self.assertEqual(
+            [
+                r
+                for r in self.attempt_records()
+                if r.get("condition") == "R1"
+                and r.get("seed") == "18"
+                and r["event"] == "launch_registered"
+            ],
+            [],
+        )
+        row = self.row_for("R1", "18")
+        self.assertEqual(row["status"], "declined")
+        self.assertEqual(row["attempts_used"], 0)
+        self.assertEqual(row["declined_launches"], 1)
+        # double restart stays idempotent
+        drive(
+            state.initial_state(),
+            self._restart_deps(
+                FIXTURE_CONFIG, _never_reprompted_terminal("R1", "18"), "wn2-"
+            ),
+        )
+        events = [
+            r["event"]
+            for r in self.decision_records()
+            if r.get("condition") == "R1" and r.get("seed") == "18"
+        ]
+        self.assertEqual(events.count("launch_declined"), 1)
+        self.assertEqual(events.count("pair_declined"), 1)
+
+    def test_crash_after_post_answer_edit_replays_the_exact_guidance(self):
+        terminal = scripted_terminal([{"decision": "edit", "guidance": [GUIDANCE_A]}])
+        deps = self.deps("complete", terminal)
+        with self.assertRaises(_CrashAfterPostAnswer):
+            drive(state.initial_state(), _crash_after_post_answer(deps, "R1", "18"))
+        calls = []
+
+        def serving_terminal(view):
+            calls.append(dict(view))
+            return {"decision": "yes"}
+
+        drive(
+            state.initial_state(),
+            self._restart_deps(FIXTURE_CONFIG, serving_terminal, "we1-"),
+        )
+        # the answered round-0 prompt NEVER repeated; the follow-up is a new
+        # question that already observes the replayed guidance
+        pair_calls = [c for c in calls if c["condition"] == "R1" and c["seed"] == "18"]
+        self.assertEqual([c["proposal_round"] for c in pair_calls], [1])
+        self.assertEqual(pair_calls[0]["current_guidance"], [GUIDANCE_A])
+        edits = [
+            r
+            for r in self.decision_records()
+            if r["event"] == "approval_edit"
+            and r.get("condition") == "R1"
+            and r.get("seed") == "18"
+        ]
+        self.assertEqual(len(edits), 1)
+        self.assertEqual(edits[0]["guidance"], [GUIDANCE_A])
+        # the launch carries exactly the replayed guidance, digest-bound
+        launch = self.launch("r1-agent-01-seed-18-attempt-01")
+        data = Path(launch["context_path"]).read_bytes()
+        parsed = json.loads(data)
+        self.assertEqual([g["text"] for g in parsed["guidance"]], [GUIDANCE_A])
+        self.assertEqual(launch["context_digest"], strategy_context.sha256_digest(data))
+        row = self.row_for("R1", "18")
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["attempts_used"], 1)
 
 
 if __name__ == "__main__":
