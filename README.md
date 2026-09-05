@@ -87,7 +87,7 @@ python3 -m harness --config tests/fixtures/harness/unit6-acceptance-config.json 
     --runner fake --non-interactive --root /tmp/harness-demo
 ```
 
-Exit codes: 0 complete, 1 fail-closed (evidence paths printed), 2 usage/config. Re-running the same tournament id resumes under the recovery contracts and never reruns receipt-bound work. R1 approvals are injectable: `--non-interactive` (auto-decline), `--answers FILE` (scripted), or the default stdin terminal. Full operator contract — Luna live-acceptance procedure, artifact layout, R1/R2/R3 semantics, recovery windows — lives in `docs/sdd/phase6-langgraph-harness.md`.
+Exit codes: 0 complete, 1 fail-closed (evidence paths printed), 2 usage/config. Configs are fail-closed pinned to the executable execution profile (budget 100, core tool grants, K=3, closed per-provider/model `generation` contract) — declared-but-unexecuted conditions are rejected before any artifact exists. Re-running the same tournament id resumes under the recovery contracts and never reruns receipt-bound work. R1 approvals are injectable: `--non-interactive` (auto-decline), `--answers FILE` (scripted), or the default stdin terminal. Full operator contract — execution-profile table, Luna live-acceptance procedure, artifact layout, R1/R2/R3 semantics, recovery windows — lives in `docs/sdd/phase6-langgraph-harness.md`.
 
 What the harness guarantees, and what it does not:
 

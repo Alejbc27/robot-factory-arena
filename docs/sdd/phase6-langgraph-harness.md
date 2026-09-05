@@ -48,8 +48,39 @@ installed and otherwise uses an identical stdlib walker over the same node/route
 functions (`harness.driver.run_tournament` / `drive`). Both paths are held
 byte-identical by the acceptance tests.
 
-## What the fake acceptance proves
+## Execution profile (pinned, fail-closed)
 
+The frozen config may only declare conditions the run actually executes. The
+subprocess adapter passes **only** seed/provider/model/artifacts-root/
+strategy-context to the core, the core always executes its own locked constants
+(`GRANTS = ("move", "pick", "place")`, `BUDGET = 100`), and each provider adapter
+sends one fixed payload. Declaring anything else would freeze an experimental
+identity that cannot produce the recorded score — so `validate_config` pins the
+exact executable profile and fails closed **before any tournament artifact is
+written** (rejections exit `2`):
+
+| Frozen field | Pinned value |
+|---|---|
+| `budget` | `100` (the core's locked BUDGET) |
+| `tool_grants` | `["move", "pick", "place"]` (exact order/content of the core's GRANTS) |
+| `k_attempts` | `3` (this release runs exactly K=3) |
+| `fault_config` | `null` (no fault configuration is executed) |
+
+`generation` is a **closed per-(provider, model) contract** mirroring what each
+adapter really sends (`harness.tournament.GENERATION_PROFILES`):
+
+| Provider / model | `generation` | Why |
+|---|---|---|
+| `fake` / `fake-v1` | `{}` | the deterministic fake sends no generation parameters (`{}` = adapter defaults, nothing sent) |
+| `openai` / `gpt-5.6-luna` | `{"reasoning_effort": "none"}` | the adapter hardcodes exactly this payload for this model |
+| `glm` / `glm-5.3-flash` | `{}` | the GLM adapter sends no generation parameters |
+
+Any other provider/model pair, or any other `generation` payload for a supported
+pair, is rejected with the supported table named in the error. Widen these tables
+only when the core or an adapter actually executes the new condition.
+
+## What the fake acceptance proves
+    
 `python3 -m unittest tests.test_harness_acceptance` (or the command above) runs one
 full R1+R2+R3 tournament over seeds 18/24/30 with K=3 using the fake wrapper, which
 writes valid canonical receipt triples (`receipt.json`, `llm/provider-run.json`,
@@ -82,11 +113,13 @@ The fake acceptance costs nothing and contacts no network.
    config, answers file, or any artifact; the evidence loader's secret scan fails
    closed if a secret pattern ever reaches an artifact.
 2. **Write a frozen tournament config** with the pinned provider/model, e.g.
-   `provider: "openai"`, `model: "gpt-5.6-luna"`, `generation` carrying the
-   AMEND-4A-2 Luna settings (including `reasoning_effort: none`), the standard frozen
-   seeds `[18, 24, 30]`, conditions, `k_attempts`, and a **new unique**
-   `tournament_id`. Keep provider/model/generation constant across R1/R2/R3 — one
-   tournament freezes one provider identity.
+   `provider: "openai"`, `model: "gpt-5.6-luna"`, `generation` set to **exactly**
+   `{"reasoning_effort": "none"}` — the closed Luna profile the adapter actually
+   sends (any other generation payload is rejected; see the execution-profile
+   table above) — plus the standard frozen seeds `[18, 24, 30]`, conditions,
+   `k_attempts: 3`, and a **new unique** `tournament_id`. Keep
+   provider/model/generation constant across R1/R2/R3 — one tournament freezes one
+   provider identity.
 3. **Run it**:
 
    ```text
@@ -116,8 +149,10 @@ at ≈$0.0194–$0.0205 per launch at list prices ($0.20/M input, $1.20/M output
 nine-pair tournament at K=3 is 9–27 launches, i.e. on the order of **$0.20–$0.55**
 depending on retries; declining R1 pairs removes three launches. Treat these as
 estimates recomputed from provider evidence, never as a price guarantee. GLM
-(`glm-4.5`) remains optional, non-gating smoke coverage via the same core provider
-path.
+(`glm-5.3-flash` — the model with the recorded live acceptance run;
+`glm-4.5` appears only in unit tests and has never been live-accepted) remains
+optional, non-gating smoke coverage via the same core provider path, with
+`generation: {}` (the GLM adapter sends no generation parameters).
 
 ## Guarantees — and the two binding precision notes
 
