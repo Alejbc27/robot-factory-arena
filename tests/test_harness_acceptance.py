@@ -22,7 +22,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness import logs, state, strategy_context, tournament
+from harness import (
+    logs,
+    state,
+    strategy_context,
+    subprocess_adapter,
+    tournament,
+)
 
 LANGGRAPH_AVAILABLE = importlib.util.find_spec("langgraph") is not None
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -235,6 +241,11 @@ class TestExecutionProfileBinding(Base):
         path.write_bytes(strategy_context.canonical_json_bytes(config))
         return path
 
+    def _validated_config(self, **changes):
+        config = json.loads(self._config_with(**changes).read_bytes())
+        tournament.validate_config(config)
+        return config
+
     def _assert_rejected(self, changes, fragment):
         path = self._config_with(**changes)
         code, _, err = self.main(self.fake_argv(config_path=path))
@@ -275,17 +286,38 @@ class TestExecutionProfileBinding(Base):
             },
             "generation",
         )
-        # ...and the exact frozen profile is accepted end-to-end (the fake
-        # wrapper fabricates evidence from the frozen argv, so the run
-        # stays offline while proving normal command construction).
-        path = self._config_with(
+        # ...and the exact frozen profile is legal ONLY for the CORE
+        # runner: config construction and the exact command bytes are
+        # asserted — never a completed fake tournament carrying a real
+        # provider label (the fake wrapper would forge OpenAI evidence
+        # for a run that never happened).
+        config = self._validated_config(
             provider="openai",
             model="gpt-5.6-luna",
             generation={"reasoning_effort": "none"},
         )
-        code, _, err = self.main(self.fake_argv(config_path=path))
-        self.assertEqual(code, 0, err)
-        self.assertEqual(len(self.rows(config=json.loads(path.read_bytes()))), 9)
+        tournament.validate_runner_binding(config, "core")
+        self.assertEqual(
+            subprocess_adapter.build_command(
+                config, 18, "/tmp/snapshots/strategy-context-000.json", "/tmp/core"
+            ),
+            [
+                sys.executable,
+                "-m",
+                "robot_factory_arena.cli",
+                "run",
+                "--seed",
+                "18",
+                "--provider",
+                "openai",
+                "--model",
+                "gpt-5.6-luna",
+                "--artifacts-root",
+                "/tmp/core",
+                "--strategy-context",
+                "/tmp/snapshots/strategy-context-000.json",
+            ],
+        )
 
     def test_glm_profile_is_the_defaults_sentinel(self):
         # any generation payload is declared-but-never-sent by the GLM
@@ -300,16 +332,61 @@ class TestExecutionProfileBinding(Base):
             "generation",
         )
         # ...then the live-acceptance model with {} (no generation
-        # parameters sent) runs green.
-        path = self._config_with(provider="glm", model="glm-5.3-flash", generation={})
-        code, _, err = self.main(self.fake_argv(config_path=path))
-        self.assertEqual(code, 0, err)
+        # parameters sent) validates for the CORE runner and locks its
+        # exact command bytes — no fake tournament ever carries the GLM
+        # label.
+        config = self._validated_config(
+            provider="glm", model="glm-5.3-flash", generation={}
+        )
+        tournament.validate_runner_binding(config, "core")
+        self.assertEqual(
+            subprocess_adapter.build_command(
+                config, 24, "/tmp/snapshots/strategy-context-000.json", "/tmp/core"
+            ),
+            [
+                sys.executable,
+                "-m",
+                "robot_factory_arena.cli",
+                "run",
+                "--seed",
+                "24",
+                "--provider",
+                "glm",
+                "--model",
+                "glm-5.3-flash",
+                "--artifacts-root",
+                "/tmp/core",
+                "--strategy-context",
+                "/tmp/snapshots/strategy-context-000.json",
+            ],
+        )
 
     def test_unsupported_provider_model_pair_is_rejected(self):
         path = self._config_with(provider="openai", model="glm-5.3-flash")
         code, _, err = self.main(self.fake_argv(config_path=path))
         self.assertEqual(code, 2, err)
         self.assertIn("no frozen execution profile", err)
+        self.assertFalse((self.root / "artifacts").exists())
+
+    def test_fake_runner_with_a_real_provider_label_is_rejected(self):
+        # the fake wrapper fabricates provider evidence: a luna-labeled
+        # fake tournament would forge an OpenAI run that never happened.
+        path = self._config_with(
+            provider="openai",
+            model="gpt-5.6-luna",
+            generation={"reasoning_effort": "none"},
+        )
+        code, _, err = self.main(self.fake_argv(config_path=path))
+        self.assertEqual(code, 2, err)
+        self.assertIn("not bound", err)
+        self.assertFalse((self.root / "artifacts").exists())
+
+    def test_core_runner_with_the_fake_identity_is_rejected(self):
+        code, _, err = self.main(
+            ["--config", str(FIXTURE), "--runner", "core", "--non-interactive"]
+        )
+        self.assertEqual(code, 2, err)
+        self.assertIn("not bound", err)
         self.assertFalse((self.root / "artifacts").exists())
 
     def test_supported_fake_profile_keeps_the_acceptance_run_green(self):
@@ -322,6 +399,39 @@ class TestExecutionProfileBinding(Base):
         code, _, err = self.main(self.fake_argv())
         self.assertEqual(code, 0, err)
         self.assertEqual(len(self.rows()), 9)
+
+
+class TestConfigTypeSafety(Base):
+    """PR #26 final review remediation: hostile-but-valid-JSON configs must
+    exit 2 through the domain error — never a TypeError crash — and must not
+    create any artifact."""
+
+    def _assert_clean_usage_exit(self, raw_bytes):
+        path = self.root / "hostile-config.json"
+        path.write_bytes(raw_bytes)
+        code, _, err = self.main(["--config", str(path)])
+        self.assertEqual(code, 2, err)
+        self.assertIn("invalid tournament config", err)
+        self.assertNotIn("Traceback", err)
+        self.assertFalse(
+            (self.root / "artifacts").exists(),
+            "rejected configs must not create any tournament artifacts",
+        )
+
+    def test_unhashable_provider_list_exits_two(self):
+        config = json.loads(FIXTURE.read_bytes())
+        config["provider"] = []
+        self._assert_clean_usage_exit(strategy_context.canonical_json_bytes(config))
+
+    def test_unhashable_model_object_exits_two(self):
+        config = json.loads(FIXTURE.read_bytes())
+        config["model"] = {"x": 1}
+        self._assert_clean_usage_exit(strategy_context.canonical_json_bytes(config))
+
+    def test_non_object_config_exits_two(self):
+        for raw in (b"[1, 2, 3]", b'"config"', b"7", b"null", b"true"):
+            with self.subTest(raw=raw):
+                self._assert_clean_usage_exit(raw)
 
 
 class TestFakeAcceptance(Base):
@@ -455,7 +565,12 @@ class TestFakeAcceptance(Base):
         config["verification_version"] = "2"
         path = self.root / "drift.json"
         path.write_bytes(strategy_context.canonical_json_bytes(config))
-        code, _, err = self.main(["--config", str(path)])
+        # --runner fake is required to pass the new binding gate, so the
+        # probe still proves DRIFT specifically (a runner mismatch would
+        # exit 2 before drift is ever reached).
+        code, _, err = self.main(
+            ["--config", str(path), "--runner", "fake", "--non-interactive"]
+        )
         self.assertEqual(code, 1)
         self.assertIn("drift", err.lower())
 

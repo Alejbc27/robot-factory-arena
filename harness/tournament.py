@@ -64,18 +64,69 @@ GENERATION_PROFILES = {
     ("glm", "glm-5.3-flash"): {},
 }
 
+#: Closed runner binding per frozen ``(provider, model)`` identity: the
+#: fake wrapper fabricates provider evidence, so it may only fabricate it
+#: for the fake identity — stamped onto a real provider/model it would
+#: forge artifacts for a run that never happened — and the real core
+#: runner never executes the fake identity. Widen ONLY when a real
+#: provider identity is live-accepted.
+RUNNER_BINDINGS = {
+    "fake": frozenset({("fake", "fake-v1")}),
+    "core": frozenset({("openai", "gpt-5.6-luna"), ("glm", "glm-5.3-flash")}),
+}
+
+
+def validate_runner_binding(config, runner_name):
+    """Fail-closed runner <-> frozen (provider, model) binding.
+
+    Enforced by the CLI after :func:`validate_config` and BEFORE any
+    tournament artifact is created (a mismatch is a usage error, exit 2).
+    """
+    if not (_nonempty(config.get("provider")) and _nonempty(config.get("model"))):
+        raise TournamentError(
+            "runner binding requires a validated config (validate_config first)"
+        )
+    legal = RUNNER_BINDINGS.get(runner_name)
+    if legal is None:
+        raise TournamentError(
+            f"unknown runner: {runner_name!r}; "
+            f"supported runners: {sorted(RUNNER_BINDINGS)}"
+        )
+    if (config["provider"], config["model"]) not in legal:
+        supported = "; ".join(
+            f"{name} -> " + " and ".join(f"{p}/{m}" for p, m in sorted(pairs))
+            for name, pairs in sorted(RUNNER_BINDINGS.items())
+        )
+        raise TournamentError(
+            f"runner {runner_name!r} is not bound to provider/model "
+            f"{config['provider']!r}/{config['model']!r}; the fake wrapper "
+            f"only fabricates evidence for the fake identity and the core "
+            f"runner only executes live-accepted provider identities; "
+            f"supported (closed contract): {supported}"
+        )
+
 
 def _nonempty(value):
     return isinstance(value, str) and value != ""
 
 
 def validate_config(config):
+    if not isinstance(config, dict):
+        raise TournamentError(
+            f"config must be a JSON object, got {type(config).__name__}"
+        )
     missing = [field for field in FROZEN_FIELDS if field not in config]
     if missing:
         raise TournamentError(f"missing frozen fields: {missing}")
     extra = sorted(set(config) - set(FROZEN_FIELDS))
     if extra:
         raise TournamentError(f"unknown config fields: {extra}")
+    for field in ("provider", "model"):
+        if not isinstance(config[field], str):
+            raise TournamentError(
+                f"frozen field {field!r} must be a string, "
+                f"got {type(config[field]).__name__}"
+            )
     profile = GENERATION_PROFILES.get((config["provider"], config["model"]))
     if profile is None:
         supported = ", ".join(

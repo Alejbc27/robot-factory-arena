@@ -188,6 +188,7 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
         config = load_config(args.config)
+        tournament.validate_runner_binding(config, args.runner)
     except OSError as exc:
         print(f"harness: cannot read tournament config: {exc}", file=sys.stderr)
         return 2

@@ -178,6 +178,94 @@ class TestTournamentFreeze(Base):
             self.assertIn(name, layout)
 
 
+class TestRunnerBinding(Base):
+    """PR #26 final review remediation: the runner is bound to the frozen
+    (provider, model) identity. The fake wrapper fabricates provider evidence,
+    so it must never carry a real provider/model label (it would forge artifacts
+    for a run that never happened), and the core runner never executes the
+    fake identity."""
+
+    def test_binding_table_is_the_closed_contract(self):
+        self.assertEqual(
+            tournament.RUNNER_BINDINGS,
+            {
+                "fake": frozenset({("fake", "fake-v1")}),
+                "core": frozenset(
+                    {("openai", "gpt-5.6-luna"), ("glm", "glm-5.3-flash")}
+                ),
+            },
+            "the closed runner contract must mirror the real providers",
+        )
+
+    def test_legal_bindings_pass_after_config_validation(self):
+        for runner, provider, model in (
+            ("fake", "fake", "fake-v1"),
+            ("core", "openai", "gpt-5.6-luna"),
+            ("core", "glm", "glm-5.3-flash"),
+        ):
+            with self.subTest(runner=runner, provider=provider, model=model):
+                config = dict(
+                    BASE_CONFIG,
+                    tournament_id=f"tournament-binding-{provider}",
+                    provider=provider,
+                    model=model,
+                    generation=tournament.GENERATION_PROFILES[(provider, model)],
+                )
+                tournament.validate_config(config)
+                tournament.validate_runner_binding(config, runner)
+
+    def test_mismatched_runner_identity_fails_closed(self):
+        for runner, provider, model in (
+            ("fake", "openai", "gpt-5.6-luna"),
+            ("fake", "glm", "glm-5.3-flash"),
+            ("core", "fake", "fake-v1"),
+        ):
+            with self.subTest(runner=runner, provider=provider, model=model):
+                config = dict(
+                    BASE_CONFIG,
+                    provider=provider,
+                    model=model,
+                    generation=tournament.GENERATION_PROFILES[(provider, model)],
+                )
+                with self.assertRaises(tournament.TournamentError) as caught:
+                    tournament.validate_runner_binding(config, runner)
+                message = str(caught.exception)
+                self.assertIn("not bound", message)
+                self.assertIn("supported", message)
+
+    def test_unknown_runner_name_fails_closed(self):
+        with self.assertRaises(tournament.TournamentError):
+            tournament.validate_runner_binding(BASE_CONFIG, "bogus")
+
+    def test_binding_requires_a_validated_config(self):
+        # defense in depth: the binding must never raise TypeError even when
+        # called out of contract with an unvalidated hostile config.
+        with self.assertRaises(tournament.TournamentError):
+            tournament.validate_runner_binding(dict(BASE_CONFIG, provider=[]), "fake")
+
+
+class TestConfigTypeValidation(Base):
+    """PR #26 final review remediation: provider/model types are validated
+    BEFORE the (provider, model) profile lookup, so valid-JSON hostile shapes
+    raise the domain error instead of TypeError (unhashable type)."""
+
+    def test_unhashable_provider_raises_tournament_error(self):
+        with self.assertRaises(tournament.TournamentError) as caught:
+            tournament.validate_config(dict(BASE_CONFIG, provider=[]))
+        self.assertIn("must be a string", str(caught.exception))
+
+    def test_non_string_model_raises_tournament_error(self):
+        with self.assertRaises(tournament.TournamentError) as caught:
+            tournament.validate_config(dict(BASE_CONFIG, model={"x": 1}))
+        self.assertIn("must be a string", str(caught.exception))
+
+    def test_non_object_config_raises_tournament_error(self):
+        for shape in ([BASE_CONFIG], "config", 7, None, True):
+            with self.subTest(shape=type(shape).__name__):
+                with self.assertRaises(tournament.TournamentError):
+                    tournament.validate_config(shape)
+
+
 class TestStateReducers(Base):
     def test_append_reducers_are_pure_and_append_only(self):
         st = state.initial_state()
