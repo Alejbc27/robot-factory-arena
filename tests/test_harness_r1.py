@@ -66,6 +66,12 @@ def make_runner(script, tag="u4-"):
             return subprocess_adapter.RunnerResult(1, False, stdout, b"boom")
         if action == "timeout":
             return subprocess_adapter.RunnerResult(None, True, stdout, b"")
+        if action == "valid-timeout":
+            _write_triple(root, seed, f"exec-{tag}{n:02d}", "completed", 100)
+            return subprocess_adapter.RunnerResult(None, True, stdout, b"")
+        if action == "valid-exit1":
+            _write_triple(root, seed, f"exec-{tag}{n:02d}", "completed", 100)
+            return subprocess_adapter.RunnerResult(1, False, stdout, b"boom")
         _write_triple(root, seed, f"exec-{tag}{n:02d}", outcome, score)
         return subprocess_adapter.RunnerResult(0, False, stdout, b"")
 
@@ -316,6 +322,370 @@ class TestGraphCompile(Base):
     def test_build_graph_compiles_with_r1_approval(self):
         compiled = graph.build_graph(self.deps("complete", interruption.auto_decline))
         self.assertTrue(hasattr(compiled, "invoke"))
+
+
+class TestGuidancePipeline(Base):
+    """Attempt-2 slice: approved guidance reaches a launch ONLY as canonical
+    frozen StrategyContext bytes. The side-channel door stays shut end to end,
+    the mirror validator rejects every invalid canonical shape, and a revision
+    supersedes the prior guidance without ever resurrecting it."""
+
+    def test_canonical_snapshot_bytes_match_the_full_context_object(self):
+        seam_config = dict(FIXTURE_CONFIG, tournament_id="tournament-unit4-guidance")
+        tournament.validate_config(seam_config)
+        terminal = scripted_terminal(
+            [{"decision": "edit", "guidance": [GUIDANCE_A]}, {"decision": "yes"}]
+        )
+        drive(
+            state.initial_state(),
+            self.deps("complete", terminal, config=seam_config),
+        )
+        snapshot = self.layout(seam_config)["contexts"] / "strategy-context-003.json"
+        data = snapshot.read_bytes()
+        context = interruption.context_from_guidance_records(
+            seam_config["tournament_id"],
+            interruption.guidance_records([GUIDANCE_A]),
+        )
+        self.assertEqual(
+            data,
+            strategy_context.canonical_json_bytes(
+                strategy_context.normalize_context(context)
+            ),
+        )
+        parsed = json.loads(data)
+        self.assertEqual(parsed["source_tournament_id"], "tournament-unit4-guidance")
+        self.assertEqual(parsed["discoveries"], [])
+        self.assertEqual(len(parsed["guidance"]), 1)
+        self.assertEqual(
+            parsed["guidance"][0],
+            {
+                "guidance_id": "guidance-0001",
+                "author_id": "human",
+                "guidance_ordinal": 0,
+                "text": GUIDANCE_A,
+            },
+        )
+        # the launch and its frozen event both carry the snapshot digest
+        launch = self.launch("r1-agent-01-seed-18-attempt-01", seam_config)
+        self.assertEqual(launch["context_digest"], strategy_context.sha256_digest(data))
+        event = next(
+            r
+            for r in self.decision_records(seam_config)
+            if r["event"] == "context_snapshot_frozen" and r.get("condition") == "R1"
+        )
+        self.assertEqual(event["context_digest"], launch["context_digest"])
+        self.assertEqual(event["source"], "r1-guidance")
+        # guidance changes identity: the R2 null snapshot digest differs
+        null_launch = self.launch("r2-agent-01-seed-18-attempt-01", seam_config)
+        self.assertNotEqual(null_launch["context_digest"], launch["context_digest"])
+
+    def test_side_channel_answer_cannot_reach_the_pipeline_end_to_end(self):
+        terminal = scripted_terminal([{"decision": "yes", "guidance": ["poison"]}])
+        with self.assertRaises(interruption.InterruptionError):
+            drive(state.initial_state(), self.deps("complete", terminal))
+        # only the three R2 first-route null snapshots exist; the R1 proposal
+        # never froze, granted, or launched anything
+        contexts = sorted(p.name for p in self.layout()["contexts"].iterdir())
+        self.assertEqual(
+            contexts,
+            [
+                "strategy-context-000.json",
+                "strategy-context-001.json",
+                "strategy-context-002.json",
+            ],
+        )
+        sources = [
+            r["source"]
+            for r in self.decision_records()
+            if r["event"] == "context_snapshot_frozen"
+        ]
+        self.assertEqual(sources, ["null-first-route"] * 3)
+        grants = [
+            r for r in self.decision_records() if r["event"] == "approval_granted"
+        ]
+        self.assertEqual(grants, [])
+        self.assertEqual(
+            [
+                r
+                for r in self.attempt_records()
+                if r.get("condition") == "R1" and r["event"] == "launch_registered"
+            ],
+            [],
+        )
+
+    def test_invalid_canonical_shapes_are_rejected_by_the_mirror_validator(self):
+        record = interruption.guidance_records(["ok"])[0]
+        for mutation in (
+            {"guidance_ordinal": -1},
+            {"guidance_ordinal": True},
+            {"text": ""},
+            {"exploit": "prompt-injection"},
+        ):
+            bad = dict(record, **mutation)
+            with self.assertRaises(strategy_context.ContextError):
+                interruption.context_from_guidance_records(
+                    FIXTURE_CONFIG["tournament_id"], [bad]
+                )
+        good = interruption.build_guidance_context(
+            FIXTURE_CONFIG["tournament_id"], ["ok"]
+        )
+        assert good is not None  # static narrowing; the runtime result is a context
+        self.assertEqual(good["guidance"][0]["guidance_id"], "guidance-0001")
+
+    def test_revision_supersedes_prior_guidance_and_never_resurrects(self):
+        guidance_b = "Extract via the loading dock instead"
+        terminal = scripted_terminal(
+            [
+                {"decision": "edit", "guidance": [GUIDANCE_A]},
+                {"decision": "edit", "guidance": [guidance_b]},
+                {"decision": "yes"},
+            ]
+        )
+        drive(state.initial_state(), self.deps("complete", terminal))
+        # both revisions stay in the append-only log as history
+        edits = [
+            r["guidance"]
+            for r in self.decision_records()
+            if r.get("event") == "approval_edit" and r.get("seed") == "18"
+        ]
+        self.assertEqual(edits, [[GUIDANCE_A], [guidance_b]])
+        # the frozen snapshot contains ONLY the latest revision
+        data = (self.layout()["contexts"] / "strategy-context-003.json").read_bytes()
+        parsed = json.loads(data)
+        self.assertEqual([g["text"] for g in parsed["guidance"]], [guidance_b])
+        launch = self.launch("r1-agent-01-seed-18-attempt-01")
+        self.assertEqual(launch["context_digest"], strategy_context.sha256_digest(data))
+        # different approved guidance means a different launch identity: the
+        # no-guidance pair freezes the canonical null digest
+        null_launch = self.launch("r1-agent-01-seed-24-attempt-01")
+        self.assertEqual(
+            null_launch["context_digest"], strategy_context.sha256_digest(b"null")
+        )
+        self.assertNotEqual(launch["context_digest"], null_launch["context_digest"])
+
+
+class TestR1R2Coexistence(Base):
+    """Attempt-2 slice: R1 and R2 share one deterministic work queue — same
+    seeds, same queue order, zero cross-contamination in either direction."""
+
+    def _drive_two_tournaments(self, yes_answers):
+        yes_config = dict(FIXTURE_CONFIG, tournament_id="tournament-unit4-coexist-yes")
+        no_config = dict(FIXTURE_CONFIG, tournament_id="tournament-unit4-coexist-no")
+        for config in (yes_config, no_config):
+            tournament.validate_config(config)
+        drive(
+            state.initial_state(),
+            self.deps(
+                "complete", scripted_terminal(list(yes_answers)), config=yes_config
+            ),
+        )
+        drive(
+            state.initial_state(),
+            self.deps("complete", decline_terminal(), config=no_config),
+        )
+        return yes_config, no_config
+
+    def test_r2_rows_byte_identical_between_guidance_and_decline_runs(self):
+        yes_config, no_config = self._drive_two_tournaments(
+            [{"decision": "edit", "guidance": [GUIDANCE_A]}, {"decision": "yes"}] * 3
+        )
+
+        def r2_rows(config):
+            return [r for r in self.rows(config) if r["condition"] == "R2"]
+
+        self.assertEqual(
+            strategy_context.canonical_json_bytes(r2_rows(yes_config)),
+            strategy_context.canonical_json_bytes(r2_rows(no_config)),
+        )
+        for config in (yes_config, no_config):
+            deferred = [
+                r["conditions"]
+                for r in self.decision_records(config)
+                if r["event"] == "routes_deferred"
+            ]
+            self.assertEqual(deferred, [["R3"]])
+            approvals = [
+                r
+                for r in self.decision_records(config)
+                if r.get("condition") == "R2"
+                and r["event"]
+                in ("approval_edit", "approval_granted", "launch_declined")
+            ]
+            self.assertEqual(approvals, [])
+        # the R1 side genuinely differs: a granted launch vs an explicit decline
+        self.assertEqual(self.row_for("R1", "18", yes_config)["attempts_used"], 1)
+        self.assertEqual(self.row_for("R1", "18", no_config)["attempts_used"], 0)
+
+
+class TestLaunchWindowRestart(Base):
+    """Attempt-2 slice: a crash inside the R1 launch window resumes under the
+    Unit-3 reconstruction contracts — bind or new ordinal, the same attempt_id
+    is never rerun, and a standing grant is never re-prompted."""
+
+    def _walk(self, deps, approval, crash=None):
+        """Sequential drive() walk over the exact build_graph topology;
+        ``crash`` = (condition, seed, step) aborts right after that step for
+        that pair, simulating the launch-window interruption."""
+        steps = (
+            ("merge", graph.node_merge_and_freeze_context),
+            ("register", graph.node_register_launch),
+            ("launch", graph.node_launch_subprocess),
+            ("collect", graph.node_collect_and_bind_evidence),
+        )
+        value = state.initial_state()
+        value = graph.node_freeze_tournament_config(value, deps)
+        value = graph.node_assign_work(value, deps)
+        value = graph.node_plan_context(value, deps)
+        for _ in range(200):
+            plan_route = graph.route_after_plan(value, deps)
+            if plan_route == "approve_r1":
+                value = graph.node_approve_r1(value, deps)
+                approval_route = graph.route_after_approval(value)
+                if approval_route == "approve_r1":
+                    continue
+                if approval_route == "retry_or_finish":
+                    value = graph.node_retry_or_finish(value, deps)
+                else:
+                    for name, function in steps:
+                        value = function(value, deps)
+                        if crash == (value["condition"], value["semilla"], name):
+                            return value
+                    # fixed graph edge: collect always flows into retry_or_finish
+                    value = graph.node_retry_or_finish(value, deps)
+            elif plan_route == "collect_and_bind_evidence":
+                value = graph.node_collect_and_bind_evidence(value, deps)
+                value = graph.node_retry_or_finish(value, deps)
+            elif plan_route == "retry_or_finish":
+                value = graph.node_retry_or_finish(value, deps)
+            else:
+                for _, function in steps:
+                    value = function(value, deps)
+                # fixed graph edge: collect always flows into retry_or_finish
+                value = graph.node_retry_or_finish(value, deps)
+            retry_route = graph.route_after_retry(value)
+            if retry_route == "aggregate_leaderboard":
+                return graph.node_aggregate_leaderboard(value, deps)
+            if retry_route == "plan_context":
+                value = graph.node_plan_context(value, deps)
+        raise AssertionError("topology step budget exceeded")
+
+    def _prompted(self, terminal, condition, seed):
+        return [
+            c
+            for c in terminal.calls
+            if c["condition"] == condition and c["seed"] == seed
+        ]
+
+    def test_registration_window_crash_recovers_with_a_new_ordinal(self):
+        # K=2 so the recovery attempt exhausts the pair deterministically
+        config = dict(FIXTURE_CONFIG, k_attempts=2)
+        tournament.validate_config(config)
+        terminal = scripted_terminal([{"decision": "yes"}])
+        deps = self.deps("valid_then_timeout", terminal, config=config, tag="w1-")
+        self._walk(deps, terminal, crash=("R1", "18", "register"))
+        first_id = "r1-agent-01-seed-18-attempt-01"
+        # registered but never observed: the ambiguous launch window
+        self.assertEqual(
+            [
+                r["event"]
+                for r in self.attempt_records(config)
+                if r.get("attempt_id") == first_id
+            ],
+            ["launch_registered"],
+        )
+        # restart: the standing grant is replayed from the log, never
+        # re-prompted, and attempt-01 is never rerun — a NEW ordinal launches
+        restart_runner = make_runner("valid_then_timeout", tag="w2-")
+        restart_terminal = decline_terminal()
+        drive(
+            state.initial_state(),
+            graph.build_deps(
+                self.root, config, runner=restart_runner, approval=restart_terminal
+            ),
+        )
+        self.assertEqual(self._prompted(restart_terminal, "R1", "18"), [])
+        registered = [
+            r["attempt_id"]
+            for r in self.attempt_records(config)
+            if r.get("condition") == "R1"
+            and r.get("seed") == "18"
+            and r["event"] == "launch_registered"
+        ]
+        self.assertEqual(registered, [first_id, "r1-agent-01-seed-18-attempt-02"])
+        # explicit recovery evidence for the ambiguous window
+        recovery = [
+            r
+            for r in self.decision_records(config)
+            if r["event"] == "recovery" and r.get("attempt_id") == first_id
+        ]
+        self.assertEqual(len(recovery), 1)
+        unresolved = {
+            r["attempt_id"]: r["reason"]
+            for r in self.attempt_records(config)
+            if r.get("condition") == "R1"
+            and r.get("seed") == "18"
+            and r["event"] == "evidence_unresolved"
+        }
+        self.assertEqual(
+            unresolved,
+            {
+                first_id: "crash_window_unobserved",
+                "r1-agent-01-seed-18-attempt-02": "subprocess_timeout",
+            },
+        )
+        row = self.row_for("R1", "18", config)
+        self.assertEqual(row["status"], "evidence_invalid")
+        self.assertEqual(row["attempts_used"], 2)
+        self.assertIsNone(row["verified_score"])
+        # the pre-crash registration is preserved, never overwritten
+        self.assertTrue(
+            (self.layout(config)["attempts"] / first_id / "launch.json").exists()
+        )
+
+    def test_observation_window_crash_binds_the_same_attempt(self):
+        terminal = scripted_terminal([{"decision": "yes"}])
+        deps = self.deps("complete", terminal, tag="w1-")
+        self._walk(deps, terminal, crash=("R1", "18", "launch"))
+        first_id = "r1-agent-01-seed-18-attempt-01"
+        restart_terminal = decline_terminal()
+        drive(
+            state.initial_state(),
+            graph.build_deps(
+                self.root,
+                FIXTURE_CONFIG,
+                runner=make_runner("complete", tag="w2-"),
+                approval=restart_terminal,
+            ),
+        )
+        self.assertEqual(self._prompted(restart_terminal, "R1", "18"), [])
+        registered = [
+            r["attempt_id"]
+            for r in self.attempt_records()
+            if r.get("condition") == "R1"
+            and r.get("seed") == "18"
+            and r["event"] == "launch_registered"
+        ]
+        # the observed attempt binds its own evidence; no new ordinal, no rerun
+        self.assertEqual(registered, [first_id])
+        self.assertEqual(
+            [
+                r["attempt_id"]
+                for r in self.attempt_records()
+                if r.get("condition") == "R1"
+                and r.get("seed") == "18"
+                and r["event"] == "evidence_bound"
+            ],
+            [first_id],
+        )
+        # the observation window is NOT ambiguous: no recovery decision at all
+        self.assertEqual(
+            [r for r in self.decision_records() if r["event"] == "recovery"],
+            [],
+        )
+        row = self.row_for("R1", "18")
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["attempts_used"], 1)
+        self.assertEqual(row["verified_score"], 100)
 
 
 if __name__ == "__main__":
