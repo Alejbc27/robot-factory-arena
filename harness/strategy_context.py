@@ -44,8 +44,35 @@ class ContextError(ValueError):
     """A context snapshot or an audit-chain link failed validation."""
 
 
+def _reject_non_canonical(value):
+    """Deep mirror of the core canonical-JSON v0 contract (REQ-07).
+
+    Integers-only: every float is rejected (NaN/Inf included), object keys
+    must be strings, and unsupported types fail closed — byte-compatible
+    with ``robot_factory_arena.evidence.canonical`` without importing it.
+    """
+    if value is None or isinstance(value, (str, bool)):
+        return
+    if isinstance(value, float):
+        raise ContextError("canonical JSON rejects floating-point values")
+    if isinstance(value, int):
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_non_canonical(item)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ContextError("canonical JSON object keys must be strings")
+            _reject_non_canonical(item)
+        return
+    raise ContextError(f"unsupported value for canonical JSON: {type(value).__name__}")
+
+
 def canonical_json_bytes(value):
     """Byte-compatible mirror of the core canonical-JSON authority."""
+    _reject_non_canonical(value)
     return json.dumps(
         value,
         sort_keys=True,

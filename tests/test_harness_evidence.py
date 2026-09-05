@@ -230,8 +230,23 @@ class TestAdversarialMatrix(Base):
             ),
             (
                 "float_latency",
-                lambda: rewrite(
-                    provider_run, lambda v: v["requests"][0].update(latency_ms=42.5)
+                # the canonical mirror refuses to SERIALIZE floats, so the
+                # tampered artifact lands as raw non-canonical JSON bytes and
+                # the binder classifies it instead of the setup raising
+                lambda: provider_run.write_bytes(
+                    json.dumps(
+                        {
+                            **json.loads(provider_run.read_bytes()),
+                            "requests": [
+                                {
+                                    **json.loads(provider_run.read_bytes())["requests"][
+                                        0
+                                    ],
+                                    "latency_ms": 42.5,
+                                }
+                            ],
+                        }
+                    ).encode()
                 ),
                 "numeric",
             ),

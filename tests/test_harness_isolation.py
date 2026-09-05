@@ -122,6 +122,7 @@ class TestGateWorkflowSplit(unittest.TestCase):
             "tests.test_harness_leaderboard",
             "tests.test_harness_r1",
             "tests.test_harness_recovery",
+            "tests.test_harness_strategy_context",
         ):
             self.assertIn(module, job.group(0))
 

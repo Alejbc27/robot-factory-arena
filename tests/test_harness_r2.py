@@ -213,6 +213,12 @@ def drive(state_value, deps):
             state_value = graph.node_retry_or_finish(state_value, deps)
         elif plan_route == "retry_or_finish":
             state_value = graph.node_retry_or_finish(state_value, deps)
+        elif plan_route == "barrier_merge_r3":
+            state_value = graph.node_barrier_merge_r3(state_value, deps)
+            state_value = graph.node_register_launch(state_value, deps)
+            state_value = graph.node_launch_subprocess(state_value, deps)
+            state_value = graph.node_collect_and_bind_evidence(state_value, deps)
+            state_value = graph.node_retry_or_finish(state_value, deps)
         else:
             state_value = graph.node_merge_and_freeze_context(state_value, deps)
             state_value = graph.node_register_launch(state_value, deps)
@@ -282,24 +288,25 @@ class TestFreezeAndRouting(Base):
                 state.initial_state(), self.deps("complete", config=drifted)
             )
 
-    def test_r1_and_r2_are_implemented_and_r3_is_deferred(self):
+    def test_r1_r2_r3_are_all_implemented_without_deferrals(self):
         deps = self.deps("complete")
         state_value = graph.node_assign_work(state.initial_state(), deps)
-        # deterministic work queue: R2 pairs first, then R1; R3 defers (Unit 5)
-        self.assertEqual(state_value["work_count"], 6)
+        # deterministic work queue: R2 pairs, then R1, then the R3 fixed
+        # three-branch block (Unit 5 wires R3 in; nothing defers silently)
+        self.assertEqual(state_value["work_count"], 9)
         deferred = [
-            r["conditions"]
-            for r in deps.decision_log.records()
-            if r["event"] == "routes_deferred"
+            r for r in deps.decision_log.records() if r["event"] == "routes_deferred"
         ]
-        self.assertEqual(deferred, [["R3"]])
+        self.assertEqual(deferred, [])
 
 
 class TestR2Loop(Base):
     def test_happy_path_stops_at_first_completed_receipt(self):
         drive(state.initial_state(), self.deps("complete"))
         registered = [
-            r for r in self.attempt_records() if r["event"] == "launch_registered"
+            r
+            for r in self.attempt_records()
+            if r["event"] == "launch_registered" and r["condition"] == "R2"
         ]
         self.assertEqual(len(registered), 3)  # one per seed, never a retry
         rows = {r["seed"]: r for r in self.rows(None)}
@@ -336,7 +343,9 @@ class TestR2Loop(Base):
         registered = [
             r
             for r in self.attempt_records()
-            if r["event"] == "launch_registered" and r["seed"] == "18"
+            if r["event"] == "launch_registered"
+            and r["condition"] == "R2"
+            and r["seed"] == "18"
         ]
         self.assertEqual(
             [r["attempt_id"] for r in registered],
@@ -363,7 +372,9 @@ class TestR2Loop(Base):
         reasons = [
             r["reason"]
             for r in self.attempt_records()
-            if r["event"] == "evidence_unresolved" and r["seed"] == "18"
+            if r["event"] == "evidence_unresolved"
+            and r["condition"] == "R2"
+            and r["seed"] == "18"
         ]
         self.assertEqual(len(reasons), 3)
 
@@ -382,7 +393,9 @@ class TestR2Loop(Base):
         registered = [
             r
             for r in self.attempt_records()
-            if r["event"] == "launch_registered" and r["seed"] == "18"
+            if r["event"] == "launch_registered"
+            and r["condition"] == "R2"
+            and r["seed"] == "18"
         ]
         self.assertEqual(len(registered), 1)
         row = {r["seed"]: r for r in self.rows(None)}["18"]
@@ -426,7 +439,11 @@ class TestCrashWindow(Base):
             approval=interruption.auto_decline,
         )
         drive(state.initial_state(), deps2)
-        records = [r for r in self.attempt_records(deps2) if r.get("seed") == "18"]
+        records = [
+            r
+            for r in self.attempt_records(deps2)
+            if r.get("seed") == "18" and r.get("condition") == "R2"
+        ]
         registered = [
             r["attempt_id"] for r in records if r["event"] == "launch_registered"
         ]
@@ -442,7 +459,9 @@ class TestCrashWindow(Base):
             decisions.index("recovery"), decisions.index("leaderboard_written")
         )
         seed18_calls = [c for c in runner.calls if c[c.index("--seed") + 1] == "18"]
-        self.assertEqual(len(seed18_calls), 1)  # only the NEW attempt ever spawned
+        # one call for the R2 recovery attempt plus one for the R3 seed-18
+        # round-1 launch; the crashed attempt-01 itself is never re-spawned
+        self.assertEqual(len(seed18_calls), 2)
         rows = {r["seed"]: r for r in self.rows(deps2)}
         self.assertEqual(rows["18"]["attempts_used"], 2)
         # the crashed launch stays unresolved, so the row fails closed on usage
@@ -466,7 +485,9 @@ class TestSubprocessResultPrecedesBinding(Base):
         reasons = [
             r["reason"]
             for r in records
-            if r["event"] == "evidence_unresolved" and r["seed"] == "18"
+            if r["event"] == "evidence_unresolved"
+            and r["condition"] == "R2"
+            and r["seed"] == "18"
         ]
         self.assertEqual(reasons, ["subprocess_timeout"] * 3)
         row = {r["seed"]: r for r in self.rows(None)}["18"]
@@ -484,7 +505,9 @@ class TestSubprocessResultPrecedesBinding(Base):
         reasons = [
             r["reason"]
             for r in records
-            if r["event"] == "evidence_unresolved" and r["seed"] == "18"
+            if r["event"] == "evidence_unresolved"
+            and r["condition"] == "R2"
+            and r["seed"] == "18"
         ]
         self.assertEqual(reasons, ["subprocess_nonzero_exit"] * 3)
         row = {r["seed"]: r for r in self.rows(None)}["18"]
@@ -525,7 +548,11 @@ class TestRestartRecovery(Base):
             approval=interruption.auto_decline,
         )
         drive(state.initial_state(), deps2)
-        seed18 = [r for r in self.attempt_records(deps2) if r.get("seed") == "18"]
+        seed18 = [
+            r
+            for r in self.attempt_records(deps2)
+            if r.get("seed") == "18" and r.get("condition") == "R2"
+        ]
         registered = [
             r["attempt_id"] for r in seed18 if r["event"] == "launch_registered"
         ]
@@ -534,9 +561,10 @@ class TestRestartRecovery(Base):
         self.assertEqual(registered, ["r2-agent-01-seed-18-attempt-01"])
         bound = [r["attempt_id"] for r in seed18 if r["event"] == "evidence_bound"]
         self.assertEqual(bound, ["r2-agent-01-seed-18-attempt-01"])
-        self.assertEqual(
-            [c for c in restart.calls if c[c.index("--seed") + 1] == "18"], []
-        )
+        seed18_calls = [c for c in restart.calls if c[c.index("--seed") + 1] == "18"]
+        # exactly one spawn: the R3 seed-18 round-1 launch; the crashed r2
+        # attempt-01 is bound from its own evidence, never re-spawned
+        self.assertEqual(len(seed18_calls), 1)
         row = {r["seed"]: r for r in self.rows(deps2)}["18"]
         self.assertEqual(row["status"], "completed")
         self.assertEqual(row["attempts_used"], 1)
@@ -553,15 +581,20 @@ class TestRestartRecovery(Base):
             approval=interruption.auto_decline,
         )
         drive(state.initial_state(), deps2)
-        seed18 = [r for r in self.attempt_records(deps2) if r.get("seed") == "18"]
+        seed18 = [
+            r
+            for r in self.attempt_records(deps2)
+            if r.get("seed") == "18" and r.get("condition") == "R2"
+        ]
         registered = [
             r["attempt_id"] for r in seed18 if r["event"] == "launch_registered"
         ]
         # invariant: a bound terminal receipt is never repeated
         self.assertEqual(registered, ["r2-agent-01-seed-18-attempt-01"])
-        self.assertEqual(
-            [c for c in restart.calls if c[c.index("--seed") + 1] == "18"], []
-        )
+        seed18_calls = [c for c in restart.calls if c[c.index("--seed") + 1] == "18"]
+        # the one spawn is the R3 seed-18 round-1 launch, never the bound r2
+        # terminal receipt
+        self.assertEqual(len(seed18_calls), 1)
         terminals = [
             r
             for r in deps2.decision_log.records()
@@ -591,7 +624,9 @@ class TestRestartRecovery(Base):
         registered = [
             r["attempt_id"]
             for r in self.attempt_records(deps2)
-            if r["event"] == "launch_registered" and r["seed"] == "18"
+            if r["event"] == "launch_registered"
+            and r["condition"] == "R2"
+            and r["seed"] == "18"
         ]
         # invariant: the exact-K limit is never exceeded
         self.assertEqual(len(registered), 3)

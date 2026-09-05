@@ -1,4 +1,4 @@
-"""LangGraph topology for the R2/R1 tournament paths (design §6-§8).
+"""LangGraph topology for the R2/R1/R3 tournament paths (design §6-§8).
 
 This module is the ONLY LangGraph home in ``harness/``: it imports LangGraph
 lazily inside :func:`build_graph`, so every pure node/route function below is
@@ -50,6 +50,7 @@ from . import (
     strategy_context,
     subprocess_adapter,
     tournament,
+    versions,
 )
 from .checkpointing import (
     POST_ANSWER,
@@ -62,9 +63,9 @@ from .state import HarnessState, set_current
 
 # Deterministic implemented-condition order for the work queue: the
 # autonomous R2 reference pairs are deliberately grouped first so an
-# unattended batch completes them before reaching R1 prompts. R3 stays an
-# explicit deferral (Unit 5).
-IMPLEMENTED_CONDITIONS = ("R2", "R1")
+# unattended batch completes them before reaching R1 prompts, and the R3
+# fixed three-branch rounds run last (Unit 5).
+IMPLEMENTED_CONDITIONS = ("R2", "R1", "R3")
 AGENT_ID = "agent-01"
 
 _RETRY_ROUTES = {
@@ -75,6 +76,7 @@ _RETRY_ROUTES = {
 
 _PLAN_ROUTES = {
     "merge_and_freeze_context": "merge_and_freeze_context",
+    "barrier_merge_r3": "barrier_merge_r3",
     "collect_and_bind_evidence": "collect_and_bind_evidence",
     "retry_or_finish": "retry_or_finish",
     "approve_r1": "approve_r1",
@@ -104,6 +106,7 @@ class GraphDeps:
     tournament_root: Path
     attempt_log: logs.AppendOnlyLog
     decision_log: logs.AppendOnlyLog
+    discovery_log: logs.AppendOnlyLog
     checkpoints: checkpointing.CheckpointStore
     expectations: dict
     approval: Any
@@ -129,8 +132,10 @@ def build_deps(
     )
     attempt_log = logs.AppendOnlyLog(layout["attempt-log.jsonl"])
     decision_log = logs.AppendOnlyLog(layout["decision-log.jsonl"])
+    discovery_log = logs.AppendOnlyLog(layout["discoveries.jsonl"])
     attempt_log.verify()
     decision_log.verify()
+    discovery_log.verify()
     expectations = {}
     for record in decision_log.records():
         if record.get("event") == "expectations_recorded":
@@ -147,6 +152,7 @@ def build_deps(
         tournament_root=root / config["artifact_root"] / config["tournament_id"],
         attempt_log=attempt_log,
         decision_log=decision_log,
+        discovery_log=discovery_log,
         checkpoints=checkpointing.CheckpointStore(layout["checkpoints"]),
         expectations=expectations,
         approval=approval,
@@ -162,8 +168,24 @@ def work_items(config):
     ]
 
 
-def _attempt_id(condition, seed, ordinal):
-    return f"{condition.lower()}-{AGENT_ID}-seed-{seed}-attempt-{ordinal:02d}"
+def _agent_id(config, condition, seed):
+    """R3 owns one fixed agent per seed (agent-01->18, agent-02->24,
+    agent-03->30) with no duplicate ownership; every other condition runs the
+    single reference agent."""
+    if condition != "R3":
+        return AGENT_ID
+    try:
+        index = config["seeds"].index(int(seed))
+    except ValueError as exc:
+        raise HarnessGraphError(
+            f"R3 seed {seed!r} is not owned by any fixed branch"
+        ) from exc
+    return f"agent-{index + 1:02d}"
+
+
+def _attempt_id(config, condition, seed, ordinal):
+    agent = _agent_id(config, condition, seed)
+    return f"{condition.lower()}-{agent}-seed-{seed}-attempt-{ordinal:02d}"
 
 
 def _pair_launches(deps, condition, seed):
@@ -314,7 +336,8 @@ def node_freeze_tournament_config(state, deps):
 
 
 def node_assign_work(state, deps):
-    """R2/R1 are implemented; R3 defers explicitly, never silently (Unit 5)."""
+    """R2/R1/R3 are implemented; an unknown condition defers explicitly,
+    never silently."""
     deferred = [c for c in deps.config["conditions"] if c not in IMPLEMENTED_CONDITIONS]
     if deferred:
         deps.decision_log.append({"event": "routes_deferred", "conditions": deferred})
@@ -336,16 +359,20 @@ def node_plan_context(state, deps):
             "event": "context_planned",
             "condition": condition,
             "seed": seed,
-            "source": "r1-approval-pipeline"
-            if condition == "R1"
-            else "null-first-route",
+            "source": (
+                "r1-approval-pipeline"
+                if condition == "R1"
+                else "r3-round-barrier"
+                if condition == "R3"
+                else "null-first-route"
+            ),
         }
     )
     return set_current(
         state,
         condition=condition,
         semilla=seed,
-        agent_id=AGENT_ID,
+        agent_id=_agent_id(deps.config, condition, seed),
         intentos=ordinal,
         attempt_id=None,
         last_evidence=None,
@@ -503,7 +530,7 @@ def node_approve_r1(state, deps):
         "seed": seed,
         "proposal_round": round_number,
         "proposed_attempt_id": _attempt_id(
-            condition, seed, len(_pair_launches(deps, condition, seed)) + 1
+            deps.config, condition, seed, len(_pair_launches(deps, condition, seed)) + 1
         ),
         "current_guidance": list(_approved_guidance(deps, condition, seed)),
         "editable_fields": ("guidance",),
@@ -549,6 +576,300 @@ def _next_snapshot_ordinal(deps):
     )
 
 
+def _r3_block_start(config):
+    """First work-queue index of the R3 fixed three-branch block."""
+    return len(work_items(config)) - len(config["seeds"])
+
+
+def _r3_active(deps):
+    """Whether any fixed branch can still launch a future round."""
+    return any(
+        _pair_state(deps, "R3", str(seed))[0] in ("fresh", "collect", "retry")
+        for seed in deps.config["seeds"]
+    )
+
+
+def _round_snapshot_ref(deps, round_number):
+    """The frozen snapshot reference for an R3 round, rebuilt from the
+    append-only decision log; None while the round is not frozen yet."""
+    for record in deps.decision_log.records():
+        if (
+            record.get("event") == "context_snapshot_frozen"
+            and record.get("condition") == "R3"
+            and record.get("round") == round_number
+        ):
+            ordinal = record["snapshot_ordinal"]
+            return {
+                "path": str(
+                    deps.layout["contexts"] / f"strategy-context-{ordinal:03d}.json"
+                ),
+                "digest": record["context_digest"],
+                "snapshot_ordinal": ordinal,
+            }
+    return None
+
+
+def _r3_round_pending(deps, round_number):
+    """Branches still blocking the round barrier: any earlier-round launch
+    whose evidence never resolved (explicit waiting, never a silent skip)."""
+    waiting = []
+    for seed in deps.config["seeds"]:
+        for launch in _pair_launches(deps, "R3", str(seed)):
+            if launch["attempt_ordinal"] >= round_number:
+                continue
+            if _resolved_event(deps, launch["attempt_id"]) is None:
+                waiting.append(
+                    {
+                        "seed": str(seed),
+                        "attempt_id": launch["attempt_id"],
+                        "reason": "evidence_pending",
+                    }
+                )
+    return waiting
+
+
+_CANDIDATE_KEYS = {"schema_version", "discoveries"}
+_CANDIDATE_RECORD_KEYS = {"explorer_id", "discovery_ordinal", "text"}
+
+
+def _natural(value, minimum):
+    return not isinstance(value, bool) and isinstance(value, int) and value >= minimum
+
+
+def _load_candidates(deps, attempt_id):
+    """Harness-owned discovery channel for one attempt (design §6): a branch
+    output artifact read fail-closed; its absence simply means the branch
+    found nothing. Discovery text never touches core state, receipts, or
+    replay inputs — only this tournament-side artifact."""
+    path = deps.tournament_root / "attempts" / attempt_id / "discoveries.json"
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_bytes())
+    except json.JSONDecodeError as exc:
+        raise HarnessGraphError(
+            f"discovery channel artifact unreadable: {path}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict) or set(payload) != _CANDIDATE_KEYS:
+        raise HarnessGraphError(
+            "discovery channel artifact must have exactly {schema_version, discoveries}"
+        )
+    version = payload["schema_version"]
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != versions.DISCOVERIES_SCHEMA_VERSION
+    ):
+        raise HarnessGraphError("discovery channel schema_version mismatch")
+    if not isinstance(payload["discoveries"], list):
+        raise HarnessGraphError("discovery channel discoveries must be a list")
+    for candidate in payload["discoveries"]:
+        if not isinstance(candidate, dict) or set(candidate) != _CANDIDATE_RECORD_KEYS:
+            raise HarnessGraphError(
+                "discovery candidate must have exactly "
+                "{explorer_id, discovery_ordinal, text}"
+            )
+        if (
+            not isinstance(candidate["explorer_id"], str)
+            or not candidate["explorer_id"]
+        ):
+            raise HarnessGraphError("discovery explorer_id must be a non-empty string")
+        if not _natural(candidate["discovery_ordinal"], 0):
+            raise HarnessGraphError("discovery discovery_ordinal must be an int >= 0")
+        if not isinstance(candidate["text"], str) or not candidate["text"]:
+            raise HarnessGraphError("discovery text must be a non-empty string")
+    return payload["discoveries"]
+
+
+def _discovery_identity(record):
+    return (
+        record["source_attempt_id"],
+        record["explorer_id"],
+        record["discovery_ordinal"],
+    )
+
+
+def _enriched_discovery(deps, launch, candidate, bound):
+    """The §2.1 discovery record for one candidate, mirror-validated BEFORE it
+    can be admitted or frozen: producing_condition exactly R3, producing
+    attempt ordinal >= 1, typed receipt digests, unique declared identity."""
+    record = {
+        "source_attempt_id": launch["attempt_id"],
+        "explorer_id": candidate["explorer_id"],
+        "discovery_ordinal": candidate["discovery_ordinal"],
+        "producing_condition": "R3",
+        "producing_agent_id": launch["agent_id"],
+        "producing_seed": launch["seed"],
+        "producing_attempt_ordinal": launch["attempt_ordinal"],
+        "evidence": {
+            "run_status": "finished",
+            "core_receipt_digest": bound["core_receipt_digest"],
+            "llm_receipt_digest": bound["llm_receipt_digest"],
+        },
+        "text": candidate["text"],
+    }
+    probe = {
+        "schema_version": versions.CONTEXT_SCHEMA_VERSION,
+        "source_tournament_id": deps.config["tournament_id"],
+        "guidance": [],
+        "discoveries": [record],
+    }
+    try:
+        strategy_context.validate_context(probe)
+    except strategy_context.ContextError as exc:
+        raise HarnessGraphError(
+            f"discovery violates the AMEND-4A-3 mirror contract: {exc}"
+        ) from exc
+    return record
+
+
+def record_discoveries(deps):
+    """Admit candidates for every finished receipt-bound R3 run (§8 node 9).
+    Admission is idempotent per declared identity: an identical repeat skips,
+    and conflicting content under one identity fails closed."""
+    existing = {}
+    for record in deps.discovery_log.records():
+        if record.get("event") == "discovery_admitted":
+            existing[_discovery_identity(record["discovery"])] = record["discovery"]
+    bound = {
+        r["attempt_id"]: r
+        for r in deps.attempt_log.records()
+        if r.get("event") == "evidence_bound" and r.get("condition") == "R3"
+    }
+    launched = {
+        r["attempt_id"]: r
+        for r in deps.attempt_log.records()
+        if r.get("event") == "launch_registered" and r.get("condition") == "R3"
+    }
+    admitted = 0
+    for attempt_id in sorted(bound):
+        launch = launched[attempt_id]
+        for candidate in _load_candidates(deps, attempt_id):
+            enriched = _enriched_discovery(deps, launch, candidate, bound[attempt_id])
+            identity = _discovery_identity(enriched)
+            prior = existing.get(identity)
+            if prior is not None:
+                if strategy_context.canonical_json_bytes(
+                    prior
+                ) != strategy_context.canonical_json_bytes(enriched):
+                    raise HarnessGraphError(
+                        f"conflicting duplicate discovery identity: {identity}"
+                    )
+                continue
+            deps.discovery_log.append(
+                {
+                    "event": "discovery_admitted",
+                    "attempt_id": attempt_id,
+                    "condition": "R3",
+                    "seed": launch["seed"],
+                    "discovery": enriched,
+                }
+            )
+            existing[identity] = enriched
+            admitted += 1
+    return admitted
+
+
+def _r3_merged_discoveries(deps):
+    """All admitted discoveries in declared-identity order. Duplicates by
+    identity collapse to one record; conflicting duplicates fail closed.
+    Arrival/completion order is never an input."""
+    merged = {}
+    for record in deps.discovery_log.records():
+        if record.get("event") != "discovery_admitted":
+            continue
+        discovery = record["discovery"]
+        identity = _discovery_identity(discovery)
+        prior = merged.get(identity)
+        if prior is not None and strategy_context.canonical_json_bytes(
+            prior
+        ) != strategy_context.canonical_json_bytes(discovery):
+            raise HarnessGraphError(
+                f"conflicting duplicate discovery identity: {identity}"
+            )
+        merged[identity] = discovery
+    return [merged[key] for key in sorted(merged)]
+
+
+def _r3_round_context(deps):
+    """The merged DiscoverySnapshot value for the next round: canonical null
+    while nothing is admitted, else the exact §2.1 object. Only this
+    tournament's receipt-bound discoveries can appear, and
+    source_tournament_id is always the frozen current tournament (importing a
+    prior tournament would require an explicit frozen context_source_policy,
+    which the first slice does not provide)."""
+    discoveries = _r3_merged_discoveries(deps)
+    if not discoveries:
+        return None
+    return {
+        "schema_version": versions.CONTEXT_SCHEMA_VERSION,
+        "source_tournament_id": deps.config["tournament_id"],
+        "guidance": [],
+        "discoveries": discoveries,
+    }
+
+
+def node_barrier_merge_r3(state, deps):
+    """R3 round barrier (design §6). The deterministic merge runs ONLY after
+    every contributing branch round is resolved; a non-terminal pair blocks it
+    with an explicit ``round_barrier_waiting`` event and a fail-closed error,
+    never a silent skip. Admission is swept first; the merge sorts by declared
+    identity ``(source_attempt_id, explorer_id, discovery_ordinal)`` with no
+    LLM coordinator, ranking, dedup-by-content, or completion-timing input;
+    and ONE identical snapshot per round is frozen before any branch of that
+    round launches, so an in-flight run can never contribute to (or see) its
+    own round's snapshot. The merge is restart-idempotent: a crash after the
+    atomic file write but before the frozen event rewrites byte-identical
+    content at the same ordinal, and a crash after the event reuses the frozen
+    reference from the log."""
+    condition, seed = state["condition"], state["semilla"]
+    round_number = len(_pair_launches(deps, condition, seed)) + 1
+    ref = _round_snapshot_ref(deps, round_number)
+    if ref is not None:
+        return set_current(state, context_snapshot_ref=ref, status="context_frozen")
+    waiting = _r3_round_pending(deps, round_number)
+    if waiting:
+        already = any(
+            record.get("event") == "round_barrier_waiting"
+            and record.get("round") == round_number
+            and record.get("waiting") == waiting
+            for record in deps.decision_log.records()
+        )
+        if not already:
+            deps.decision_log.append(
+                {
+                    "event": "round_barrier_waiting",
+                    "round": round_number,
+                    "waiting": waiting,
+                }
+            )
+        raise HarnessGraphError(
+            f"R3 round {round_number} barrier is blocked by non-terminal "
+            f"branches: {waiting}"
+        )
+    record_discoveries(deps)
+    context = _r3_round_context(deps)
+    ordinal = _next_snapshot_ordinal(deps)
+    path = deps.layout["contexts"] / f"strategy-context-{ordinal:03d}.json"
+    frozen = strategy_context.freeze_snapshot(context, path)
+    deps.decision_log.append(
+        {
+            "event": "context_snapshot_frozen",
+            "condition": "R3",
+            "seed": seed,
+            "round": round_number,
+            "snapshot_ordinal": ordinal,
+            "context_digest": frozen["digest"],
+            "source": "r3-merge",
+        }
+    )
+    return set_current(
+        state,
+        context_snapshot_ref={**frozen, "snapshot_ordinal": ordinal},
+        status="context_frozen",
+    )
+
+
 def node_merge_and_freeze_context(state, deps):
     """Freeze the canonical snapshot before launch (§2.2).
 
@@ -585,7 +906,7 @@ def node_register_launch(state, deps):
     condition, seed = state["condition"], state["semilla"]
     launches = _pair_launches(deps, condition, seed)
     ordinal = len(launches) + 1
-    attempt_id = _attempt_id(condition, seed, ordinal)
+    attempt_id = _attempt_id(deps.config, condition, seed, ordinal)
     ref = state["context_snapshot_ref"]
     deps.checkpoints.write(
         PRE_LAUNCH, {"attempt_id": attempt_id, "work_index": state["work_index"]}
@@ -596,7 +917,7 @@ def node_register_launch(state, deps):
         {
             "condition": condition,
             "seed": seed,
-            "agent_id": AGENT_ID,
+            "agent_id": _agent_id(deps.config, condition, seed),
             "attempt_ordinal": ordinal,
             "argv": subprocess_adapter.build_command(
                 deps.config, seed, ref["path"], deps.layout["core"]
@@ -611,7 +932,7 @@ def node_register_launch(state, deps):
             "event": "launch_registered",
             "condition": condition,
             "seed": seed,
-            "agent_id": AGENT_ID,
+            "agent_id": _agent_id(deps.config, condition, seed),
             "attempt_id": attempt_id,
             "attempt_ordinal": ordinal,
             "context_digest": ref["digest"],
@@ -778,6 +1099,15 @@ def node_retry_or_finish(state, deps):
                 {"event": "pair_declined", "condition": condition, "seed": seed}
             )
         kind, latest = "terminal", None
+    if kind == "retry" and condition == "R3":
+        # one launch per branch per round: this branch's retry is its NEXT
+        # round, re-entered through the barrier after the queue wraps
+        index = state["work_index"] + 1
+        if index < state["work_count"]:
+            return set_current(state, work_index=index, status="next_work")
+        return set_current(
+            state, work_index=_r3_block_start(deps.config), status="next_work"
+        )
     if kind == "retry":
         if not any(
             record.get("event") == "retry_decision"
@@ -802,6 +1132,14 @@ def node_retry_or_finish(state, deps):
     if latest is not None:
         _record_pair_terminal(deps, latest, launches)
     index = state["work_index"] + 1
+    if condition == "R3" and index >= state["work_count"]:
+        # the round-major queue wraps for the next round while any branch can
+        # still launch; an all-terminal field finishes the tournament
+        if _r3_active(deps):
+            return set_current(
+                state, work_index=_r3_block_start(deps.config), status="next_work"
+            )
+        return set_current(state, status="work_done")
     if index < state["work_count"]:
         return set_current(state, work_index=index, status="next_work")
     return set_current(state, status="work_done")
@@ -828,13 +1166,15 @@ def route_after_plan(state, deps):
     if kind == "terminal":
         return "retry_or_finish"
     if kind == "retry":
-        return "merge_and_freeze_context"
+        return "barrier_merge_r3" if condition == "R3" else "merge_and_freeze_context"
     if condition == "R1":
         if _has_pair_event(deps, "launch_declined", condition, seed):
             return "retry_or_finish"
         if _has_pair_event(deps, "approval_granted", condition, seed):
             return "merge_and_freeze_context"
         return "approve_r1"
+    if condition == "R3":
+        return "barrier_merge_r3"
     return "merge_and_freeze_context"
 
 
@@ -851,6 +1191,7 @@ _NODES = {
     "assign_work": node_assign_work,
     "plan_context": node_plan_context,
     "approve_r1": node_approve_r1,
+    "barrier_merge_r3": node_barrier_merge_r3,
     "merge_and_freeze_context": node_merge_and_freeze_context,
     "register_launch": node_register_launch,
     "launch_subprocess": node_launch_subprocess,
@@ -887,6 +1228,7 @@ def build_graph(deps):
         _APPROVAL_ROUTES,
     )
     builder.add_edge("merge_and_freeze_context", "register_launch")
+    builder.add_edge("barrier_merge_r3", "register_launch")
     builder.add_edge("register_launch", "launch_subprocess")
     builder.add_edge("launch_subprocess", "collect_and_bind_evidence")
     builder.add_edge("collect_and_bind_evidence", "retry_or_finish")

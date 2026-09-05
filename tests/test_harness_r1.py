@@ -302,13 +302,13 @@ class TestDeclineSemantics(Base):
         launched = self.row_for("R1", "24")
         self.assertEqual(launched["status"], "completed")
         self.assertEqual(launched["attempts_used"], 1)
-        self.assertEqual(len(self.rows()), 6)
+        self.assertEqual(len(self.rows()), 9)
         # replay: the decline is never re-prompted and the rows are stable
         restart_terminal = decline_terminal()
         restart = graph.build_deps(
             self.root,
             FIXTURE_CONFIG,
-            runner=make_runner("never", tag="replay-"),
+            runner=make_runner("complete", tag="replay-"),
             approval=restart_terminal,
         )
         drive(state.initial_state(), restart)
@@ -500,11 +500,11 @@ class TestR1R2Coexistence(Base):
         )
         for config in (yes_config, no_config):
             deferred = [
-                r["conditions"]
+                r
                 for r in self.decision_records(config)
                 if r["event"] == "routes_deferred"
             ]
-            self.assertEqual(deferred, [["R3"]])
+            self.assertEqual(deferred, [])
             approvals = [
                 r
                 for r in self.decision_records(config)
@@ -533,6 +533,7 @@ class TestLaunchWindowRestart(Base):
             ("launch", graph.node_launch_subprocess),
             ("collect", graph.node_collect_and_bind_evidence),
         )
+        barrier_steps = (("barrier", graph.node_barrier_merge_r3),) + steps[1:]
         value = state.initial_state()
         value = graph.node_freeze_tournament_config(value, deps)
         value = graph.node_assign_work(value, deps)
@@ -557,6 +558,13 @@ class TestLaunchWindowRestart(Base):
                 value = graph.node_collect_and_bind_evidence(value, deps)
                 value = graph.node_retry_or_finish(value, deps)
             elif plan_route == "retry_or_finish":
+                value = graph.node_retry_or_finish(value, deps)
+            elif plan_route == "barrier_merge_r3":
+                for name, function in barrier_steps:
+                    value = function(value, deps)
+                    if crash == (value["condition"], value["semilla"], name):
+                        return value
+                # fixed graph edge: collect always flows into retry_or_finish
                 value = graph.node_retry_or_finish(value, deps)
             else:
                 for _, function in steps:
