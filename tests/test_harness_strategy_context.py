@@ -263,6 +263,44 @@ class TestIntegersOnlyCanonicalBytes(unittest.TestCase):
                     self.assertNotIn(".", token)
 
 
+class TestFreezeCrashWindowContract(unittest.TestCase):
+    """freeze_snapshot never overwrites an existing snapshot with different
+    bytes: a crash between the atomic write and the frozen event re-derives
+    the SAME ordinal on restart, so an existing path is reused
+    byte-identically (the caller re-appends the missing frozen event) or the
+    freeze fails closed — a frozen snapshot is never replaced."""
+
+    def test_existing_identical_bytes_are_reused_without_replacement(self):
+        context = _context()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "strategy-context-000.json"
+            first = strategy_context.freeze_snapshot(context, path)
+            data = path.read_bytes()
+            second = strategy_context.freeze_snapshot(context, path)
+            self.assertEqual(second["digest"], first["digest"])
+            self.assertEqual(path.read_bytes(), data)
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), [path.name])
+
+    def test_existing_different_bytes_fail_closed_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "strategy-context-000.json"
+            strategy_context.freeze_snapshot(_context(), path)
+            data = path.read_bytes()
+            different = _context(
+                discoveries=[
+                    _discovery(text="A different semantic context value"),
+                    _discovery(
+                        explorer_id="explorer-02",
+                        discovery_ordinal=1,
+                        text="Second record",
+                    ),
+                ]
+            )
+            with self.assertRaises(strategy_context.ContextError):
+                strategy_context.freeze_snapshot(different, path)
+            self.assertEqual(path.read_bytes(), data)
+
+
 class TestIdentityIsPermutationInvariant(unittest.TestCase):
     """Merged identity depends on declared content, never on arrival order."""
 

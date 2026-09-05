@@ -1075,6 +1075,81 @@ class TestR3Restart(Base):
         self.assertEqual(self.row("R3", "18", cfg)["attempts_used"], 2)
 
 
+class TestFrozenSnapshotOverwrite(Base):
+    """The freeze crash window can never overwrite a snapshot with different
+    bytes: identical bytes are reused (the missing frozen event is
+    re-appended) and different bytes fail closed without replacement."""
+
+    def test_restart_with_a_new_admission_fails_closed_and_preserves_bytes(self):
+        cfg = config()
+        for attempt_id in (
+            "r3-agent-01-seed-18-attempt-02",
+            "r3-agent-02-seed-24-attempt-01",
+            "r3-agent-03-seed-30-attempt-01",
+        ):
+            self.write_candidates(attempt_id, cfg)
+        runner = self.lineage_runner()
+        deps = self.deps(runner, cfg)
+        original = deps.decision_log.append
+
+        def append(record):
+            if (
+                record.get("event") == "context_snapshot_frozen"
+                and record.get("condition") == "R3"
+                and record.get("round") == 2
+            ):
+                raise _CrashBeforeRoundFreezeEvent()
+            return original(record)
+
+        deps.decision_log.append = append
+        with self.assertRaises(_CrashBeforeRoundFreezeEvent):
+            drive(state.initial_state(), deps)
+        pre_crash = self.snapshot(4, cfg)
+        # a NEW valid candidate identity is admitted after the crash
+        extra = {
+            "schema_version": 1,
+            "discoveries": [
+                {
+                    "explorer_id": "explorer-01",
+                    "discovery_ordinal": 0,
+                    "text": "The north corridor gate opens only after the blue "
+                    "switch flips",
+                },
+                {
+                    "explorer_id": "explorer-02",
+                    "discovery_ordinal": 1,
+                    "text": "Carrying two boxes past the ramp stalls the walker",
+                },
+                {
+                    "explorer_id": "explorer-03",
+                    "discovery_ordinal": 2,
+                    "text": "Discovered between the freeze and the restart",
+                },
+            ],
+        }
+        self.write_candidates("r3-agent-02-seed-24-attempt-01", cfg, extra)
+        self.assertEqual(
+            graph.record_discoveries(
+                self.deps(r3_runner(), cfg), "r3-agent-02-seed-24-attempt-01"
+            ),
+            1,
+        )
+        # the restart would freeze DIFFERENT bytes over the SAME path: fail
+        # closed, keep the original snapshot bytes, never replace the file
+        with self.assertRaises(graph.HarnessGraphError):
+            drive(state.initial_state(), self.deps(r3_runner(tag="o1-"), cfg))
+        self.assertEqual(self.snapshot(4, cfg), pre_crash)
+        self.assertEqual(self.context_names(cfg)[-1], "strategy-context-004.json")
+        self.assertEqual(
+            [
+                r
+                for r in self.decisions(cfg)
+                if r["event"] == "context_snapshot_frozen" and r.get("round") == 2
+            ],
+            [],
+        )
+
+
 class TestR3Coexistence(Base):
     """R3 wiring leaves R1/R2 behavior intact and the whole tournament
     deterministic across identical tournaments."""

@@ -924,7 +924,12 @@ def node_barrier_merge_r3(state, deps):
     context = _r3_round_context(deps)
     ordinal = _next_snapshot_ordinal(deps)
     path = deps.layout["contexts"] / f"strategy-context-{ordinal:03d}.json"
-    frozen = strategy_context.freeze_snapshot(context, path)
+    try:
+        frozen = strategy_context.freeze_snapshot(context, path)
+    except strategy_context.ContextError as exc:
+        raise HarnessGraphError(
+            f"context snapshot {path} cannot be frozen: {exc}"
+        ) from exc
     deps.decision_log.append(
         {
             "event": "context_snapshot_frozen",
@@ -960,7 +965,12 @@ def node_merge_and_freeze_context(state, deps):
         context = None
     ordinal = _next_snapshot_ordinal(deps)
     path = deps.layout["contexts"] / f"strategy-context-{ordinal:03d}.json"
-    frozen = strategy_context.freeze_snapshot(context, path)
+    try:
+        frozen = strategy_context.freeze_snapshot(context, path)
+    except strategy_context.ContextError as exc:
+        raise HarnessGraphError(
+            f"context snapshot {path} cannot be frozen: {exc}"
+        ) from exc
     ref = {**frozen, "snapshot_ordinal": ordinal}
     deps.decision_log.append(
         {

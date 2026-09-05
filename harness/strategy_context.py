@@ -224,8 +224,22 @@ def atomic_write_bytes(path, data):
 
 
 def freeze_snapshot(value, path):
-    """Validate, canonicalize, and atomically write one frozen snapshot (§2.2)."""
+    """Validate, canonicalize, and atomically write one frozen snapshot (§2.2).
+
+    Crash-window contract: a restart re-derives the SAME snapshot ordinal,
+    so the path may already exist. If the existing bytes equal the would-be
+    canonical bytes, the snapshot is reused byte-identically (the caller
+    re-appends its missing frozen event). If they differ, the frozen
+    snapshot is NEVER overwritten — the freeze fails closed with
+    ContextError instead of replacing evidence with different bytes.
+    """
     data = canonical_json_bytes(normalize_context(value))
+    if Path(path).exists():
+        if Path(path).read_bytes() != data:
+            raise ContextError(
+                f"refusing to overwrite frozen snapshot with different bytes: {path}"
+            )
+        return {"path": str(path), "digest": sha256_digest(data)}
     atomic_write_bytes(path, data)
     return {"path": str(path), "digest": sha256_digest(data)}
 
