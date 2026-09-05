@@ -70,12 +70,11 @@ def build_parser():
         default="core",
         help="fake acceptance wrapper (zero cost) or the real core CLI subprocess",
     )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=None,
-        help="optional subprocess timeout in seconds",
-    )
+    # Deliberately NO --timeout flag: a subprocess timeout changes timed_out,
+    # retries, K consumption and the leaderboard, so it is behavior-affecting
+    # and belongs INSIDE the frozen execution profile, not in free CLI state.
+    # deps.timeout stays an internal seam for tests/recovery only (review
+    # finding: same identity must never run with different timeout limits).
     terminal = parser.add_mutually_exclusive_group()
     terminal.add_argument(
         "--non-interactive",
@@ -208,7 +207,6 @@ def main(argv=None):
             Path(args.root),
             config,
             runner=_runner(args.runner),
-            timeout=args.timeout,
             approval=approval,
         )
         driver.run_tournament(deps)

@@ -35,7 +35,10 @@ stderr), `2` usage or config error.
 | `--runner fake\|core` | Bound to the frozen `(provider, model)` pair: `fake` (deterministic zero-cost subprocess CLI wrapper, acceptance only) is legal **only** for `fake/fake-v1`; `core` (the real `python3 -m robot_factory_arena.cli` subprocess) only for `openai/gpt-5.6-luna` or `glm/glm-5.3-flash`. A mismatch exits `2` **before any artifact is created**. There is **no fallback** between them. |
 | `--non-interactive` | R1 terminal auto-declines every proposal (explicit logged declines; R1 rows are `declined`, R2/R3 still complete). |
 | `--answers FILE` | Scripted R1 answers: a JSON list of `{"decision": "yes"/"no"}` or `{"decision": "edit", "guidance": [...]}` objects, validated **before** any side effect, replayed in prompt order, defaulting to `yes` when exhausted (the Unit-4 seam). |
-| `--timeout N` | Optional subprocess timeout in seconds. |
+| (none) | There is deliberately NO `--timeout` flag: a subprocess timeout changes
+`timed_out`, retries, K consumption and the leaderboard, so it is behavior-affecting
+and must live inside the frozen execution profile, never in free CLI state. The
+internal `deps.timeout` seam remains for tests/recovery only. |
 
 With neither `--non-interactive` nor `--answers`, R1 prompts interactively on stdin:
 each proposal view is printed as canonical JSON and one JSON answer object is read per

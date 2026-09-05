@@ -104,6 +104,14 @@ class TestInvocationContract(Base):
             self.main(self.fake_argv(extra=["--bogus"]))
         self.assertEqual(caught.exception.code, 2)
 
+    def test_timeout_flag_is_rejected_as_behavior_affecting_free_state(self):
+        # Review finding: a subprocess timeout changes timed_out, retries, K
+        # consumption and the leaderboard, so it must never be free CLI state
+        # under one frozen tournament identity.
+        with self.assertRaises(SystemExit) as caught:
+            self.main(self.fake_argv(extra=["--timeout", "5"]))
+        self.assertEqual(caught.exception.code, 2)
+
     def test_malformed_json_config_exits_non_zero(self):
         path = self.root / "bad.json"
         path.write_bytes(b"{not json")
