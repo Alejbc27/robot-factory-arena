@@ -109,7 +109,8 @@ class TestGateWorkflowSplit(unittest.TestCase):
         # module WITH langgraph installed, so test_build_graph_compiles
         # reports ok there instead of being skipped everywhere. Unit 4 adds
         # the R1 approval-path module and the recovery continuity module to
-        # the same gate; Unit 5 adds the R3 barrier matrix module.
+        # the same gate; Unit 5 adds the R3 barrier matrix module; Unit 6
+        # adds the fake acceptance/invocation module.
         text = GATE.read_text(encoding="utf-8")
         job = re.search(r"harness-gate:.*?(?=\n  \w[-\w]*:|\Z)", text, re.S)
         if job is None:
@@ -124,6 +125,7 @@ class TestGateWorkflowSplit(unittest.TestCase):
             "tests.test_harness_recovery",
             "tests.test_harness_strategy_context",
             "tests.test_harness_r3",
+            "tests.test_harness_acceptance",
         ):
             self.assertIn(module, job.group(0))
 

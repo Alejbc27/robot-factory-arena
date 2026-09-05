@@ -1,0 +1,609 @@
+"""Unit 6 fake acceptance + invocation tests (design §9/§10).
+
+The acceptance gate drives the USER-FACING entry point (``harness.cli.main``)
+with the deterministic fake subprocess CLI wrapper: one full R1+R2+R3
+tournament over seeds 18/24/30 with K=3, valid receipt triples, and R3
+discoveries. The end state must show exactly nine rows with receipt-owned
+scores, provider-evidence-owned tokens, an intact digest chain, unique attempt
+ids, continuous append-only logs, and byte-identical leaderboards across two
+independent runs. The same module locks the invocation contract: missing or
+invalid config, unknown flags, the injectable R1 terminals, and fail-closed
+non-zero exits on digest-chain/log/config violations. No live provider is ever
+contacted; the Luna procedure is documentation-only (docs/sdd).
+"""
+
+import contextlib
+import importlib.util
+import io
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+from harness import (
+    logs,
+    state,
+    strategy_context,
+    subprocess_adapter,
+    tournament,
+)
+
+LANGGRAPH_AVAILABLE = importlib.util.find_spec("langgraph") is not None
+REPO_ROOT = Path(__file__).resolve().parents[1]
+FIXTURE = Path(__file__).parent / "fixtures/harness/unit6-acceptance-config.json"
+GUIDANCE = "Approve the scripted acceptance guidance"
+
+
+def _write_answers(root, answers, name="answers.json"):
+    path = root / name
+    path.write_bytes(strategy_context.canonical_json_bytes(answers))
+    return path
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def main(self, argv, root=None):
+        """Run the entry in-process; returns (exit_code, stdout, stderr)."""
+        from harness import cli
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main([*argv, "--root", str(root or self.root)])
+        return code, out.getvalue(), err.getvalue()
+
+    def fake_argv(self, config_path=None, extra=()):
+        return [
+            "--config",
+            str(config_path or FIXTURE),
+            "--runner",
+            "fake",
+            "--non-interactive",
+            *extra,
+        ]
+
+    def layout(self, root=None, config=None):
+        config = config or json.loads(FIXTURE.read_bytes())
+        return tournament.expected_layout(
+            root or self.root, config["tournament_id"], config["artifact_root"]
+        )
+
+    def rows(self, root=None, config=None):
+        data = json.loads(self.layout(root, config)["leaderboard.json"].read_bytes())
+        return data["rows"]
+
+    def row_for(self, condition, seed, root=None, config=None):
+        return next(
+            r
+            for r in self.rows(root, config)
+            if r["condition"] == condition and r["seed"] == seed
+        )
+
+    def attempt_records(self, root=None, config=None):
+        path = self.layout(root, config)["attempt-log.jsonl"]
+        return logs.AppendOnlyLog(path).records()
+
+    def decision_records(self, root=None, config=None):
+        path = self.layout(root, config)["decision-log.jsonl"]
+        return logs.AppendOnlyLog(path).records()
+
+
+class TestInvocationContract(Base):
+    def test_missing_config_file_exits_non_zero_with_clear_error(self):
+        code, _, err = self.main(["--config", str(self.root / "nope.json")])
+        self.assertEqual(code, 2)
+        self.assertIn("cannot read tournament config", err)
+
+    def test_unknown_flag_exits_non_zero(self):
+        with self.assertRaises(SystemExit) as caught:
+            self.main(self.fake_argv(extra=["--bogus"]))
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_timeout_flag_is_rejected_as_behavior_affecting_free_state(self):
+        # Review finding: a subprocess timeout changes timed_out, retries, K
+        # consumption and the leaderboard, so it must never be free CLI state
+        # under one frozen tournament identity.
+        with self.assertRaises(SystemExit) as caught:
+            self.main(self.fake_argv(extra=["--timeout", "5"]))
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_malformed_json_config_exits_non_zero(self):
+        path = self.root / "bad.json"
+        path.write_bytes(b"{not json")
+        code, _, err = self.main(["--config", str(path)])
+        self.assertEqual(code, 2)
+        self.assertIn("invalid tournament config", err)
+
+    def test_config_failing_validation_exits_non_zero(self):
+        config = json.loads(FIXTURE.read_bytes())
+        config["seeds"] = [18, 24]
+        path = self.root / "drift.json"
+        path.write_bytes(strategy_context.canonical_json_bytes(config))
+        code, _, err = self.main(["--config", str(path)])
+        self.assertEqual(code, 2)
+        self.assertIn("invalid tournament config", err)
+
+    def test_non_interactive_full_tournament_completes_with_nine_rows(self):
+        code, out, _ = self.main(self.fake_argv())
+        self.assertEqual(code, 0, out)
+        rows = self.rows()
+        self.assertEqual(len(rows), 9)
+        for seed in ("18", "24", "30"):
+            declined = self.row_for("R1", seed)
+            self.assertEqual(declined["status"], "declined")
+            self.assertEqual(declined["attempts_used"], 0)
+            self.assertEqual(declined["declined_launches"], 1)
+            self.assertIsNone(declined["verified_score"])
+            self.assertIsNone(declined["input_tokens"])
+            for condition in ("R2", "R3"):
+                row = self.row_for(condition, seed)
+                self.assertEqual(row["status"], "completed")
+                self.assertEqual(row["attempts_used"], 1)
+        self.assertIn("leaderboard.json", out)
+
+    def test_stdin_terminal_is_the_default_and_fails_closed_on_closed_input(self):
+        from harness import cli, interruption
+
+        def closed():
+            raise EOFError
+
+        terminal = cli.stdin_terminal(read=closed, write=lambda text: None)
+        with self.assertRaises(interruption.InterruptionError):
+            terminal({"condition": "R1", "seed": "18", "proposal_round": 0})
+
+    def test_stdin_terminal_parses_one_json_answer_per_prompt(self):
+        from harness import cli
+
+        lines = iter(['{"decision": "yes"}'])
+        seen = []
+        terminal = cli.stdin_terminal(read=lambda: next(lines), write=seen.append)
+        answer = terminal({"condition": "R1", "seed": "18", "proposal_round": 0})
+        self.assertEqual(answer, {"decision": "yes"})
+        self.assertIn("R1 approval proposal", seen[0])
+
+    def test_answers_file_replays_scripted_answers_then_defaults_to_yes(self):
+        answers = _write_answers(
+            self.root,
+            [{"decision": "edit", "guidance": [GUIDANCE]}, {"decision": "yes"}],
+        )
+        code, _, _ = self.main(
+            ["--config", str(FIXTURE), "--runner", "fake", "--answers", str(answers)]
+        )
+        self.assertEqual(code, 0)
+        launched = self.row_for("R1", "18")
+        self.assertEqual(launched["status"], "completed")
+        self.assertEqual(launched["attempts_used"], 1)
+        # the approved guidance reached the launch as frozen canonical bytes
+        launch = json.loads(
+            (
+                self.layout()["attempts"]
+                / "r1-agent-01-seed-18-attempt-01"
+                / "launch.json"
+            ).read_bytes()
+        )
+        snapshot = json.loads(Path(launch["context_path"]).read_bytes())
+        self.assertEqual([g["text"] for g in snapshot["guidance"]], [GUIDANCE])
+        self.assertEqual(
+            launch["context_digest"],
+            strategy_context.sha256_digest(Path(launch["context_path"]).read_bytes()),
+        )
+        # later prompts default to yes: every R1 pair launched exactly once
+        for seed in ("24", "30"):
+            self.assertEqual(self.row_for("R1", seed)["attempts_used"], 1)
+
+    def test_invalid_answers_file_fails_closed_before_any_run(self):
+        answers = _write_answers(self.root, [{"decision": "yes", "seed": "99"}])
+        code, _, err = self.main(
+            ["--config", str(FIXTURE), "--runner", "fake", "--answers", str(answers)]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("side channel", err)
+        self.assertFalse(self.layout()["decision-log.jsonl"].exists())
+
+    def test_module_entry_runs_standalone_via_subprocess(self):
+        for module in ("harness", "harness.run"):
+            target = self.root / module.replace(".", "-")
+            done = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    module,
+                    "--config",
+                    str(FIXTURE),
+                    "--runner",
+                    "fake",
+                    "--non-interactive",
+                    "--root",
+                    str(target),
+                ],
+                capture_output=True,
+                cwd=REPO_ROOT,
+                timeout=300,
+            )
+            self.assertEqual(done.returncode, 0, done.stderr.decode())
+            self.assertEqual(len(self.rows(target)), 9)
+
+
+class TestExecutionProfileBinding(Base):
+    """PR #26 remediation: the frozen config may only declare the execution
+    profile the core and provider adapters actually honor. Every rejection
+    below goes through the real CLI entry so the exit codes are real, and
+    validation must fire BEFORE any tournament artifact is written.
+
+    Verified adapter facts being pinned: the subprocess adapter passes only
+    seed/provider/model/artifacts-root/strategy-context to the core, the
+    core always executes GRANTS=("move", "pick", "place") with BUDGET=100,
+    the OpenAI adapter hardcodes reasoning_effort="none" for gpt-5.6-luna,
+    and the fake/GLM adapters send no generation parameters at all.
+    """
+
+    def _config_with(self, **changes):
+        config = json.loads(FIXTURE.read_bytes())
+        config.update(changes)
+        path = self.root / "profile.json"
+        path.write_bytes(strategy_context.canonical_json_bytes(config))
+        return path
+
+    def _validated_config(self, **changes):
+        config = json.loads(self._config_with(**changes).read_bytes())
+        tournament.validate_config(config)
+        return config
+
+    def _assert_rejected(self, changes, fragment):
+        path = self._config_with(**changes)
+        code, _, err = self.main(self.fake_argv(config_path=path))
+        self.assertEqual(code, 2, err)
+        self.assertIn("invalid tournament config", err)
+        self.assertIn(fragment, err)
+        # validation happens before the tournament tree is ever created
+        self.assertFalse(
+            (self.root / "artifacts").exists(),
+            "rejected configs must not create any tournament artifacts",
+        )
+
+    def test_budget_other_than_the_locked_100_is_rejected(self):
+        self._assert_rejected({"budget": 99}, "budget")
+
+    def test_single_tool_grant_declares_an_unexecuted_profile(self):
+        self._assert_rejected({"tool_grants": ["move"]}, "tool grants")
+
+    def test_fault_config_is_not_executed_and_rejected(self):
+        self._assert_rejected({"fault_config": {}}, "fault")
+
+    def test_k_attempts_other_than_three_is_rejected(self):
+        self._assert_rejected({"k_attempts": 2}, "k_attempts")
+
+    def test_unexecuted_generation_is_rejected_for_defaults_adapters(self):
+        # fake-v1 sends NO generation parameters: temperature is a declared
+        # condition that cannot produce the score.
+        self._assert_rejected({"generation": {"temperature": 999}}, "generation")
+
+    def test_luna_generation_contract_is_exactly_reasoning_effort_none(self):
+        # drift from the luna adapter's real payload is rejected FIRST, in
+        # a virgin root, so the no-artifacts assertion is meaningful...
+        self._assert_rejected(
+            {
+                "provider": "openai",
+                "model": "gpt-5.6-luna",
+                "generation": {"temperature": 0},
+            },
+            "generation",
+        )
+        # ...and the exact frozen profile is legal ONLY for the CORE
+        # runner: config construction and the exact command bytes are
+        # asserted — never a completed fake tournament carrying a real
+        # provider label (the fake wrapper would forge OpenAI evidence
+        # for a run that never happened).
+        config = self._validated_config(
+            provider="openai",
+            model="gpt-5.6-luna",
+            generation={"reasoning_effort": "none"},
+        )
+        tournament.validate_runner_binding(config, "core")
+        self.assertEqual(
+            subprocess_adapter.build_command(
+                config, 18, "/tmp/snapshots/strategy-context-000.json", "/tmp/core"
+            ),
+            [
+                sys.executable,
+                "-m",
+                "robot_factory_arena.cli",
+                "run",
+                "--seed",
+                "18",
+                "--provider",
+                "openai",
+                "--model",
+                "gpt-5.6-luna",
+                "--artifacts-root",
+                "/tmp/core",
+                "--strategy-context",
+                "/tmp/snapshots/strategy-context-000.json",
+            ],
+        )
+
+    def test_glm_profile_is_the_defaults_sentinel(self):
+        # any generation payload is declared-but-never-sent by the GLM
+        # adapter, so rejected FIRST in a virgin root (no-artifacts
+        # assertion)...
+        self._assert_rejected(
+            {
+                "provider": "glm",
+                "model": "glm-5.3-flash",
+                "generation": {"temperature": 0},
+            },
+            "generation",
+        )
+        # ...then the live-acceptance model with {} (no generation
+        # parameters sent) validates for the CORE runner and locks its
+        # exact command bytes — no fake tournament ever carries the GLM
+        # label.
+        config = self._validated_config(
+            provider="glm", model="glm-5.3-flash", generation={}
+        )
+        tournament.validate_runner_binding(config, "core")
+        self.assertEqual(
+            subprocess_adapter.build_command(
+                config, 24, "/tmp/snapshots/strategy-context-000.json", "/tmp/core"
+            ),
+            [
+                sys.executable,
+                "-m",
+                "robot_factory_arena.cli",
+                "run",
+                "--seed",
+                "24",
+                "--provider",
+                "glm",
+                "--model",
+                "glm-5.3-flash",
+                "--artifacts-root",
+                "/tmp/core",
+                "--strategy-context",
+                "/tmp/snapshots/strategy-context-000.json",
+            ],
+        )
+
+    def test_unsupported_provider_model_pair_is_rejected(self):
+        path = self._config_with(provider="openai", model="glm-5.3-flash")
+        code, _, err = self.main(self.fake_argv(config_path=path))
+        self.assertEqual(code, 2, err)
+        self.assertIn("no frozen execution profile", err)
+        self.assertFalse((self.root / "artifacts").exists())
+
+    def test_fake_runner_with_a_real_provider_label_is_rejected(self):
+        # the fake wrapper fabricates provider evidence: a luna-labeled
+        # fake tournament would forge an OpenAI run that never happened.
+        path = self._config_with(
+            provider="openai",
+            model="gpt-5.6-luna",
+            generation={"reasoning_effort": "none"},
+        )
+        code, _, err = self.main(self.fake_argv(config_path=path))
+        self.assertEqual(code, 2, err)
+        self.assertIn("not bound", err)
+        self.assertFalse((self.root / "artifacts").exists())
+
+    def test_core_runner_with_the_fake_identity_is_rejected(self):
+        code, _, err = self.main(
+            ["--config", str(FIXTURE), "--runner", "core", "--non-interactive"]
+        )
+        self.assertEqual(code, 2, err)
+        self.assertIn("not bound", err)
+        self.assertFalse((self.root / "artifacts").exists())
+
+    def test_supported_fake_profile_keeps_the_acceptance_run_green(self):
+        # the pinned real profile of the existing acceptance fixture:
+        # full grants + defaults sentinel generation.
+        self.assertEqual(
+            json.loads(FIXTURE.read_bytes())["tool_grants"], ["move", "pick", "place"]
+        )
+        self.assertEqual(json.loads(FIXTURE.read_bytes())["generation"], {})
+        code, _, err = self.main(self.fake_argv())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.rows()), 9)
+
+
+class TestConfigTypeSafety(Base):
+    """PR #26 final review remediation: hostile-but-valid-JSON configs must
+    exit 2 through the domain error — never a TypeError crash — and must not
+    create any artifact."""
+
+    def _assert_clean_usage_exit(self, raw_bytes):
+        path = self.root / "hostile-config.json"
+        path.write_bytes(raw_bytes)
+        code, _, err = self.main(["--config", str(path)])
+        self.assertEqual(code, 2, err)
+        self.assertIn("invalid tournament config", err)
+        self.assertNotIn("Traceback", err)
+        self.assertFalse(
+            (self.root / "artifacts").exists(),
+            "rejected configs must not create any tournament artifacts",
+        )
+
+    def test_unhashable_provider_list_exits_two(self):
+        config = json.loads(FIXTURE.read_bytes())
+        config["provider"] = []
+        self._assert_clean_usage_exit(strategy_context.canonical_json_bytes(config))
+
+    def test_unhashable_model_object_exits_two(self):
+        config = json.loads(FIXTURE.read_bytes())
+        config["model"] = {"x": 1}
+        self._assert_clean_usage_exit(strategy_context.canonical_json_bytes(config))
+
+    def test_non_object_config_exits_two(self):
+        for raw in (b"[1, 2, 3]", b'"config"', b"7", b"null", b"true"):
+            with self.subTest(raw=raw):
+                self._assert_clean_usage_exit(raw)
+
+
+class TestFakeAcceptance(Base):
+    def _run(self, root, answers=None):
+        if answers is None:
+            return self.main(self.fake_argv(), root=root)
+        path = _write_answers(root, answers, name="answers-scripted.json")
+        return self.main(
+            ["--config", str(FIXTURE), "--runner", "fake", "--answers", str(path)],
+            root=root,
+        )
+
+    def test_two_independent_runs_produce_byte_identical_leaderboards(self):
+        first, second = self.root / "a", self.root / "b"
+        self.assertEqual(self._run(first)[0], 0)
+        self.assertEqual(self._run(second)[0], 0)
+        self.assertEqual(
+            self.layout(first)["leaderboard.json"].read_bytes(),
+            self.layout(second)["leaderboard.json"].read_bytes(),
+        )
+
+    def test_scores_are_receipt_owned_and_tokens_are_provider_evidence_owned(self):
+        self.assertEqual(self._run(self.root)[0], 0)
+        for row in self.rows():
+            if row["status"] == "declined":
+                self.assertIsNone(row["core_receipt_digest"])
+                continue
+            bound = [
+                r
+                for r in self.attempt_records()
+                if r.get("condition") == row["condition"]
+                and r.get("seed") == row["seed"]
+                and r["event"] == "evidence_bound"
+            ]
+            terminal = max(bound, key=lambda r: r["attempt_ordinal"])
+            run_dir = self.layout()["core"] / "runs" / terminal["run_dir"]
+            receipt_raw = (run_dir / "receipt.json").read_bytes()
+            receipt = json.loads(receipt_raw)
+            # score/outcome come from the sealed receipt only, digest-cited
+            self.assertEqual(
+                row["core_receipt_digest"],
+                strategy_context.sha256_digest(receipt_raw),
+            )
+            self.assertEqual(row["verified_score"], receipt["verified_score"])
+            self.assertEqual(row["outcome"], receipt["outcome"])
+            # the CLI stdout decoy (999) never becomes an official score;
+            # stdout is captured in the attempt dir, never parsed for evidence
+            self.assertEqual(row["verified_score"], 100)
+            stdout_bin = (
+                self.layout()["attempts"] / terminal["attempt_id"] / "stdout.bin"
+            ).read_bytes()
+            self.assertIn(b"verified_score: 999", stdout_bin)
+            # tokens exist only because provider evidence is digest-bound
+            provider_run = json.loads(
+                (run_dir / "llm" / "provider-run.json").read_bytes()
+            )
+            self.assertEqual(
+                row["input_tokens"],
+                sum(r["usage"]["input_tokens"] for r in provider_run["requests"]),
+            )
+            self.assertEqual(
+                row["llm_receipt_digest"],
+                json.loads((run_dir / "llm" / "llm-receipt.json").read_bytes())[
+                    "llm_receipt_digest"
+                ],
+            )
+
+    def test_end_state_is_chain_intact_unique_and_continuous(self):
+        self.assertEqual(self._run(self.root)[0], 0)
+        # every launch's context digest still matches its frozen snapshot bytes
+        attempts_dir = self.layout()["attempts"]
+        ids = []
+        for attempt_dir in sorted(attempts_dir.iterdir()):
+            launch = json.loads((attempt_dir / "launch.json").read_bytes())
+            ids.append(launch["attempt_id"])
+            self.assertEqual(
+                strategy_context.sha256_digest(
+                    Path(launch["context_path"]).read_bytes()
+                ),
+                launch["context_digest"],
+            )
+            self.assertTrue((attempt_dir / "observed.json").exists())
+        self.assertEqual(len(ids), len(set(ids)), "attempt ids must be unique")
+        # auto-declined R1 pairs allocate no attempt at all: 6 launched attempts
+        self.assertEqual(len(ids), 6)
+        # all three append-only logs verify as continuous chains
+        for name in ("attempt-log.jsonl", "decision-log.jsonl", "discoveries.jsonl"):
+            log = logs.AppendOnlyLog(self.layout()[name])
+            self.assertGreaterEqual(log.verify(), 1, name)
+        # R3 discoveries were sealed and admitted from valid receipt triples
+        admitted = [
+            r
+            for r in logs.AppendOnlyLog(self.layout()["discoveries.jsonl"]).records()
+            if r["event"] == "discovery_admitted"
+        ]
+        self.assertEqual(len(admitted), 3)
+        for record in admitted:
+            self.assertEqual(record["discovery"]["producing_condition"], "R3")
+            self.assertIn(
+                "sha256:", record["discovery"]["evidence"]["core_receipt_digest"]
+            )
+
+    def test_digest_chain_violation_exits_non_zero(self):
+        self.assertEqual(self._run(self.root)[0], 0)
+        log = self.layout()["decision-log.jsonl"]
+        lines = log.read_bytes().splitlines(keepends=True)
+        record = json.loads(lines[1])
+        record["event"] = "tampered_event"
+        lines[1] = strategy_context.canonical_json_bytes(record) + b"\n"
+        log.write_bytes(b"".join(lines))
+        code, _, err = self.main(self.fake_argv())
+        self.assertEqual(code, 1)
+        self.assertIn("integrity", err.lower())
+
+    def test_log_gap_fails_closed(self):
+        self.assertEqual(self._run(self.root)[0], 0)
+        log = self.layout()["attempt-log.jsonl"]
+        lines = log.read_bytes().splitlines(keepends=True)
+        del lines[2]
+        log.write_bytes(b"".join(lines))
+        code, _, err = self.main(self.fake_argv())
+        self.assertEqual(code, 1)
+        self.assertIn("sequence/integrity", err.lower())
+
+    def test_config_drift_exits_non_zero(self):
+        self.assertEqual(self._run(self.root)[0], 0)
+        config = json.loads(FIXTURE.read_bytes())
+        # verification_version passes validation but differs from the sealed
+        # value: a pure drift probe (k_attempts is pinned to the executable
+        # profile and is rejected at validation, before drift is reached).
+        config["verification_version"] = "2"
+        path = self.root / "drift.json"
+        path.write_bytes(strategy_context.canonical_json_bytes(config))
+        # --runner fake is required to pass the new binding gate, so the
+        # probe still proves DRIFT specifically (a runner mismatch would
+        # exit 2 before drift is ever reached).
+        code, _, err = self.main(
+            ["--config", str(path), "--runner", "fake", "--non-interactive"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("drift", err.lower())
+
+    @unittest.skipUnless(
+        LANGGRAPH_AVAILABLE, "optional harness extra (langgraph) not installed"
+    )
+    def test_compiled_graph_and_walker_agree_byte_for_byte(self):
+        from harness import driver, fake_provider, graph, interruption
+
+        def deps_for(root):
+            return graph.build_deps(
+                root,
+                json.loads(FIXTURE.read_bytes()),
+                runner=fake_provider.fake_runner,
+                approval=interruption.auto_decline,
+            )
+
+        compiled_root, walker_root = self.root / "compiled", self.root / "walker"
+        driver.run_tournament(deps_for(compiled_root))
+        driver.drive(state.initial_state(), deps_for(walker_root))
+        self.assertEqual(
+            self.layout(compiled_root)["leaderboard.json"].read_bytes(),
+            self.layout(walker_root)["leaderboard.json"].read_bytes(),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

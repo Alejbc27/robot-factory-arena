@@ -34,6 +34,10 @@ from harness import (
     subprocess_adapter,
     tournament,
 )
+
+# Unit 6: drive moved to harness.driver — the identical walker is now the
+# user-facing stdlib seam; this module re-exports it for its own tests.
+from harness.driver import drive
 from tests.test_harness_evidence import FIXTURE as SEALED_FIXTURE
 
 LANGGRAPH_AVAILABLE = importlib.util.find_spec("langgraph") is not None
@@ -57,11 +61,11 @@ CONFIG = {
     "core_version": "0",
     "provider": "fake",
     "model": "fake-v1",
-    "generation": {"temperature": 0},
+    "generation": {},
     "prompt_policy_version": "amend-4a-3/llm-v1",
     "context_digest_scheme": "sha256:canonical-json-v1",
     "budget": 100,
-    "tool_grants": ["move"],
+    "tool_grants": ["move", "pick", "place"],
     "fault_config": None,
     "seeds": [18, 24, 30],
     "conditions": ["R1", "R2", "R3"],
@@ -188,61 +192,6 @@ def fake_runner(script, tag=""):
     return runner
 
 
-def drive(state_value, deps):
-    """Executes exactly the build_graph() edge topology with pure functions."""
-    state_value = graph.node_freeze_tournament_config(state_value, deps)
-    state_value = graph.node_assign_work(state_value, deps)
-    state_value = graph.node_plan_context(state_value, deps)
-    for _ in range(200):
-        plan_route = graph.route_after_plan(state_value, deps)
-        if plan_route == "approve_r1":
-            state_value = graph.node_approve_r1(state_value, deps)
-            approval_route = graph.route_after_approval(state_value)
-            if approval_route == "approve_r1":
-                continue
-            if approval_route == "retry_or_finish":
-                state_value = graph.node_retry_or_finish(state_value, deps)
-            else:
-                state_value = graph.node_merge_and_freeze_context(state_value, deps)
-                state_value = graph.node_register_launch(state_value, deps)
-                state_value = graph.node_launch_subprocess(state_value, deps)
-                state_value = graph.node_collect_and_bind_evidence(state_value, deps)
-                state_value = graph.node_retry_or_finish(state_value, deps)
-        elif plan_route == "collect_and_bind_evidence":
-            state_value = graph.node_collect_and_bind_evidence(state_value, deps)
-            state_value = graph.node_retry_or_finish(state_value, deps)
-        elif plan_route == "retry_or_finish":
-            state_value = graph.node_retry_or_finish(state_value, deps)
-        elif plan_route == "barrier_merge_r3":
-            state_value = graph.node_barrier_merge_r3(state_value, deps)
-            barrier_route = graph.route_after_barrier(state_value)
-            if barrier_route == "collect_and_bind_evidence":
-                # barrier drain: resolve the pending prior-round launch first
-                state_value = graph.node_collect_and_bind_evidence(state_value, deps)
-            elif barrier_route == "plan_context":
-                # barrier drain: a branch missing its prior-round work is
-                # routed through its own plan/launch flow (conditional edge)
-                state_value = graph.node_plan_context(state_value, deps)
-                continue
-            else:
-                state_value = graph.node_register_launch(state_value, deps)
-                state_value = graph.node_launch_subprocess(state_value, deps)
-                state_value = graph.node_collect_and_bind_evidence(state_value, deps)
-            state_value = graph.node_retry_or_finish(state_value, deps)
-        else:
-            state_value = graph.node_merge_and_freeze_context(state_value, deps)
-            state_value = graph.node_register_launch(state_value, deps)
-            state_value = graph.node_launch_subprocess(state_value, deps)
-            state_value = graph.node_collect_and_bind_evidence(state_value, deps)
-            state_value = graph.node_retry_or_finish(state_value, deps)
-        route = graph.route_after_retry(state_value)
-        if route == "aggregate_leaderboard":
-            return graph.node_aggregate_leaderboard(state_value, deps)
-        if route == "plan_context":
-            state_value = graph.node_plan_context(state_value, deps)
-    raise AssertionError("topology step budget exceeded")
-
-
 class Base(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -292,7 +241,7 @@ class TestFreezeAndRouting(Base):
         self.assertEqual(
             sealed, strategy_context.canonical_json_bytes(json.loads(sealed))
         )
-        drifted = dict(fixture, k_attempts=9)
+        drifted = dict(fixture, verification_version="2")
         with self.assertRaises(tournament.TournamentError):
             graph.node_freeze_tournament_config(
                 state.initial_state(), self.deps("complete", config=drifted)

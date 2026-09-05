@@ -19,6 +19,14 @@ class HarnessState(TypedDict, total=False):
     agent_id: str | None  # replace: current route agent
     context_snapshot_ref: dict | None  # replace: current frozen launch input
     status: str | None  # replace: current node/route status
+    # Unit 6: these four replace fields were always written by nodes (see
+    # REPLACE_FIELDS) but not declared here; the compiled LangGraph topology
+    # (harness.driver.run_tournament) filters node updates to DECLARED keys,
+    # so an undeclared field would be silently dropped between super-steps.
+    work_index: int | None  # replace: current work-queue index
+    work_count: int | None  # replace: total work items
+    attempt_id: str | None  # replace: current attempt id
+    last_evidence: dict | None  # replace: latest evidence summary
 
 
 APPEND_FIELDS = ("historial", "descubrimientos", "decision_log")
