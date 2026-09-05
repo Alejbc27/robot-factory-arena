@@ -215,6 +215,115 @@ class TestInvocationContract(Base):
             self.assertEqual(len(self.rows(target)), 9)
 
 
+class TestExecutionProfileBinding(Base):
+    """PR #26 remediation: the frozen config may only declare the execution
+    profile the core and provider adapters actually honor. Every rejection
+    below goes through the real CLI entry so the exit codes are real, and
+    validation must fire BEFORE any tournament artifact is written.
+
+    Verified adapter facts being pinned: the subprocess adapter passes only
+    seed/provider/model/artifacts-root/strategy-context to the core, the
+    core always executes GRANTS=("move", "pick", "place") with BUDGET=100,
+    the OpenAI adapter hardcodes reasoning_effort="none" for gpt-5.6-luna,
+    and the fake/GLM adapters send no generation parameters at all.
+    """
+
+    def _config_with(self, **changes):
+        config = json.loads(FIXTURE.read_bytes())
+        config.update(changes)
+        path = self.root / "profile.json"
+        path.write_bytes(strategy_context.canonical_json_bytes(config))
+        return path
+
+    def _assert_rejected(self, changes, fragment):
+        path = self._config_with(**changes)
+        code, _, err = self.main(self.fake_argv(config_path=path))
+        self.assertEqual(code, 2, err)
+        self.assertIn("invalid tournament config", err)
+        self.assertIn(fragment, err)
+        # validation happens before the tournament tree is ever created
+        self.assertFalse(
+            (self.root / "artifacts").exists(),
+            "rejected configs must not create any tournament artifacts",
+        )
+
+    def test_budget_other_than_the_locked_100_is_rejected(self):
+        self._assert_rejected({"budget": 99}, "budget")
+
+    def test_single_tool_grant_declares_an_unexecuted_profile(self):
+        self._assert_rejected({"tool_grants": ["move"]}, "tool grants")
+
+    def test_fault_config_is_not_executed_and_rejected(self):
+        self._assert_rejected({"fault_config": {}}, "fault")
+
+    def test_k_attempts_other_than_three_is_rejected(self):
+        self._assert_rejected({"k_attempts": 2}, "k_attempts")
+
+    def test_unexecuted_generation_is_rejected_for_defaults_adapters(self):
+        # fake-v1 sends NO generation parameters: temperature is a declared
+        # condition that cannot produce the score.
+        self._assert_rejected({"generation": {"temperature": 999}}, "generation")
+
+    def test_luna_generation_contract_is_exactly_reasoning_effort_none(self):
+        # drift from the luna adapter's real payload is rejected FIRST, in
+        # a virgin root, so the no-artifacts assertion is meaningful...
+        self._assert_rejected(
+            {
+                "provider": "openai",
+                "model": "gpt-5.6-luna",
+                "generation": {"temperature": 0},
+            },
+            "generation",
+        )
+        # ...and the exact frozen profile is accepted end-to-end (the fake
+        # wrapper fabricates evidence from the frozen argv, so the run
+        # stays offline while proving normal command construction).
+        path = self._config_with(
+            provider="openai",
+            model="gpt-5.6-luna",
+            generation={"reasoning_effort": "none"},
+        )
+        code, _, err = self.main(self.fake_argv(config_path=path))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.rows(config=json.loads(path.read_bytes()))), 9)
+
+    def test_glm_profile_is_the_defaults_sentinel(self):
+        # any generation payload is declared-but-never-sent by the GLM
+        # adapter, so rejected FIRST in a virgin root (no-artifacts
+        # assertion)...
+        self._assert_rejected(
+            {
+                "provider": "glm",
+                "model": "glm-5.3-flash",
+                "generation": {"temperature": 0},
+            },
+            "generation",
+        )
+        # ...then the live-acceptance model with {} (no generation
+        # parameters sent) runs green.
+        path = self._config_with(provider="glm", model="glm-5.3-flash", generation={})
+        code, _, err = self.main(self.fake_argv(config_path=path))
+        self.assertEqual(code, 0, err)
+
+    def test_unsupported_provider_model_pair_is_rejected(self):
+        path = self._config_with(provider="openai", model="glm-5.3-flash")
+        code, _, err = self.main(self.fake_argv(config_path=path))
+        self.assertEqual(code, 2, err)
+        self.assertIn("no frozen execution profile", err)
+        self.assertFalse((self.root / "artifacts").exists())
+
+    def test_supported_fake_profile_keeps_the_acceptance_run_green(self):
+        # the pinned real profile of the existing acceptance fixture:
+        # full grants + defaults sentinel generation.
+        self.assertEqual(
+            json.loads(FIXTURE.read_bytes())["tool_grants"], ["move", "pick", "place"]
+        )
+        self.assertEqual(json.loads(FIXTURE.read_bytes())["generation"], {})
+        code, _, err = self.main(self.fake_argv())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.rows()), 9)
+
+
 class TestFakeAcceptance(Base):
     def _run(self, root, answers=None):
         if answers is None:
@@ -340,7 +449,10 @@ class TestFakeAcceptance(Base):
     def test_config_drift_exits_non_zero(self):
         self.assertEqual(self._run(self.root)[0], 0)
         config = json.loads(FIXTURE.read_bytes())
-        config["k_attempts"] = 9
+        # verification_version passes validation but differs from the sealed
+        # value: a pure drift probe (k_attempts is pinned to the executable
+        # profile and is rejected at validation, before drift is reached).
+        config["verification_version"] = "2"
         path = self.root / "drift.json"
         path.write_bytes(strategy_context.canonical_json_bytes(config))
         code, _, err = self.main(["--config", str(path)])

@@ -37,12 +37,36 @@ class TournamentError(ValueError):
     """Config invalid, core version unknown, drift, or reseal attempted."""
 
 
+# --- Fail-closed execution profile (PR #26 review remediation) -------------
+#
+# The subprocess adapter passes ONLY seed/provider/model/artifacts-root/
+# strategy-context to the core, so the core always executes its own locked
+# constants — ``robot_factory_arena.cli.GRANTS = ("move", "pick", "place")``
+# and ``robot_factory_arena.cli.BUDGET = 100`` — and each provider adapter
+# sends exactly one frozen payload. A ``config.json`` declaring anything else
+# would freeze an experimental identity that cannot produce the recorded
+# score, so validation pins the exact executable profile below and fails
+# closed on every other value. Widen these tables ONLY when the core/adapter
+# actually executes the new condition.
+
+EXECUTION_BUDGET = 100
+EXECUTION_TOOL_GRANTS = ["move", "pick", "place"]
+EXECUTION_K_ATTEMPTS = 3
+
+#: Closed generation contract per ``(provider, model)``, mirroring each
+#: adapter's actual outbound payload: the OpenAI adapter hardcodes
+#: ``reasoning_effort="none"`` for ``gpt-5.6-luna`` and sends no other
+#: generation parameter; the fake and GLM adapters send no generation
+#: parameters at all (``{}`` = adapter defaults, nothing is sent).
+GENERATION_PROFILES = {
+    ("fake", "fake-v1"): {},
+    ("openai", "gpt-5.6-luna"): {"reasoning_effort": "none"},
+    ("glm", "glm-5.3-flash"): {},
+}
+
+
 def _nonempty(value):
     return isinstance(value, str) and value != ""
-
-
-def _int_at_least(value, minimum):
-    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
 
 
 def validate_config(config):
@@ -52,6 +76,17 @@ def validate_config(config):
     extra = sorted(set(config) - set(FROZEN_FIELDS))
     if extra:
         raise TournamentError(f"unknown config fields: {extra}")
+    profile = GENERATION_PROFILES.get((config["provider"], config["model"]))
+    if profile is None:
+        supported = ", ".join(
+            f"{provider}/{model} -> generation {generation!r}"
+            for (provider, model), generation in sorted(GENERATION_PROFILES.items())
+        )
+        raise TournamentError(
+            f"no frozen execution profile for provider/model "
+            f"{config['provider']!r}/{config['model']!r}; supported "
+            f"(closed contract): {supported}"
+        )
     checks = (
         (config["schema_version"] == versions.CONFIG_SCHEMA_VERSION, "schema_version"),
         (
@@ -69,8 +104,11 @@ def validate_config(config):
             "provider/model",
         ),
         (
-            isinstance(config["generation"], dict) and bool(config["generation"]),
-            "generation settings",
+            config["generation"] == profile,
+            f"generation settings for {config['provider']!r}/"
+            f"{config['model']!r} (the adapter executes exactly "
+            f"{profile!r}; any other declared generation settings would "
+            f"never be sent to the provider)",
         ),
         (
             config["prompt_policy_version"] == "amend-4a-3/llm-v1",
@@ -80,19 +118,21 @@ def validate_config(config):
             config["context_digest_scheme"] == "sha256:canonical-json-v1",
             "StrategyContext digest scheme",
         ),
-        (_int_at_least(config["budget"], 1), "budget"),
+        (config["budget"] == EXECUTION_BUDGET, "budget (the core executes BUDGET=100)"),
         (
-            isinstance(config["tool_grants"], list)
-            and all(_nonempty(grant) for grant in config["tool_grants"]),
-            "tool grants",
+            config["tool_grants"] == EXECUTION_TOOL_GRANTS,
+            "tool grants (the core executes exactly ['move', 'pick', 'place'])",
         ),
         (
-            config["fault_config"] is None or isinstance(config["fault_config"], dict),
-            "fault configuration",
+            config["fault_config"] is None,
+            "fault_config (no fault configuration is executed; must be null)",
         ),
         (config["seeds"] == [18, 24, 30], "ordered seeds"),
         (config["conditions"] == ["R1", "R2", "R3"], "conditions"),
-        (_int_at_least(config["k_attempts"], 1), "k_attempts"),
+        (
+            config["k_attempts"] == EXECUTION_K_ATTEMPTS,
+            "k_attempts (this release runs exactly K=3)",
+        ),
         (_nonempty(config["verification_version"]), "verification_version"),
         (_nonempty(config["evidence_schema_version"]), "evidence_schema_version"),
         (_nonempty(config["artifact_root"]), "artifact_root"),

@@ -61,11 +61,11 @@ CONFIG = {
     "core_version": "0",
     "provider": "fake",
     "model": "fake-v1",
-    "generation": {"temperature": 0},
+    "generation": {},
     "prompt_policy_version": "amend-4a-3/llm-v1",
     "context_digest_scheme": "sha256:canonical-json-v1",
     "budget": 100,
-    "tool_grants": ["move"],
+    "tool_grants": ["move", "pick", "place"],
     "fault_config": None,
     "seeds": [18, 24, 30],
     "conditions": ["R1", "R2", "R3"],
@@ -241,7 +241,7 @@ class TestFreezeAndRouting(Base):
         self.assertEqual(
             sealed, strategy_context.canonical_json_bytes(json.loads(sealed))
         )
-        drifted = dict(fixture, k_attempts=9)
+        drifted = dict(fixture, verification_version="2")
         with self.assertRaises(tournament.TournamentError):
             graph.node_freeze_tournament_config(
                 state.initial_state(), self.deps("complete", config=drifted)

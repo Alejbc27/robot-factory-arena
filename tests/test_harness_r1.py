@@ -600,8 +600,10 @@ class TestLaunchWindowRestart(Base):
         ]
 
     def test_registration_window_crash_recovers_with_a_new_ordinal(self):
-        # K=2 so the recovery attempt exhausts the pair deterministically
-        config = dict(FIXTURE_CONFIG, k_attempts=2)
+        # K is pinned to 3 by the executable execution profile: the crash
+        # recovery plus two scripted unresolved launches exhaust the pair
+        # deterministically.
+        config = FIXTURE_CONFIG
         tournament.validate_config(config)
         terminal = scripted_terminal([{"decision": "yes"}])
         deps = self.deps("valid_then_timeout", terminal, config=config, tag="w1-")
@@ -634,7 +636,14 @@ class TestLaunchWindowRestart(Base):
             and r.get("seed") == "18"
             and r["event"] == "launch_registered"
         ]
-        self.assertEqual(registered, [first_id, "r1-agent-01-seed-18-attempt-02"])
+        self.assertEqual(
+            registered,
+            [
+                first_id,
+                "r1-agent-01-seed-18-attempt-02",
+                "r1-agent-01-seed-18-attempt-03",
+            ],
+        )
         # explicit recovery evidence for the ambiguous window
         recovery = [
             r
@@ -654,11 +663,12 @@ class TestLaunchWindowRestart(Base):
             {
                 first_id: "crash_window_unobserved",
                 "r1-agent-01-seed-18-attempt-02": "subprocess_timeout",
+                "r1-agent-01-seed-18-attempt-03": "subprocess_timeout",
             },
         )
         row = self.row_for("R1", "18", config)
         self.assertEqual(row["status"], "evidence_invalid")
-        self.assertEqual(row["attempts_used"], 2)
+        self.assertEqual(row["attempts_used"], 3)
         self.assertIsNone(row["verified_score"])
         # the pre-crash registration is preserved, never overwritten
         self.assertTrue(

@@ -30,11 +30,11 @@ BASE_CONFIG = {
     "core_version": "0",
     "provider": "fake",
     "model": "fake-v1",
-    "generation": {"temperature": 0},
+    "generation": {},
     "prompt_policy_version": "amend-4a-3/llm-v1",
     "context_digest_scheme": "sha256:canonical-json-v1",
     "budget": 100,
-    "tool_grants": ["move"],
+    "tool_grants": ["move", "pick", "place"],
     "fault_config": None,
     "seeds": [18, 24, 30],
     "conditions": ["R1", "R2", "R3"],
@@ -90,7 +90,10 @@ class TestTournamentFreeze(Base):
 
     def test_rejects_drift_and_unknown_core_version(self):
         tournament.seal(self.root, BASE_CONFIG)
-        drifted = dict(BASE_CONFIG, k_attempts=4)
+        # verification_version passes validation but differs from the sealed
+        # value: a pure comparability-drift probe (k_attempts is pinned and
+        # would be rejected by validate_config before drift is even reached).
+        drifted = dict(BASE_CONFIG, verification_version="2")
         with self.assertRaises(tournament.TournamentError):
             tournament.reject_drift(BASE_CONFIG, drifted)
         unknown = dict(BASE_CONFIG, core_version="99")
@@ -101,6 +104,63 @@ class TestTournamentFreeze(Base):
             bad[field] = [30, 24, 18] if field == "seeds" else None
             with self.assertRaises(tournament.TournamentError):
                 tournament.validate_config(bad)
+
+    def test_execution_profile_is_pinned_fail_closed(self):
+        """PR #26 remediation: config.json may only declare the profile the
+        core/adapters actually execute — anything else is a declared condition
+        that cannot produce the score, so validation fails closed."""
+        rejections = (
+            ("budget", 99),
+            ("budget", "100"),
+            ("tool_grants", ["move"]),
+            ("tool_grants", ["place", "pick", "move"]),
+            ("fault_config", {}),
+            ("k_attempts", 2),
+            ("k_attempts", 4),
+            ("generation", {"temperature": 0}),
+            ("generation", {"temperature": 999}),
+            ("generation", {"reasoning_effort": "none"}),
+        )
+        for field, value in rejections:
+            with self.subTest(field=field, value=value):
+                bad = dict(BASE_CONFIG)
+                bad[field] = value
+                with self.assertRaises(tournament.TournamentError):
+                    tournament.validate_config(bad)
+
+    def test_unknown_provider_model_has_no_frozen_profile(self):
+        for provider, model in (("openai", "fake-v1"), ("glm", "gpt-5.6-luna")):
+            with self.subTest(provider=provider, model=model):
+                bad = dict(BASE_CONFIG, provider=provider, model=model)
+                with self.assertRaises(tournament.TournamentError) as caught:
+                    tournament.validate_config(bad)
+                self.assertIn("no frozen execution profile", str(caught.exception))
+                self.assertIn("supported", str(caught.exception))
+
+    def test_supported_generation_profiles_are_the_closed_contract(self):
+        # Exact per-(provider, model) adapter payloads: the OpenAI adapter
+        # hardcodes reasoning_effort="none" for gpt-5.6-luna; the fake and GLM
+        # adapters send NO generation parameters ({} = adapter defaults).
+        supported = {
+            ("fake", "fake-v1"): {},
+            ("openai", "gpt-5.6-luna"): {"reasoning_effort": "none"},
+            ("glm", "glm-5.3-flash"): {},
+        }
+        self.assertEqual(
+            tournament.GENERATION_PROFILES,
+            supported,
+            "the closed generation contract must mirror the real adapters",
+        )
+        for (provider, model), generation in supported.items():
+            with self.subTest(provider=provider, model=model):
+                config = dict(
+                    BASE_CONFIG,
+                    tournament_id=f"tournament-profile-{provider}",
+                    provider=provider,
+                    model=model,
+                    generation=generation,
+                )
+                tournament.validate_config(config)
 
     def test_expected_layout_covers_design_tree(self):
         layout = tournament.expected_layout(self.root, "tournament-unit2")
