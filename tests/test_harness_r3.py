@@ -703,6 +703,133 @@ class TestDiscoveryAdmission(Base):
             ],
         )
 
+    def test_all_round_one_discoveries_admit_exactly_once_without_round_two(
+        self,
+    ):
+        """All-terminal round 1: every receipt-bound discovery is admitted
+        exactly once and NO round-2 snapshot is ever required."""
+        cfg = config()
+        for attempt_id in (
+            "r3-agent-01-seed-18-attempt-01",
+            "r3-agent-02-seed-24-attempt-01",
+            "r3-agent-03-seed-30-attempt-01",
+        ):
+            self.write_candidates(attempt_id, cfg)
+        drive(state.initial_state(), self.deps(r3_runner(tag="a1-"), cfg))
+        identities = [
+            (d["source_attempt_id"], d["explorer_id"], d["discovery_ordinal"])
+            for d in self.admitted(cfg)
+        ]
+        expected = [
+            (f"r3-agent-0{agent}-seed-{seed}-attempt-01", explorer, ordinal)
+            for agent, seed in ((1, 18), (2, 24), (3, 30))
+            for explorer, ordinal in (("explorer-01", 0), ("explorer-02", 1))
+        ]
+        self.assertEqual(sorted(identities), sorted(expected))
+        self.assertEqual(len(identities), len(set(identities)))
+        self.assertEqual(
+            [
+                r
+                for r in self.decisions(cfg)
+                if r["event"] == "context_snapshot_frozen" and r.get("round") == 2
+            ],
+            [],
+        )
+        self.assertEqual(
+            self.context_names(cfg),
+            [
+                "strategy-context-000.json",
+                "strategy-context-001.json",
+                "strategy-context-002.json",
+                "strategy-context-003.json",
+            ],
+        )
+
+    def test_final_round_discovery_persists_without_any_later_launch(self):
+        """A terminal final-round attempt's discoveries reach
+        discoveries.jsonl even though no later round ever runs."""
+        cfg = config()
+        self.write_candidates("r3-agent-01-seed-18-attempt-02", cfg)
+        self.full_lineage(cfg=cfg)
+        identities = [
+            (d["source_attempt_id"], d["explorer_id"])
+            for d in self.admitted(cfg)
+            if d["source_attempt_id"] == "r3-agent-01-seed-18-attempt-02"
+        ]
+        self.assertEqual(
+            identities,
+            [
+                ("r3-agent-01-seed-18-attempt-02", "explorer-01"),
+                ("r3-agent-01-seed-18-attempt-02", "explorer-02"),
+            ],
+        )
+        # the terminal launch never saw its own discovery: the round-2
+        # snapshot predates the attempt-02 admission
+        self.assertEqual(self.row("R3", "18", cfg)["attempts_used"], 2)
+
+    def test_late_admission_never_mutates_a_frozen_snapshot(self):
+        cfg = config()
+        for attempt_id in (
+            "r3-agent-01-seed-18-attempt-02",
+            "r3-agent-02-seed-24-attempt-01",
+            "r3-agent-03-seed-30-attempt-01",
+        ):
+            self.write_candidates(attempt_id, cfg)
+        self.full_lineage(cfg=cfg)
+        round_two_before = self.snapshot(4, cfg)
+        round_one_before = self.snapshot(3, cfg)
+        # a NEW valid candidate identity appears for a bound attempt AFTER
+        # the tournament completed: the log grows, frozen snapshots do not
+        extra = {
+            "schema_version": 1,
+            "discoveries": [
+                {
+                    "explorer_id": "explorer-01",
+                    "discovery_ordinal": 0,
+                    "text": "The north corridor gate opens only after the blue "
+                    "switch flips",
+                },
+                {
+                    "explorer_id": "explorer-02",
+                    "discovery_ordinal": 1,
+                    "text": "Carrying two boxes past the ramp stalls the walker",
+                },
+                {
+                    "explorer_id": "explorer-03",
+                    "discovery_ordinal": 2,
+                    "text": "A late candidate discovered after the final freeze",
+                },
+            ],
+        }
+        self.write_candidates("r3-agent-02-seed-24-attempt-01", cfg, extra)
+        admitted = graph.record_discoveries(self.deps(r3_runner(), cfg))
+        self.assertEqual(admitted, 1)
+        self.assertEqual(self.snapshot(4, cfg), round_two_before)
+        self.assertEqual(self.snapshot(3, cfg), round_one_before)
+        self.assertEqual(
+            [d for d in self.admitted(cfg) if d["explorer_id"] == "explorer-03"],
+            [
+                {
+                    "source_attempt_id": "r3-agent-02-seed-24-attempt-01",
+                    "explorer_id": "explorer-03",
+                    "discovery_ordinal": 2,
+                    "producing_condition": "R3",
+                    "producing_agent_id": "agent-02",
+                    "producing_seed": "24",
+                    "producing_attempt_ordinal": 1,
+                    "evidence": {
+                        "run_status": "finished",
+                        "core_receipt_digest": late["evidence"]["core_receipt_digest"],
+                        "llm_receipt_digest": late["evidence"]["llm_receipt_digest"],
+                    },
+                    "text": "A late candidate discovered after the final freeze",
+                }
+                for late in [
+                    d for d in self.admitted(cfg) if d["explorer_id"] == "explorer-03"
+                ]
+            ],
+        )
+
     def test_unregistered_attempt_files_are_never_read(self):
         cfg = config()
         self.write_candidates("r3-agent-99-seed-99-attempt-01", cfg)
@@ -883,10 +1010,11 @@ class TestR3Restart(Base):
             )
             for d in self.admitted(cfg)
         ]
-        # two explorers per candidate file, two bound round-1 attempts: four
-        # identity-unique records, none duplicated by the restart re-sweep
+        # two explorers per candidate file: two bound round-1 attempts plus
+        # the restarted round-2 attempt-02 — six identity-unique records,
+        # none duplicated, and the final-round records persist
         self.assertEqual(len(identities), len(set(identities)))
-        self.assertEqual(len(identities), 4)
+        self.assertEqual(len(identities), 6)
         second = self.launch("r3-agent-01-seed-18-attempt-02", cfg)
         self.assertEqual(
             second["context_digest"], strategy_context.sha256_digest(pre_crash)

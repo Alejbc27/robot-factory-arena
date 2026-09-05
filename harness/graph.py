@@ -743,19 +743,47 @@ def _enriched_discovery(deps, launch, candidate, bound):
     return record
 
 
-def record_discoveries(deps):
+def record_discoveries(deps, attempt_id=None):
     """Admit candidates for every finished receipt-bound R3 run (§8 node 9).
-    Admission is idempotent per declared identity: an identical repeat skips,
-    and conflicting content under one identity fails closed."""
+
+    ADMISSION into the DiscoveryStore is separate from NEXT-ROUND SNAPSHOT
+    creation: admission is deterministic at R3 attempt bind time (the
+    collector admits the just-bound attempt's candidates immediately), with
+    a mandatory idempotent terminal sweep before the leaderboard as the
+    crash-window backstop, so even a final-round discovery persists without
+    any later launch. The round barrier composes ONLY already-admitted
+    records — a late-appearing candidate file can never slip into a later
+    snapshot, and a late admission never mutates a frozen snapshot.
+    Admission is idempotent per declared identity: an identical repeat
+    skips, and conflicting content under one identity fails closed.
+    ``attempt_id`` targets one just-bound attempt (the default sweeps every
+    bound attempt); a targeted unbound attempt fails closed."""
     existing = {}
     for record in deps.discovery_log.records():
         if record.get("event") == "discovery_admitted":
             existing[_discovery_identity(record["discovery"])] = record["discovery"]
-    bound = {
-        r["attempt_id"]: r
-        for r in deps.attempt_log.records()
-        if r.get("event") == "evidence_bound" and r.get("condition") == "R3"
-    }
+    if attempt_id is None:
+        bound = {
+            r["attempt_id"]: r
+            for r in deps.attempt_log.records()
+            if r.get("event") == "evidence_bound" and r.get("condition") == "R3"
+        }
+    else:
+        record = next(
+            (
+                r
+                for r in deps.attempt_log.records()
+                if r.get("event") == "evidence_bound"
+                and r.get("condition") == "R3"
+                and r.get("attempt_id") == attempt_id
+            ),
+            None,
+        )
+        if record is None:
+            raise HarnessGraphError(
+                f"cannot admit discoveries for unbound attempt {attempt_id}"
+            )
+        bound = {attempt_id: record}
     launched = {
         r["attempt_id"]: r
         for r in deps.attempt_log.records()
@@ -837,8 +865,10 @@ def node_barrier_merge_r3(state, deps):
     routing to the first pending attempt by ``(attempt_ordinal, seed)`` so
     its collector resolves it (a bind, or the fail-closed U3 crash-window
     classification for the registered-unobserved window); an already-resolved
-    retry pair never blocks — it participates in the next round. Admission is
-    swept first; the merge sorts by declared identity
+    retry pair never blocks — it participates in the next round. The merge
+    composes only ALREADY-ADMITTED records (admission happens at each
+    attempt's bind, with a mandatory terminal sweep before the leaderboard);
+    it sorts by declared identity
     ``(source_attempt_id, explorer_id, discovery_ordinal)`` with no LLM
     coordinator, ranking, dedup-by-content, or completion-timing input; and
     ONE identical snapshot per round is frozen before any branch of that
@@ -891,7 +921,6 @@ def node_barrier_merge_r3(state, deps):
             agent_id=_agent_id(deps.config, "R3", pending["seed"]),
             status="barrier_drain",
         )
-    record_discoveries(deps)
     context = _r3_round_context(deps)
     ordinal = _next_snapshot_ordinal(deps)
     path = deps.layout["contexts"] / f"strategy-context-{ordinal:03d}.json"
@@ -1097,6 +1126,11 @@ def node_collect_and_bind_evidence(state, deps):
                 "run_dir": new_dirs[0],
             }
         )
+        if condition == "R3":
+            # deterministic ADMISSION at bind time (§8 node 9): the
+            # just-bound attempt's candidates enter the DiscoveryStore now,
+            # never via a later barrier sweep of files
+            record_discoveries(deps, attempt_id)
         last = {
             "status": "bound",
             "outcome": result.outcome,
@@ -1190,6 +1224,10 @@ def node_retry_or_finish(state, deps):
 
 
 def node_aggregate_leaderboard(state, deps):
+    # mandatory terminal admission sweep: a bind whose targeted admission
+    # was interrupted by a crash is admitted exactly once before the rows
+    # freeze (idempotent; a no-op for tournaments without bound R3 runs)
+    record_discoveries(deps)
     declines = [
         r for r in deps.decision_log.records() if r.get("event") == "launch_declined"
     ]
