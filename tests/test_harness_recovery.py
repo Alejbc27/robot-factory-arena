@@ -52,12 +52,12 @@ class TestRestartContinuity(Base):
         latest = deps.checkpoints.latest()
         if not isinstance(latest, dict):  # fail closed: no readable checkpoint
             self.fail("restart found no readable latest checkpoint")
-        # decline-all terminal: the final R1 event is a decline, so the last
-        # persisted boundary is its post-answer checkpoint
-        self.assertEqual(latest["boundary"], "post_answer")
+        # decline-all R1 pairs advance the queue into the R3 branch rounds,
+        # whose final launch persists the post-binding checkpoint
+        self.assertEqual(latest["boundary"], "post_binding")
         # every leaderboard row survives the restart untouched
         rows = json.loads(layout["leaderboard.json"].read_bytes())["rows"]
-        self.assertEqual(len(rows), 6)
+        self.assertEqual(len(rows), 9)
 
     def test_truncated_attempt_log_fails_closed_at_restart(self):
         layout = self._completed_layout()
