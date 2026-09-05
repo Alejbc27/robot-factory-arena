@@ -33,4 +33,4 @@ jobs:
       - name: Install the optional harness extra only
         run: python -m pip install -e ".[harness]"
       - name: All harness test modules (langgraph installed)
-        run: python -m unittest tests.test_harness_foundation tests.test_harness_isolation tests.test_harness_evidence tests.test_harness_r2 tests.test_harness_leaderboard tests.test_harness_r1 tests.test_harness_recovery tests.test_harness_strategy_context tests.test_harness_r3 -v
+        run: python -m unittest tests.test_harness_foundation tests.test_harness_isolation tests.test_harness_evidence tests.test_harness_r2 tests.test_harness_leaderboard tests.test_harness_r1 tests.test_harness_recovery tests.test_harness_strategy_context tests.test_harness_r3 tests.test_harness_acceptance -v
