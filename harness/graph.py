@@ -1,16 +1,20 @@
-"""LangGraph topology for the R2 autonomous tournament path (design §6-§8).
+"""LangGraph topology for the R2/R1 tournament paths (design §6-§8).
 
 This module is the ONLY LangGraph home in ``harness/``: it imports LangGraph
 lazily inside :func:`build_graph`, so every pure node/route function below is
 testable without the optional extra (the compile test skips locally and runs
 in CI against langgraph 1.2.11).
 
-Nodes own all writes; the two conditional edges only inspect state/logs and
-route. R2 is autonomous: one agent, no human prompt, no discoveries, no
-silent fallback. Retry semantics: only failures, timeouts, non-zero exits,
-and missing/invalid/unresolved evidence route to a NEW attempt ordinal,
-until exactly K launched attempts; a first valid receipt — completed or a
-safe abort — is terminal and is never rerun.
+Nodes own all writes; the conditional edges only inspect state/logs and route.
+R2 is autonomous: one agent, no human prompt, no discoveries, no silent
+fallback. R1 adds the human-interruption path: an injectable approval terminal
+is prompted per work item; answers are controlled data (``harness.interruption``),
+declines are explicit replayable events, and approved human guidance enters the
+core ONLY through the canonical StrategyContext pipeline frozen at merge time.
+Retry semantics are shared: only failures, timeouts, non-zero exits, and
+missing/invalid/unresolved evidence route to a NEW attempt ordinal, until
+exactly K launched attempts; a first valid receipt — completed or a safe abort
+— is terminal and is never rerun.
 
 Pair progress is reconstructed EXPLICITLY from the append-only attempt log
 (PR #20): the latest launch with no evidence resolution is collected and
@@ -22,7 +26,10 @@ crash window therefore resumes to the identical decision: the same
 attempt_id is never relaunched, a bound terminal receipt is never repeated,
 and the exact-K limit is never exceeded. The registered-but-unbound window
 stays ambiguous: it is counted as a launch, never rerun under the same
-``attempt_id``, and recovery records an explicit event.
+``attempt_id``, and recovery records an explicit event. R1 approval state is
+reconstructed from the decision log under the same contract: a standing
+approval grant is never re-prompted after a crash, and a decline is never
+silently re-proposed.
 """
 
 import json
@@ -33,16 +40,27 @@ from typing import Any
 from . import (
     checkpointing,
     evidence,
+    interruption,
     leaderboard,
     logs,
     strategy_context,
     subprocess_adapter,
     tournament,
 )
-from .checkpointing import POST_BINDING, POST_REGISTRATION, PRE_LAUNCH
+from .checkpointing import (
+    POST_ANSWER,
+    POST_BINDING,
+    POST_REGISTRATION,
+    PRE_LAUNCH,
+    PRE_PROMPT,
+)
 from .state import HarnessState, set_current
 
-CONDITION = "R2"
+# Deterministic implemented-condition order for the work queue: the
+# autonomous R2 reference pairs are deliberately grouped first so an
+# unattended batch completes them before reaching R1 prompts. R3 stays an
+# explicit deferral (Unit 5).
+IMPLEMENTED_CONDITIONS = ("R2", "R1")
 AGENT_ID = "agent-01"
 
 _RETRY_ROUTES = {
@@ -55,6 +73,13 @@ _PLAN_ROUTES = {
     "merge_and_freeze_context": "merge_and_freeze_context",
     "collect_and_bind_evidence": "collect_and_bind_evidence",
     "retry_or_finish": "retry_or_finish",
+    "approve_r1": "approve_r1",
+}
+
+_APPROVAL_ROUTES = {
+    "approval_granted": "merge_and_freeze_context",
+    "approval_edited": "approve_r1",
+    "launch_declined": "retry_or_finish",
 }
 
 
@@ -76,10 +101,22 @@ class GraphDeps:
     decision_log: logs.AppendOnlyLog
     checkpoints: checkpointing.CheckpointStore
     expectations: dict
+    approval: Any
 
 
-def build_deps(root, config, runner=subprocess_adapter.local_runner, timeout=None):
-    """Validate the config and bind the sealed layout, logs, and checkpoints."""
+def build_deps(
+    root,
+    config,
+    runner=subprocess_adapter.local_runner,
+    timeout=None,
+    approval=None,
+):
+    """Validate the config and bind the sealed layout, logs, and checkpoints.
+
+    Recovery contract (§8): append-only log continuity is verified BEFORE the
+    logs are used, so a truncated or overwritten log fails closed at restart
+    instead of silently replaying fewer records.
+    """
     tournament.validate_config(config)
     root = Path(root)
     layout = tournament.ensure_layout(
@@ -87,6 +124,8 @@ def build_deps(root, config, runner=subprocess_adapter.local_runner, timeout=Non
     )
     attempt_log = logs.AppendOnlyLog(layout["attempt-log.jsonl"])
     decision_log = logs.AppendOnlyLog(layout["decision-log.jsonl"])
+    attempt_log.verify()
+    decision_log.verify()
     expectations = {}
     for record in decision_log.records():
         if record.get("event") == "expectations_recorded":
@@ -105,7 +144,17 @@ def build_deps(root, config, runner=subprocess_adapter.local_runner, timeout=Non
         decision_log=decision_log,
         checkpoints=checkpointing.CheckpointStore(layout["checkpoints"]),
         expectations=expectations,
+        approval=approval,
     )
+
+
+def work_items(config):
+    """Deterministic work queue: implemented conditions × frozen seed order."""
+    return [
+        (condition, str(seed))
+        for condition in IMPLEMENTED_CONDITIONS
+        for seed in config["seeds"]
+    ]
 
 
 def _attempt_id(condition, seed, ordinal):
@@ -122,6 +171,15 @@ def _pair_launches(deps, condition, seed):
             and record.get("seed") == seed
         ),
         key=lambda r: r["attempt_ordinal"],
+    )
+
+
+def _has_pair_event(deps, event, condition, seed):
+    return any(
+        record.get("event") == event
+        and record.get("condition") == condition
+        and record.get("seed") == seed
+        for record in deps.decision_log.records()
     )
 
 
@@ -251,35 +309,36 @@ def node_freeze_tournament_config(state, deps):
 
 
 def node_assign_work(state, deps):
-    """R2 is the only implemented route; deferrals are explicit, never silent."""
-    implemented = (CONDITION,)
-    deferred = [c for c in deps.config["conditions"] if c not in implemented]
+    """R2/R1 are implemented; R3 defers explicitly, never silently (Unit 5)."""
+    deferred = [c for c in deps.config["conditions"] if c not in IMPLEMENTED_CONDITIONS]
     if deferred:
         deps.decision_log.append({"event": "routes_deferred", "conditions": deferred})
     return set_current(
         state,
         work_index=0,
-        work_count=len(deps.config["seeds"]),
+        work_count=len(work_items(deps.config)),
         status="work_assigned",
     )
 
 
 def node_plan_context(state, deps):
-    """R2 first route: canonical null context; resume ordinal comes from the log."""
-    seed = str(deps.config["seeds"][state["work_index"]])
-    launches = _pair_launches(deps, CONDITION, seed)
+    """Route the next work item; the resume ordinal comes from the log."""
+    condition, seed = work_items(deps.config)[state["work_index"]]
+    launches = _pair_launches(deps, condition, seed)
     ordinal = max((r["attempt_ordinal"] for r in launches), default=0)
     deps.decision_log.append(
         {
             "event": "context_planned",
-            "condition": CONDITION,
+            "condition": condition,
             "seed": seed,
-            "source": "null-first-route",
+            "source": "r1-approval-pipeline"
+            if condition == "R1"
+            else "null-first-route",
         }
     )
     return set_current(
         state,
-        condition=CONDITION,
+        condition=condition,
         semilla=seed,
         agent_id=AGENT_ID,
         intentos=ordinal,
@@ -289,12 +348,163 @@ def node_plan_context(state, deps):
     )
 
 
+def _approved_guidance(deps, condition, seed):
+    """Approved guidance for the pair: the latest pre-grant revision (§6).
+
+    An edit REPLACES the pending guidance list; earlier revisions stay in the
+    append-only log as history but can never resurrect into a later snapshot.
+    Guidance recorded after the standing grant is ignored — approvals freeze
+    the guidance at the moment of the grant.
+    """
+    texts = []
+    for record in deps.decision_log.records():
+        if record.get("condition") != condition or record.get("seed") != seed:
+            continue
+        if record.get("event") == "approval_edit":
+            texts = list(record["guidance"])
+        elif record.get("event") == "approval_granted":
+            return texts
+    return texts
+
+
+def _proposal_round(deps, condition, seed):
+    """Deterministic prompt counter: each prior answer marks one prompt."""
+    return sum(
+        1
+        for record in deps.decision_log.records()
+        if record.get("condition") == condition
+        and record.get("seed") == seed
+        and record.get("event")
+        in ("approval_edit", "approval_granted", "launch_declined")
+    )
+
+
+def node_approve_r1(state, deps):
+    """R1 interruption: the injectable terminal answers a controlled proposal.
+
+    The answer is validated BEFORE any side effect beyond the pre-prompt
+    checkpoint, so a hostile or buggy terminal can never reach the prompt, the
+    observation, the provider request, or the score path: the only editable
+    field is guidance text, and guidance enters exclusively through the
+    canonical StrategyContext pipeline at merge time. ``yes`` grants exactly
+    one proposal; ``edit`` logs the revision BEFORE its follow-up prompt;
+    ``no`` records ``launch_declined`` — a real orchestration outcome, never
+    a silent skip — and no subprocess attempt is allocated.
+    """
+    if deps.approval is None:
+        raise HarnessGraphError(
+            "R1 requires an injectable approval terminal; "
+            "there is no silent auto-approval"
+        )
+    condition, seed = state["condition"], state["semilla"]
+    round_number = _proposal_round(deps, condition, seed)
+    view = {
+        "condition": condition,
+        "seed": seed,
+        "proposal_round": round_number,
+        "proposed_attempt_id": _attempt_id(
+            condition, seed, len(_pair_launches(deps, condition, seed)) + 1
+        ),
+        "current_guidance": list(_approved_guidance(deps, condition, seed)),
+        "editable_fields": ("guidance",),
+        "frozen_fields": (
+            "condition",
+            "seed",
+            "provider",
+            "model",
+            "generation",
+            "k_attempts",
+            "tool_grants",
+            "fault_config",
+            "seeds",
+            "prompt_policy_version",
+        ),
+    }
+    deps.checkpoints.write(
+        PRE_PROMPT,
+        {"condition": condition, "seed": seed, "proposal_round": round_number},
+    )
+    answer = deps.approval(view)
+    interruption.validate_answer(answer)
+    deps.checkpoints.write(
+        POST_ANSWER,
+        {
+            "condition": condition,
+            "seed": seed,
+            "proposal_round": round_number,
+            "decision": answer["decision"],
+        },
+    )
+    if answer["decision"] == "yes":
+        deps.decision_log.append(
+            {
+                "event": "approval_granted",
+                "condition": condition,
+                "seed": seed,
+                "proposal_round": round_number,
+            }
+        )
+        return set_current(state, status="approval_granted")
+    if answer["decision"] == "edit":
+        deps.decision_log.append(
+            {
+                "event": "approval_edit",
+                "condition": condition,
+                "seed": seed,
+                "proposal_round": round_number,
+                "guidance": list(answer["guidance"]),
+            }
+        )
+        return set_current(state, status="approval_edited")
+    deps.decision_log.append(
+        {
+            "event": "launch_declined",
+            "condition": condition,
+            "seed": seed,
+            "proposal_round": round_number,
+        }
+    )
+    return set_current(state, status="launch_declined")
+
+
+def _next_snapshot_ordinal(deps):
+    """Global monotonic snapshot ordinal derived from the append-only log."""
+    return sum(
+        1
+        for record in deps.decision_log.records()
+        if record.get("event") == "context_snapshot_frozen"
+    )
+
+
 def node_merge_and_freeze_context(state, deps):
-    """Freeze the canonical null snapshot before launch (§2.2)."""
-    ordinal = state["work_index"]
+    """Freeze the canonical snapshot before launch (§2.2).
+
+    R2 freezes the canonical null first-route snapshot; R1 freezes the
+    approved human guidance through the same validator, canonical builder,
+    digest, and atomic freeze path — guidance has no other door. A no-guidance
+    R1 approval freezes the same canonical ``null`` as R2.
+    """
+    condition, seed = state["condition"], state["semilla"]
+    if condition == "R1":
+        context = interruption.build_guidance_context(
+            deps.config["tournament_id"], _approved_guidance(deps, condition, seed)
+        )
+    else:
+        context = None
+    ordinal = _next_snapshot_ordinal(deps)
     path = deps.layout["contexts"] / f"strategy-context-{ordinal:03d}.json"
-    ref = strategy_context.freeze_snapshot(None, path)
-    ref["snapshot_ordinal"] = ordinal
+    frozen = strategy_context.freeze_snapshot(context, path)
+    ref = {**frozen, "snapshot_ordinal": ordinal}
+    deps.decision_log.append(
+        {
+            "event": "context_snapshot_frozen",
+            "condition": condition,
+            "seed": seed,
+            "snapshot_ordinal": ordinal,
+            "context_digest": ref["digest"],
+            "source": "r1-guidance" if condition == "R1" else "null-first-route",
+        }
+    )
     return set_current(state, context_snapshot_ref=ref, status="context_frozen")
 
 
@@ -484,10 +694,17 @@ def _record_pair_terminal(deps, latest, launches):
 def node_retry_or_finish(state, deps):
     """The append-only log is the single source of truth for terminal vs retry
     (PR #20), so a crash before this node resumes to the identical decision —
-    recorded exactly once per pair."""
+    recorded exactly once per pair. A fully declined pair is terminal with no
+    attempt record: the decline decision advances the work queue."""
     condition, seed = state["condition"], state["semilla"]
     kind, latest = _pair_state(deps, condition, seed)
     launches = _pair_launches(deps, condition, seed)
+    if kind == "fresh" and _has_pair_event(deps, "launch_declined", condition, seed):
+        if not _has_pair_event(deps, "pair_declined", condition, seed):
+            deps.decision_log.append(
+                {"event": "pair_declined", "condition": condition, "seed": seed}
+            )
+        kind, latest = "terminal", None
     if kind == "retry":
         if not any(
             record.get("event") == "retry_decision"
@@ -509,7 +726,8 @@ def node_retry_or_finish(state, deps):
         raise HarnessGraphError(
             f"retry_or_finish reached with pair state {kind!r} for seed {seed}"
         )
-    _record_pair_terminal(deps, latest, launches)
+    if latest is not None:
+        _record_pair_terminal(deps, latest, launches)
     index = state["work_index"] + 1
     if index < state["work_count"]:
         return set_current(state, work_index=index, status="next_work")
@@ -527,14 +745,28 @@ def node_aggregate_leaderboard(state, deps):
 
 
 def route_after_plan(state, deps):
-    """Routes purely from the reconstructed pair state — never in-memory state
-    — so a restart resumes to the identical edge (PR #20)."""
-    kind, _ = _pair_state(deps, state["condition"], state["semilla"])
+    """Routes purely from reconstructed log state — never in-memory state —
+    so a restart resumes to the identical edge (PR #20; R1 extension: a
+    standing grant or decline is replayed, never re-prompted)."""
+    condition, seed = state["condition"], state["semilla"]
+    kind, _ = _pair_state(deps, condition, seed)
     if kind == "collect":
         return "collect_and_bind_evidence"
     if kind == "terminal":
         return "retry_or_finish"
+    if kind == "retry":
+        return "merge_and_freeze_context"
+    if condition == "R1":
+        if _has_pair_event(deps, "launch_declined", condition, seed):
+            return "retry_or_finish"
+        if _has_pair_event(deps, "approval_granted", condition, seed):
+            return "merge_and_freeze_context"
+        return "approve_r1"
     return "merge_and_freeze_context"
+
+
+def route_after_approval(state):
+    return _APPROVAL_ROUTES[state["status"]]
 
 
 def route_after_retry(state):
@@ -545,6 +777,7 @@ _NODES = {
     "freeze_tournament_config": node_freeze_tournament_config,
     "assign_work": node_assign_work,
     "plan_context": node_plan_context,
+    "approve_r1": node_approve_r1,
     "merge_and_freeze_context": node_merge_and_freeze_context,
     "register_launch": node_register_launch,
     "launch_subprocess": node_launch_subprocess,
@@ -574,6 +807,11 @@ def build_graph(deps):
         "plan_context",
         lambda current: route_after_plan(current, deps),
         _PLAN_ROUTES,
+    )
+    builder.add_conditional_edges(
+        "approve_r1",
+        route_after_approval,
+        _APPROVAL_ROUTES,
     )
     builder.add_edge("merge_and_freeze_context", "register_launch")
     builder.add_edge("register_launch", "launch_subprocess")
