@@ -8,14 +8,19 @@ import json
 import shutil
 import tempfile
 import unittest
+from dataclasses import astuple
 from pathlib import Path
 
 from observability import (
     ArtifactError,
     SkipRecord,
     artifacts,
+    assemble_items,
+    build_trace_records,
     canonical_json_bytes,
     digest_json,
+    model,
+    plain,
     sha256_digest,
 )
 
@@ -372,6 +377,404 @@ class TestLeaderboardLaunchLoaders(unittest.TestCase):
         with self.assertRaises(ArtifactError) as raised:
             artifacts.load_launch(root, "attempt-a3")
         self.assertEqual(raised.exception.reason, "unsupported_schema")
+
+
+# --- Slice A2b: validated model, row assembly, and trace records ---
+
+_GHOST = "sha256:" + "cd" * 32
+_OTHER = "sha256:" + "ef" * 32
+
+
+def _bound_row(**overrides):
+    """Aborted row bound to the fixture run; digests resolved by _sealed_root."""
+    row = _row(
+        "R1",
+        "18",
+        "aborted",
+        attempts_used=1,
+        declined_launches=0,
+        outcome="completed",
+        verified_score=100,
+        policy_digest=_fixture_json("receipt.json")["policy_digest"],
+        core_receipt_digest="pending",
+        llm_receipt_digest="pending",
+        attempt_refs=[
+            {
+                "attempt_id": "attempt-t1",
+                "attempt_ordinal": 0,
+                "evidence_status": "bound",
+            }
+        ],
+    )
+    row.update(overrides)
+    return row
+
+
+def _unresolved_row():
+    """Unbound row whose single attempt reference needs launch evidence."""
+    return _row(
+        "R3",
+        "20",
+        "unresolved",
+        attempts_used=1,
+        attempt_refs=[
+            {
+                "attempt_id": "attempt-u1",
+                "attempt_ordinal": 0,
+                "evidence_status": "unresolved",
+            }
+        ],
+    )
+
+
+def _variant_rows():
+    """Aborted bound + declined trace-only + unresolved-with-launch rows."""
+    return [_bound_row(), _row("R2", "19", "declined"), _unresolved_row()]
+
+
+def _sealed_root(prefix, rows, extra_launches=(), **build_kwargs):
+    """Fixture-copy root: reseal, resolve pending row digests, write rows.
+
+    Returns ``(root, digests)`` like :func:`build_root`. Each row digest slot
+    still holding the ``"pending"`` placeholder is resolved independently, so
+    a row may override one slot (e.g. a ghost llm digest) and keep it.
+    """
+    root, digests = build_root(prefix, **build_kwargs)
+    write_launch(root, "attempt-t1", "R1", "18", 0)
+    for attempt_id, condition, seed, ordinal in extra_launches:
+        write_launch(root, attempt_id, condition, seed, ordinal)
+    resolved = []
+    for row in rows:
+        if row["core_receipt_digest"] == "pending":
+            row["core_receipt_digest"] = digests[0]
+        if row["llm_receipt_digest"] == "pending":
+            row["llm_receipt_digest"] = digests[2]
+        resolved.append(row)
+    write_leaderboard(root, resolved)
+    return root, digests
+
+
+def _variant_root(prefix, **build_kwargs):
+    root, _ = _sealed_root(
+        prefix,
+        _variant_rows(),
+        extra_launches=(("attempt-u1", "R3", "20", 0),),
+        **build_kwargs,
+    )
+    return root
+
+
+def _projected(value):
+    """``plain`` narrowed to its object-projection case for assertions."""
+    projected = plain(value)
+    assert isinstance(projected, dict)
+    return projected
+
+
+class TestRowAssembly(unittest.TestCase):
+    """Slice A2b: authoritative binding of leaderboard rows to run evidence."""
+
+    def test_bound_row_maps_authoritative_item(self):
+        root, digests = _sealed_root("obsrow-bound-", [_bound_row()])
+        items, skips = assemble_items(root)
+        self.assertEqual(skips, [])
+        (item,) = items
+        self.assertIsInstance(item, model.ValidatedRun)
+        receipt = _fixture_json("receipt.json")
+        llm = _fixture_json("llm/llm-receipt.json")
+        self.assertEqual(
+            (
+                item.tournament_id,
+                item.condition,
+                item.seed,
+                item.status,
+                item.outcome,
+                item.verified_score,
+                item.attempt_id,
+                item.attempt_ordinal,
+                item.execution_id,
+                item.logical_run_id,
+            ),
+            (
+                _TOURNAMENT,
+                "R1",
+                "18",
+                "aborted",
+                "completed",
+                100,
+                "attempt-t1",
+                0,
+                "sealed-fixture-01",
+                receipt["logical_run_id"],
+            ),
+        )
+        (request,) = item.requests
+        self.assertEqual(
+            (request.provider, request.model, request.request_id, request.policy_step),
+            ("fake", "fake-v1", "req-0", 0),
+        )
+        self.assertEqual(request.latency_ms, 42)
+        self.assertEqual(
+            request.usage,
+            {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )
+        self.assertIsInstance(request.raw_visible_response, model.GuardedText)
+        self.assertTrue(request.raw_visible_response.has_text)
+        self.assertEqual(request.raw_visible_response.value, "ok")
+        self.assertIsNone(request.tool_call)
+        self.assertIsNone(request.error)
+        self.assertEqual(
+            item.digests,
+            model.EvidenceDigests(
+                core_receipt=digests[0],
+                provider_evidence=digests[1],
+                llm_receipt=digests[2],
+                policy=receipt["policy_digest"],
+                strategy_context=None,
+                prompt=llm["prompt_digest"],
+                tool_schema=llm["tool_schema_digest"],
+            ),
+        )
+        self.assertEqual(item.launch["context_digest"], _DIGEST)
+
+    def test_row_variants_stay_distinguishable_in_one_root(self):
+        items, skips = assemble_items(_variant_root("obsrow-variants-"))
+        self.assertEqual(skips, [])
+        self.assertEqual(
+            [(type(item).__name__, item.status) for item in items],
+            [
+                ("ValidatedRun", "aborted"),
+                ("TraceOnlyRow", "declined"),
+                ("TraceOnlyRow", "unresolved"),
+            ],
+        )
+        bound, declined, unresolved = items
+        self.assertEqual(
+            (bound.attempts_used, declined.attempts_used, unresolved.attempts_used),
+            (1, 0, 1),
+        )
+        self.assertIsNone(declined.outcome)
+        for row in (declined, unresolved):
+            self.assertEqual(astuple(row.digests), (None,) * 7)
+
+    def test_unresolved_requires_agreeing_launch(self):
+        absent, _ = _sealed_root("obsrow-unresolved-", [_unresolved_row()])
+        items, skips = assemble_items(absent)
+        self.assertEqual(items, [])
+        self.assertEqual([skip.reason for skip in skips], ["missing_artifact"])
+        self.assertTrue(skips[0].path.endswith("attempts/attempt-u1/launch.json"))
+        disagree, _ = _sealed_root(
+            "obsrow-unresolved-dis-",
+            [_unresolved_row()],
+            extra_launches=(("attempt-u1", "RX", "20", 0),),
+        )
+        items, skips = assemble_items(disagree)
+        self.assertEqual(items, [])
+        self.assertEqual([skip.reason for skip in skips], ["identity_mismatch"])
+
+    def test_declined_trace_only_has_no_manufactured_values(self):
+        root, _ = _sealed_root("obsrow-declined-", [_row("R2", "19", "declined")])
+        items, skips = assemble_items(root)
+        self.assertEqual(skips, [])
+        (row,) = items
+        self.assertIsInstance(row, model.TraceOnlyRow)
+        mapping = _projected(row)
+        self.assertIsNone(mapping["outcome"])
+        self.assertEqual(
+            mapping["digests"],
+            dict.fromkeys(
+                (
+                    "core_receipt",
+                    "provider_evidence",
+                    "llm_receipt",
+                    "policy",
+                    "strategy_context",
+                    "prompt",
+                    "tool_schema",
+                )
+            ),
+        )
+        for absent in ("verified_score", "latency_ms", "usage"):
+            self.assertNotIn(absent, mapping)
+        self.assertIn('"outcome":null', canonical_json_bytes(mapping).decode("utf-8"))
+
+    def test_ghost_digest_row_skips_while_bound_row_stays(self):
+        root, _ = _sealed_root(
+            "obsrow-ghost-",
+            [
+                _bound_row(),
+                _bound_row(
+                    condition="R2",
+                    seed="19",
+                    core_receipt_digest=_GHOST,
+                    llm_receipt_digest=_GHOST,
+                ),
+            ],
+        )
+        items, skips = assemble_items(root)
+        self.assertEqual([type(item).__name__ for item in items], ["ValidatedRun"])
+        self.assertEqual(items[0].condition, "R1")
+        self.assertEqual([skip.reason for skip in skips], ["missing_artifact"])
+        self.assertTrue(skips[0].path.endswith("core/runs"))
+        evidence, _ = artifacts.discover_evidence(root)
+        self.assertEqual(len(evidence), 1)
+
+    def test_row_receipt_disagreements_are_identity_mismatches(self):
+        cases = {
+            "score": dict(verified_score=99),
+            "llm_digest": dict(llm_receipt_digest=_GHOST),
+            "seed": dict(seed="19"),
+            "strategy_context": dict(strategy_context_digest=_OTHER),
+        }
+        for label, overrides in cases.items():
+            with self.subTest(case=label):
+                root, _ = _sealed_root(
+                    f"obsrow-dis-{label}-", [_bound_row(**overrides)]
+                )
+                items, skips = assemble_items(root)
+                self.assertEqual(items, [])
+                self.assertEqual(
+                    [skip.reason for skip in skips],
+                    ["identity_mismatch"],
+                )
+                if label == "strategy_context":
+                    self.assertTrue(
+                        skips[0].path.endswith("attempts/attempt-t1/launch.json")
+                    )
+                else:
+                    self.assertEqual(
+                        skips[0].path, str(_run_dir(root) / "receipt.json")
+                    )
+
+    def test_guarded_text_never_reaches_a_mapping(self):
+        def with_tool_call(d):
+            provider = json.loads((d / "llm" / "provider-run.json").read_text())
+            provider["requests"][0]["tool_call"] = {
+                "name": "bin",
+                "arguments": "bin-3",
+                "call_id": "call-1",
+            }
+            _write_canonical(d / "llm" / "provider-run.json", provider)
+
+        root, _ = _sealed_root("obsrow-guarded-", [_bound_row()], patch=with_tool_call)
+        items, skips = assemble_items(root)
+        self.assertEqual(skips, [])
+        (item,) = items
+        (request,) = item.requests
+        self.assertEqual(
+            (request.tool_call.name, request.tool_call.structural_fields),
+            ("bin", {"call_id": "call-1"}),
+        )
+        self.assertIsInstance(request.tool_call.arguments, model.GuardedText)
+        self.assertEqual(request.tool_call.arguments.value, "bin-3")
+        self.assertNotIn("bin-3", repr(item))
+        (record,) = build_trace_records(items)
+        (generation,) = record.generations
+        self.assertEqual(
+            generation.tool_call,
+            {"name": "bin", "structural_fields": {"call_id": "call-1"}},
+        )
+        rendered = canonical_json_bytes(plain(record)).decode("utf-8")
+        for forbidden in ("arguments", "bin-3", "raw_visible_response"):
+            self.assertNotIn(forbidden, rendered)
+        with self.assertRaises(ArtifactError) as raised:
+            plain(item)
+        self.assertEqual(raised.exception.reason, "secret_detected")
+
+    def test_guarded_text_semantics(self):
+        guarded = model.GuardedText("ok")
+        self.assertEqual(guarded.value, "ok")
+        self.assertTrue(guarded.has_text)
+        self.assertNotIn("ok", repr(guarded))
+        self.assertEqual(repr(guarded), "GuardedText(<withheld>)")
+        self.assertEqual(str(guarded), "<guarded-text>")
+        self.assertFalse(model.GuardedText(None).has_text)
+        with self.assertRaises(AttributeError):
+            guarded._value = "mutated"
+        self.assertEqual(
+            model.TEXT_CAPABLE_FIELDS,
+            ("raw_visible_response", "tool_call.arguments"),
+        )
+
+    def test_explicit_null_response_stays_null(self):
+        def null_response(d):
+            provider = json.loads((d / "llm" / "provider-run.json").read_text())
+            provider["requests"][0]["raw_visible_response"] = None
+            _write_canonical(d / "llm" / "provider-run.json", provider)
+
+        root, _ = _sealed_root("obsrow-null-", [_bound_row()], patch=null_response)
+        items, skips = assemble_items(root)
+        self.assertEqual(skips, [])
+        (item,) = items
+        self.assertIsNone(item.requests[0].raw_visible_response)
+        rendered = canonical_json_bytes(_projected(item)).decode("utf-8")
+        self.assertIn('"raw_visible_response":null', rendered)
+        (record,) = build_trace_records(items)
+        rendered = canonical_json_bytes(plain(record)).decode("utf-8")
+        self.assertNotIn("raw_visible_response", rendered)
+
+    def test_trace_records_preserve_authority_and_emptiness(self):
+        items, skips = assemble_items(_variant_root("obsrow-trace-"))
+        self.assertEqual(skips, [])
+        bound, declined, unresolved = build_trace_records(items)
+        self.assertEqual(
+            [record.status for record in (bound, declined, unresolved)],
+            ["aborted", "declined", "unresolved"],
+        )
+        self.assertEqual(len(bound.generations), 1)
+        (generation,) = bound.generations
+        self.assertFalse(hasattr(generation, "raw_visible_response"))
+        self.assertEqual(
+            (
+                generation.provider,
+                generation.model,
+                generation.request_id,
+                generation.policy_step,
+                generation.latency_ms,
+            ),
+            ("fake", "fake-v1", "req-0", 0, 42),
+        )
+        self.assertEqual(generation.usage, {"input": 10, "output": 5, "total": 15})
+        (score,) = bound.scores
+        self.assertEqual(
+            (
+                score.name,
+                score.value,
+                score.data_type,
+                score.status,
+                score.source,
+                score.receipt_digest,
+            ),
+            (
+                "verified_score",
+                100,
+                "NUMERIC",
+                "valid",
+                "receipt",
+                bound.digests.core_receipt,
+            ),
+        )
+        self.assertEqual(bound.outcome, "completed")
+        self.assertEqual(
+            (bound.attempt_id, bound.execution_id),
+            ("attempt-t1", "sealed-fixture-01"),
+        )
+        for record in (declined, unresolved):
+            self.assertEqual((record.generations, record.scores), ((), ()))
+            self.assertIsNone(record.attempt_id)
+            self.assertIsNone(record.attempt_ordinal)
+            self.assertIsNone(record.execution_id)
+            self.assertIsNone(record.logical_run_id)
+            self.assertIsNone(record.outcome)
+            self.assertIsNone(record.digests.core_receipt)
+        canonical_json_bytes(plain([bound, declined, unresolved]))
+
+    def test_missing_leaderboard_is_one_safe_skip(self):
+        root, _ = build_root("obsrow-noleader-")
+        items, skips = assemble_items(root)
+        self.assertEqual(items, [])
+        self.assertEqual([skip.reason for skip in skips], ["missing_artifact"])
+        self.assertTrue(skips[0].path.endswith("leaderboard.json"))
 
 
 if __name__ == "__main__":

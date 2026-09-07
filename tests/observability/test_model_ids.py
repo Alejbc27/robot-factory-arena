@@ -2,8 +2,9 @@
 
 The design's exact versioned formulas are recomputed independently in the
 tests (canonical bytes + hashlib) and compared against ``observability.ids``.
-Path/discovery-order independence is proven at the formula level; model-level
-re-assembly stability lands with the row-assembly slice.
+Path/discovery-order independence is proven at the formula level and at the
+model level (``assemble_items`` re-assembly); trace-only rows use the
+``trace-only-v1`` amendment to avoid the null-slot collision.
 """
 
 import hashlib
@@ -13,7 +14,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from observability import canonical_json_bytes, ids
+from observability import assemble_items, build_trace_records, canonical_json_bytes, ids
+
+from .test_artifacts import _bound_row, _row, _sealed_root, write_leaderboard
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "harness" / "unit3-sealed"
 
@@ -194,6 +197,125 @@ class TestDeterministicIDFormulas(unittest.TestCase):
             }
 
         self.assertEqual(export_ids(), export_ids())
+
+
+def _declined_root(prefix, rows):
+    """Leaderboard-only root: declined rows need no run or launch evidence."""
+    tmp = Path(tempfile.mkdtemp(prefix=prefix))
+    write_leaderboard(tmp, rows)
+    return tmp
+
+
+def _trace_only_ids(root):
+    """Assemble a root and map its trace-only rows to amended trace IDs."""
+    items, skips = assemble_items(root)
+    assert skips == []
+    identities = {}
+    for item in items:
+        ordinals = tuple(ref["attempt_ordinal"] for ref in item.attempt_refs)
+        identities[(item.condition, item.seed)] = ids.trace_only_trace_id(
+            item.tournament_id,
+            item.condition,
+            item.seed,
+            ordinals,
+            item.declined_launches,
+        )
+    return identities
+
+
+class TestTraceOnlyIdentityAmendment(unittest.TestCase):
+    """v1 amendment: trace-only rows must not collide on null formula slots."""
+
+    def test_two_declined_rows_get_distinct_stable_trace_ids(self):
+        rows = [_row("R1", "18", "declined"), _row("R2", "19", "declined")]
+        root = _declined_root("obsids-declined-", rows)
+        first = _trace_only_ids(root)
+        self.assertEqual(set(first), {("R1", "18"), ("R2", "19")})
+        self.assertEqual(len(set(first.values())), 2)
+        tournament = assemble_items(root)[0][0].tournament_id
+
+        # Regression pin: the pre-amendment trace-v1 shape fed null slots for
+        # every trace-only row, so both rows collided on a single ID.
+        def legacy(unused):
+            payload = canonical_json_bytes(
+                ["trace-v1", tournament, None, None, None, None]
+            )
+            return "tr_" + hashlib.sha256(payload).hexdigest()
+
+        self.assertEqual(legacy("R1"), legacy("R2"))
+        self.assertEqual(len({legacy("R1"), *first.values()}), 3)
+
+        # Stable across re-export of the same root and of an independent copy.
+        self.assertEqual(_trace_only_ids(root), first)
+        mirror = Path(tempfile.mkdtemp(prefix="obsids-mirror-")) / "copy"
+        shutil.copytree(root, mirror)
+        self.assertEqual(_trace_only_ids(mirror), first)
+
+    def test_decline_ordinal_and_count_are_load_bearing(self):
+        base = _row("R1", "18", "declined")
+        root = _declined_root("obsids-ordinal-", [base])
+        (item,) = assemble_items(root)[0]
+        ordinals = tuple(ref["attempt_ordinal"] for ref in item.attempt_refs)
+        identity = ids.trace_only_trace_id(
+            item.tournament_id,
+            item.condition,
+            item.seed,
+            ordinals,
+            item.declined_launches,
+        )
+        for changed in (
+            ids.trace_only_trace_id(
+                item.tournament_id,
+                item.condition,
+                item.seed,
+                (7,),
+                item.declined_launches,
+            ),
+            ids.trace_only_trace_id(
+                item.tournament_id,
+                item.condition,
+                item.seed,
+                ordinals,
+                item.declined_launches + 1,
+            ),
+        ):
+            self.assertNotEqual(changed, identity)
+
+
+class TestModelLevelReassemblyStability(unittest.TestCase):
+    """A3 addendum: assembled items yield stable IDs across fresh re-assembly."""
+
+    def test_bound_ids_are_stable_across_reassembly(self):
+        def export():
+            root, _ = _sealed_root("obsids-stable-", [_bound_row()])
+            items, skips = assemble_items(root)
+            assert skips == []
+            (record,) = build_trace_records(items)
+            trace = ids.trace_id(
+                record.tournament_id,
+                record.attempt_id,
+                record.execution_id,
+                record.digests.core_receipt,
+                record.digests.llm_receipt,
+            )
+            return {
+                "trace": trace,
+                "generation": ids.generation_id(
+                    record.execution_id,
+                    record.generations[0].request_id,
+                    record.digests.provider_evidence,
+                ),
+                "score": ids.score_id(
+                    trace, "verified_score", record.digests.core_receipt
+                ),
+            }
+
+        self.assertEqual(export(), export())
+
+    def test_trace_only_ids_stay_stable_through_reassembly(self):
+        rows = [_row("R1", "18", "declined"), _row("R2", "19", "declined")]
+        root, _ = _sealed_root("obsids-traceonly-stable-", rows)
+        self.assertEqual(_trace_only_ids(root), _trace_only_ids(root))
 
 
 if __name__ == "__main__":
