@@ -18,6 +18,7 @@ from .artifacts import (
     load_leaderboard,
     sha256_digest,
 )
+from . import ids
 from .secrets import SECRET_PATTERNS, find_secret
 
 __all__ = (
@@ -29,6 +30,7 @@ __all__ = (
     "digest_json",
     "discover_evidence",
     "find_secret",
+    "ids",
     "load_launch",
     "load_leaderboard",
     "sha256_digest",
