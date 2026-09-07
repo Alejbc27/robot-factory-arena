@@ -25,4 +25,6 @@ SkipRecord = _runtime.SkipRecord
 artifacts = _runtime.artifacts
 canonical_json_bytes = _runtime.canonical_json_bytes
 digest_json = _runtime.digest_json
+load_launch = _runtime.load_launch
+load_leaderboard = _runtime.load_leaderboard
 sha256_digest = _runtime.sha256_digest

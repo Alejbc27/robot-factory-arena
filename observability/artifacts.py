@@ -42,6 +42,10 @@ LOGICAL_RUN_ID_RE = re.compile(r"lr_[0-9a-f]{64}")
 RECEIPT_NAME = "receipt.json"
 PROVIDER_RUN_NAME = "llm/provider-run.json"
 LLM_RECEIPT_NAME = "llm/llm-receipt.json"
+LEADERBOARD_NAME = "leaderboard.json"
+LAUNCH_NAME = "launch.json"
+
+EVIDENCE_STATUSES = frozenset({"bound", "unresolved"})
 
 # Read-only mirror of the core outcome vocabulary.
 OUTCOMES = frozenset(
@@ -87,6 +91,59 @@ _REQUEST_REQUIRED = (
     "raw_visible_response",
 )
 _USAGE_REQUIRED = ("input_tokens", "output_tokens", "total_tokens")
+_LEADERBOARD_REQUIRED = (
+    "schema_version",
+    "tournament_id",
+    "harness_version",
+    "core_version",
+    "rows",
+)
+_ROW_REQUIRED = (
+    "condition",
+    "seed",
+    "status",
+    "outcome",
+    "verified_score",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "latency_ms",
+    "attempts_used",
+    "declined_launches",
+    "core_receipt_digest",
+    "llm_receipt_digest",
+    "policy_digest",
+    "strategy_context_digest",
+    "harness_version",
+    "core_version",
+    "attempt_refs",
+)
+_ATTEMPT_REF_REQUIRED = ("attempt_id", "attempt_ordinal", "evidence_status")
+_NULLABLE_INT_ROW_FIELDS = (
+    "verified_score",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "latency_ms",
+)
+_NULLABLE_DIGEST_ROW_FIELDS = (
+    "core_receipt_digest",
+    "llm_receipt_digest",
+    "policy_digest",
+    "strategy_context_digest",
+)
+_LAUNCH_REQUIRED = (
+    "schema_version",
+    "attempt_id",
+    "registered_before_start",
+    "condition",
+    "seed",
+    "agent_id",
+    "attempt_ordinal",
+    "argv",
+    "context_path",
+    "context_digest",
+)
 
 
 class ArtifactError(ValueError):
@@ -350,6 +407,193 @@ def bind_run(run_dir):
         "logical_run_id": receipt["logical_run_id"],
         "run_dir": run_dir,
     }
+
+
+def leaderboard_path(root):
+    return Path(root) / LEADERBOARD_NAME
+
+
+def launch_path(root, attempt_id):
+    return Path(root) / "attempts" / attempt_id / LAUNCH_NAME
+
+
+def _validate_row(row, path, document):
+    missing = [key for key in _ROW_REQUIRED if key not in row]
+    if missing:
+        raise _err(MISSING_FIELD, f"row missing fields {missing}", path)
+    if not _nonempty(row["condition"]) or not _nonempty(row["seed"]):
+        raise _err(
+            UNSUPPORTED_SCHEMA, "row condition/seed must be non-empty strings", path
+        )
+    if not _nonempty(row["status"]):
+        raise _err(UNSUPPORTED_SCHEMA, "row status must be a non-empty string", path)
+    if row["outcome"] is not None and row["outcome"] not in OUTCOMES:
+        raise _err(
+            UNSUPPORTED_SCHEMA, "row outcome must be null or a core outcome", path
+        )
+    for key in _NULLABLE_INT_ROW_FIELDS:
+        if row[key] is not None:
+            _index(row[key], f"row {key}", path)
+    for key in ("attempts_used", "declined_launches"):
+        _index(row[key], f"row {key}", path)
+    for key in _NULLABLE_DIGEST_ROW_FIELDS:
+        if row[key] is not None and not _is_digest(row[key]):
+            raise _err(
+                UNSUPPORTED_SCHEMA, f"row {key} must be null or a sha256 digest", path
+            )
+    if (row["core_receipt_digest"] is None) != (row["llm_receipt_digest"] is None):
+        raise _err(
+            UNSUPPORTED_SCHEMA,
+            "row core/llm receipt digests must be bound or null together",
+            path,
+        )
+    bound = row["core_receipt_digest"] is not None
+    if not bound:
+        claimed = [key for key in ("outcome", "verified_score") if row[key] is not None]
+        claimed += [
+            key
+            for key in ("input_tokens", "output_tokens", "total_tokens", "latency_ms")
+            if row[key] is not None
+        ]
+        claimed += [
+            key
+            for key in ("policy_digest", "strategy_context_digest")
+            if row[key] is not None
+        ]
+        if claimed:
+            raise _err(
+                UNSUPPORTED_SCHEMA,
+                f"unbound row claims receipt-owned values {claimed}",
+                path,
+            )
+    elif row["outcome"] is None or row["verified_score"] is None:
+        raise _err(
+            UNSUPPORTED_SCHEMA,
+            "bound row must declare receipt-owned outcome and score",
+            path,
+        )
+    refs = row["attempt_refs"]
+    if not isinstance(refs, list):
+        raise _err(UNSUPPORTED_SCHEMA, "row attempt_refs must be a list", path)
+    previous_ordinal = None
+    for ref in refs:
+        if not isinstance(ref, dict):
+            raise _err(UNSUPPORTED_SCHEMA, "attempt ref must be an object", path)
+        ref_missing = [key for key in _ATTEMPT_REF_REQUIRED if key not in ref]
+        if ref_missing:
+            raise _err(MISSING_FIELD, f"attempt ref missing fields {ref_missing}", path)
+        if not _nonempty(ref["attempt_id"]):
+            raise _err(
+                UNSUPPORTED_SCHEMA, "attempt ref attempt_id must be non-empty", path
+            )
+        ordinal = _index(ref["attempt_ordinal"], "attempt ordinal", path)
+        if previous_ordinal is not None and ordinal <= previous_ordinal:
+            raise _err(
+                UNSUPPORTED_SCHEMA, "attempt refs must be sorted and unique", path
+            )
+        previous_ordinal = ordinal
+        if ref["evidence_status"] not in EVIDENCE_STATUSES:
+            raise _err(
+                UNSUPPORTED_SCHEMA,
+                "attempt ref evidence_status must be bound or unresolved",
+                path,
+            )
+    if row["attempts_used"] != len(refs):
+        raise _err(
+            UNSUPPORTED_SCHEMA,
+            "row attempts_used must equal the attempt_refs length",
+            path,
+        )
+    if bound and not any(ref["evidence_status"] == "bound" for ref in refs):
+        raise _err(
+            UNSUPPORTED_SCHEMA, "bound row must declare a bound attempt ref", path
+        )
+    for key in ("harness_version", "core_version"):
+        if not _nonempty(row[key]) or row[key] != document[key]:
+            raise _err(
+                UNSUPPORTED_SCHEMA,
+                f"row {key} must be a non-empty string agreeing with the document",
+                path,
+            )
+
+
+def validate_leaderboard(document, path):
+    """Row rules: required keys, null-or-digest fields, sorted unique pairs."""
+    _check_schema_version(document["schema_version"], "leaderboard", path)
+    for key in ("tournament_id", "harness_version", "core_version"):
+        if not _nonempty(document[key]):
+            raise _err(
+                UNSUPPORTED_SCHEMA,
+                f"leaderboard {key} must be a non-empty string",
+                path,
+            )
+    rows = document["rows"]
+    if not isinstance(rows, list):
+        raise _err(UNSUPPORTED_SCHEMA, "leaderboard rows must be a list", path)
+    previous_pair = None
+    for row in rows:
+        if not isinstance(row, dict):
+            raise _err(UNSUPPORTED_SCHEMA, "leaderboard row must be an object", path)
+        _validate_row(row, path, document)
+        pair = (row["condition"], row["seed"])
+        if previous_pair is not None and pair <= previous_pair:
+            raise _err(
+                UNSUPPORTED_SCHEMA,
+                "rows must be sorted by unique (condition, seed) pairs",
+                path,
+            )
+        previous_pair = pair
+
+
+def load_leaderboard(root):
+    path = leaderboard_path(root)
+    document, _ = read_canonical(path, _LEADERBOARD_REQUIRED)
+    validate_leaderboard(document, path)
+    return document
+
+
+def _launch_seed(value, path):
+    if isinstance(value, bool):
+        raise _err(UNSUPPORTED_SCHEMA, "launch seed must be a string or int", path)
+    if isinstance(value, str) and value:
+        return value
+    if isinstance(value, int) and value >= 0:
+        return value
+    raise _err(UNSUPPORTED_SCHEMA, "launch seed must be a string or int", path)
+
+
+def validate_launch(launch, path):
+    """Immutable launch registration: required meta, seed, ordinal, digest."""
+    _check_schema_version(launch["schema_version"], "launch", path)
+    if not _nonempty(launch["attempt_id"]):
+        raise _err(UNSUPPORTED_SCHEMA, "launch attempt_id must be non-empty", path)
+    registered = launch["registered_before_start"]
+    if not isinstance(registered, bool) or not registered:
+        raise _err(
+            UNSUPPORTED_SCHEMA, "launch registered_before_start must be true", path
+        )
+    if not _nonempty(launch["condition"]):
+        raise _err(UNSUPPORTED_SCHEMA, "launch condition must be non-empty", path)
+    _launch_seed(launch["seed"], path)
+    if not _nonempty(launch["agent_id"]):
+        raise _err(UNSUPPORTED_SCHEMA, "launch agent_id must be non-empty", path)
+    _index(launch["attempt_ordinal"], "launch attempt_ordinal", path)
+    argv = launch["argv"]
+    if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+        raise _err(UNSUPPORTED_SCHEMA, "launch argv must be a list of strings", path)
+    if not _nonempty(launch["context_path"]):
+        raise _err(UNSUPPORTED_SCHEMA, "launch context_path must be non-empty", path)
+    if not _is_digest(launch["context_digest"]):
+        raise _err(
+            UNSUPPORTED_SCHEMA, "launch context_digest must be a sha256 digest", path
+        )
+
+
+def load_launch(root, attempt_id):
+    path = launch_path(root, attempt_id)
+    launch, _ = read_canonical(path, _LAUNCH_REQUIRED)
+    validate_launch(launch, path)
+    return launch
 
 
 def discover_evidence(root):

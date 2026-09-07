@@ -227,5 +227,152 @@ class TestAdversarialSkips(unittest.TestCase):
         self.assertNotEqual(request["latency_ms"], 0)
 
 
+# --- Slice A2: leaderboard/launch loaders and authoritative row assembly ---
+
+_TOURNAMENT = "tournament-observed"
+_DIGEST = "sha256:" + "ab" * 32
+
+
+def _launch_value(attempt_id, condition, seed, ordinal):
+    return {
+        "schema_version": 1,
+        "attempt_id": attempt_id,
+        "registered_before_start": True,
+        "condition": condition,
+        "seed": seed,
+        "agent_id": f"{condition}-agent",
+        "attempt_ordinal": ordinal,
+        "argv": ["python3", "-m", "robot_factory_arena"],
+        "context_path": "contexts/frozen.json",
+        "context_digest": _DIGEST,
+    }
+
+
+def write_launch(root, attempt_id, condition, seed, ordinal, **overrides):
+    value = _launch_value(attempt_id, condition, seed, ordinal)
+    value.update(overrides)
+    _write_canonical(Path(root) / "attempts" / attempt_id / "launch.json", value)
+    return value
+
+
+def _row(condition, seed, status, **overrides):
+    row = {
+        "condition": condition,
+        "seed": seed,
+        "status": status,
+        "outcome": None,
+        "verified_score": None,
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "latency_ms": None,
+        "attempts_used": 0,
+        "declined_launches": 1,
+        "core_receipt_digest": None,
+        "llm_receipt_digest": None,
+        "policy_digest": None,
+        "strategy_context_digest": None,
+        "harness_version": "h-test",
+        "core_version": "c-test",
+        "attempt_refs": [],
+    }
+    row.update(overrides)
+    return row
+
+
+def write_leaderboard(root, rows):
+    document = {
+        "schema_version": 1,
+        "tournament_id": _TOURNAMENT,
+        "harness_version": rows[0]["harness_version"] if rows else "h-test",
+        "core_version": rows[0]["core_version"] if rows else "c-test",
+        "rows": rows,
+    }
+    _write_canonical(Path(root) / "leaderboard.json", document)
+    return document
+
+
+class TestLeaderboardLaunchLoaders(unittest.TestCase):
+    def test_rows_must_be_sorted_unique_pairs(self):
+        for rows in (
+            [_row("R2", "2", "declined"), _row("R1", "3", "declined")],
+            [_row("R1", "3", "declined"), _row("R1", "3", "declined")],
+        ):
+            with self.subTest(rows=rows):
+                root, _ = build_root("obsl-pairs-")
+                write_leaderboard(root, rows)
+                with self.assertRaises(ArtifactError) as raised:
+                    artifacts.load_leaderboard(root)
+                self.assertEqual(raised.exception.reason, "unsupported_schema")
+
+    def test_row_authority_and_field_rules(self):
+        cases = {
+            "unbound_row_claiming_outcome": [
+                _row("R1", "3", "declined", outcome="completed")
+            ],
+            "half_bound_digests": [
+                _row("R1", "3", "declined", core_receipt_digest=_DIGEST)
+            ],
+            "malformed_digest": [
+                _row(
+                    "R1",
+                    "3",
+                    "declined",
+                    core_receipt_digest="sha256:xyz",
+                    llm_receipt_digest="sha256:xyz",
+                )
+            ],
+            "missing_field": [
+                {k: v for k, v in _row("R1", "3", "declined").items() if k != "status"}
+            ],
+            "unknown_evidence_status": [
+                _row(
+                    "R1",
+                    "3",
+                    "declined",
+                    attempts_used=1,
+                    declined_launches=0,
+                    attempt_refs=[
+                        {
+                            "attempt_id": "a",
+                            "attempt_ordinal": 0,
+                            "evidence_status": "maybe",
+                        }
+                    ],
+                )
+            ],
+        }
+        for label, rows in cases.items():
+            with self.subTest(case=label):
+                root, _ = build_root(f"obsl-{label}-")
+                write_leaderboard(root, rows)
+                with self.assertRaises(ArtifactError) as raised:
+                    artifacts.load_leaderboard(root)
+                self.assertIn(
+                    raised.exception.reason,
+                    ("unsupported_schema", "missing_field"),
+                )
+
+    def test_launch_validation(self):
+        root, _ = build_root("obsl-launch-")
+        write_launch(root, "attempt-a1", "R1", 9, 0)
+        launch = artifacts.load_launch(root, "attempt-a1")
+        self.assertEqual(launch["seed"], 9)
+        self.assertTrue(launch["registered_before_start"])
+        with self.assertRaises(ArtifactError) as raised:
+            artifacts.load_launch(root, "attempt-absent")
+        self.assertEqual(raised.exception.reason, "missing_artifact")
+        value = _launch_value("attempt-a2", "R1", "9", 1)
+        del value["context_digest"]
+        _write_canonical(Path(root) / "attempts" / "attempt-a2" / "launch.json", value)
+        with self.assertRaises(ArtifactError) as raised:
+            artifacts.load_launch(root, "attempt-a2")
+        self.assertEqual(raised.exception.reason, "missing_field")
+        write_launch(root, "attempt-a3", "R1", "9", 2, context_digest="nope")
+        with self.assertRaises(ArtifactError) as raised:
+            artifacts.load_launch(root, "attempt-a3")
+        self.assertEqual(raised.exception.reason, "unsupported_schema")
+
+
 if __name__ == "__main__":
     unittest.main()

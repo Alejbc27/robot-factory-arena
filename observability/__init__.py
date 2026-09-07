@@ -1,10 +1,10 @@
 """Isolated evidence-to-Langfuse observability foundation (stdlib only).
 
-Slice A1 of Unit A (``stage4-langfuse-tracing``): the sealed evidence
-validation contract — canonical JSON/digest rules, secret policy, stable
-skip reasons, digest/identity binding, and deterministic run discovery.
-Runtime imports never touch ``robot_factory_arena``, ``harness``, or
-third-party packages.
+Slices A1+A2a of Unit A (``stage4-langfuse-tracing``): the sealed evidence
+validation contract — canonical JSON/digest rules, secret policy, stable skip
+reasons, digest/identity binding, deterministic run discovery, and the
+leaderboard/launch loaders with authority rules. Runtime imports never touch
+``robot_factory_arena``, ``harness``, or third-party packages.
 """
 
 from .artifacts import (
@@ -14,6 +14,8 @@ from .artifacts import (
     canonical_json_bytes,
     digest_json,
     discover_evidence,
+    load_launch,
+    load_leaderboard,
     sha256_digest,
 )
 from .secrets import SECRET_PATTERNS, find_secret
@@ -27,5 +29,7 @@ __all__ = (
     "digest_json",
     "discover_evidence",
     "find_secret",
+    "load_launch",
+    "load_leaderboard",
     "sha256_digest",
 )
