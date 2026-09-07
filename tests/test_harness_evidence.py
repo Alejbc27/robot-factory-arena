@@ -112,6 +112,31 @@ def tempfile_dir():
 
 
 class TestHappyPath(Base):
+    def test_null_raw_visible_response_binds_like_the_core_contract(self):
+        """Live-acceptance finding: real tool-call responses legitimately carry
+        raw_visible_response=null (core adapter: str | None, adapter.py L152-155);
+        the binder must bind, never reject, that valid provider evidence."""
+        provider_run = self.run_dir / "llm" / "provider-run.json"
+        llm_receipt = self.run_dir / "llm" / "llm-receipt.json"
+        _rewrite(
+            provider_run, lambda v: v["requests"][0].update(raw_visible_response=None)
+        )
+        # re-seal the binding exactly like the core writer does over its own
+        # bytes — the real core seals AFTER producing the null, so it is
+        # consistent by construction; this test must be too
+        sealed = json.loads(provider_run.read_bytes())
+
+        def reseal(v):
+            v["provider_evidence_digest"] = evidence.digest_json(sealed)
+            inner = {k: val for k, val in v.items() if k != "llm_receipt_digest"}
+            v["llm_receipt_digest"] = evidence.digest_json(inner)
+
+        _rewrite(llm_receipt, reseal)
+        result = self.bind()
+        self.assertEqual(result.status, "bound")
+        self.assertIsNone(result.reason)
+        self.assertEqual(result.verified_score, 100)
+
     def test_sealed_fixture_binds_official_metrics(self):
         result = self.bind()
         self.assertEqual(result.status, "bound")
