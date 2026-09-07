@@ -327,6 +327,11 @@ def validate_receipt(receipt, path):
         )
 
 
+_SHELF_ID_RE = re.compile(r"shelf-(0[0-9])")
+_ITEM_ID_RE = re.compile(r"item-(0[0-9])")
+_ORDER_ID_RE = re.compile(r"order-(0[0-9])")
+
+
 def _validate_tool_call(tool_call, position, path):
     """The exact writer shape (P4A-REQ-02): ``{"tool", "arguments"}`` only.
 
@@ -351,6 +356,54 @@ def _validate_tool_call(tool_call, position, path):
         raise _err(
             UNSUPPORTED_SCHEMA,
             f"request {position} tool_call arguments must be an object",
+            path,
+        )
+    # Writer-exact argument rules (P4A-REQ-02): the sealed writer emits
+    # only move with a cardinal direction, pick with valid shelf/item ids,
+    # and place with a valid order id — anything else becomes tool_call
+    # null upstream, so anything else here fails closed.
+    tool = tool_call["tool"]
+    arguments = tool_call["arguments"]
+    if tool == "move":
+        if set(arguments) != {"direction"} or arguments["direction"] not in (
+            "north",
+            "east",
+            "south",
+            "west",
+        ):
+            raise _err(
+                UNSUPPORTED_SCHEMA,
+                f"request {position} tool_call move needs a cardinal direction",
+                path,
+            )
+    elif tool == "pick":
+        if (
+            set(arguments) != {"shelf_id", "item_id"}
+            or not isinstance(arguments["shelf_id"], str)
+            or _SHELF_ID_RE.fullmatch(arguments["shelf_id"]) is None
+            or not isinstance(arguments["item_id"], str)
+            or _ITEM_ID_RE.fullmatch(arguments["item_id"]) is None
+        ):
+            raise _err(
+                UNSUPPORTED_SCHEMA,
+                f"request {position} tool_call pick needs valid shelf and item ids",
+                path,
+            )
+    elif tool == "place":
+        if (
+            set(arguments) != {"order_id"}
+            or not isinstance(arguments["order_id"], str)
+            or _ORDER_ID_RE.fullmatch(arguments["order_id"]) is None
+        ):
+            raise _err(
+                UNSUPPORTED_SCHEMA,
+                f"request {position} tool_call place needs a valid order id",
+                path,
+            )
+    else:
+        raise _err(
+            UNSUPPORTED_SCHEMA,
+            f"request {position} tool_call tool must be move, pick, or place",
             path,
         )
 
@@ -548,6 +601,15 @@ def _validate_row(row, path, document):
             path,
         )
     bound = row["core_receipt_digest"] is not None
+    has_bound_ref = any(
+        ref["evidence_status"] == "bound" for ref in row["attempt_refs"]
+    )
+    if bound != has_bound_ref:
+        raise _err(
+            UNSUPPORTED_SCHEMA,
+            "row receipt binding must match its bound attempt refs",
+            path,
+        )
     if not bound:
         claimed = [key for key in ("outcome", "verified_score") if row[key] is not None]
         claimed += [
