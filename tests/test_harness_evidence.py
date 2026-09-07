@@ -112,6 +112,19 @@ def tempfile_dir():
 
 
 class TestHappyPath(Base):
+    def test_null_raw_visible_response_binds_like_the_core_contract(self):
+        """Live-acceptance finding: real tool-call responses legitimately carry
+        raw_visible_response=null (core adapter: str | None, adapter.py L152-155);
+        the binder must bind, never reject, that valid provider evidence."""
+        provider_run = self.run_dir / "llm" / "provider-run.json"
+        _rewrite(
+            provider_run, lambda v: v["requests"][0].update(raw_visible_response=None)
+        )
+        result = self.bind()
+        self.assertEqual(result.status, "bound")
+        self.assertIsNone(result.reason)
+        self.assertEqual(result.verified_score, 100)
+
     def test_sealed_fixture_binds_official_metrics(self):
         result = self.bind()
         self.assertEqual(result.status, "bound")
