@@ -239,8 +239,13 @@ def _validate_provider_run(provider_run):
                 raise EvidenceError(f"usage missing field: {key}")
             _index(usage[key], key)
         _index(request["latency_ms"], "latency_ms")
-        if not isinstance(request["raw_visible_response"], str):
-            raise EvidenceError("raw_visible_response must be a string")
+        # Core adapter contract (providers/adapter.py): raw_visible_response is
+        # str | None — real tool-call responses legitimately carry null (live
+        # finding: rejecting null made every real-core run unbindable).
+        if request["raw_visible_response"] is not None and not isinstance(
+            request["raw_visible_response"], str
+        ):
+            raise EvidenceError("raw_visible_response must be a string or null")
         for key in ("tool_call", "error"):
             if request.get(key) is not None and not isinstance(request[key], dict):
                 raise EvidenceError(f"{key} must be null or an object")
