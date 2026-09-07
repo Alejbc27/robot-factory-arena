@@ -601,15 +601,6 @@ def _validate_row(row, path, document):
             path,
         )
     bound = row["core_receipt_digest"] is not None
-    has_bound_ref = any(
-        ref["evidence_status"] == "bound" for ref in row["attempt_refs"]
-    )
-    if bound != has_bound_ref:
-        raise _err(
-            UNSUPPORTED_SCHEMA,
-            "row receipt binding must match its bound attempt refs",
-            path,
-        )
     if not bound:
         claimed = [key for key in ("outcome", "verified_score") if row[key] is not None]
         claimed += [
@@ -660,15 +651,18 @@ def _validate_row(row, path, document):
                 "attempt ref evidence_status must be bound or unresolved",
                 path,
             )
+    has_bound_ref = any(ref["evidence_status"] == "bound" for ref in refs)
+    if bound != has_bound_ref:
+        raise _err(
+            UNSUPPORTED_SCHEMA,
+            "row receipt binding must match its bound attempt refs",
+            path,
+        )
     if row["attempts_used"] != len(refs):
         raise _err(
             UNSUPPORTED_SCHEMA,
             "row attempts_used must equal the attempt_refs length",
             path,
-        )
-    if bound and not any(ref["evidence_status"] == "bound" for ref in refs):
-        raise _err(
-            UNSUPPORTED_SCHEMA, "bound row must declare a bound attempt ref", path
         )
     if row["status"] != _derived_row_status(row):
         raise _err(

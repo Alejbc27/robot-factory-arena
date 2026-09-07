@@ -231,6 +231,40 @@ class TestAdversarialSkips(unittest.TestCase):
         self.assertIsNone(request["raw_visible_response"])
         self.assertNotEqual(request["latency_ms"], 0)
 
+    def test_writer_exact_tool_call_arguments(self):
+        invalid = (
+            {"tool": "move", "arguments": {"direction": "up"}},
+            {
+                "tool": "pick",
+                "arguments": {"shelf_id": "shelf-10", "item_id": "item-00"},
+            },
+            {"tool": "place", "arguments": {"order_id": "order-00", "extra": True}},
+        )
+        valid = (
+            {"tool": "move", "arguments": {"direction": "west"}},
+            {
+                "tool": "pick",
+                "arguments": {"shelf_id": "shelf-09", "item_id": "item-00"},
+            },
+            {"tool": "place", "arguments": {"order_id": "order-09"}},
+        )
+        for expected, calls in (("unsupported_schema", invalid), (None, valid)):
+            for tool_call in calls:
+                with self.subTest(tool_call=tool_call):
+
+                    def patch(d, tool_call=tool_call):
+                        provider = json.loads(
+                            (d / "llm" / "provider-run.json").read_text()
+                        )
+                        provider["requests"][0]["tool_call"] = tool_call
+                        _write_canonical(d / "llm" / "provider-run.json", provider)
+
+                    root, _ = build_root("obsa-tool-arguments-", patch=patch)
+                    evidence, skips = artifacts.discover_evidence(root)
+                    reasons = [skip.reason for skip in skips]
+                    self.assertEqual(reasons, [expected] if expected else [])
+                    self.assertEqual(len(evidence), 0 if expected else 1)
+
     def test_malformed_tool_call_shapes_fail_closed(self):
         """Only the writer shape binds; anything else is unsupported_schema."""
         shapes = {
@@ -395,6 +429,47 @@ class TestLeaderboardLaunchLoaders(unittest.TestCase):
                     raised.exception.reason,
                     ("unsupported_schema", "missing_field"),
                 )
+
+    def test_attempt_refs_shape_errors_are_stable(self):
+        cases = (
+            ("x", "unsupported_schema"),
+            ([{}], "missing_field"),
+            ([{"attempt_id": "a", "attempt_ordinal": 0}], "missing_field"),
+        )
+        for attempt_refs, reason in cases:
+            with self.subTest(attempt_refs=attempt_refs):
+                root, _ = build_root("obsl-attempt-refs-")
+                write_leaderboard(
+                    root,
+                    [_row("R1", "3", "declined", attempt_refs=attempt_refs)],
+                )
+                with self.assertRaises(ArtifactError) as raised:
+                    artifacts.load_leaderboard(root)
+                self.assertEqual(raised.exception.reason, reason)
+
+    def test_all_bound_refs_require_receipt_digests(self):
+        root, _ = build_root("obsl-bound-null-digests-")
+        write_leaderboard(
+            root,
+            [
+                _row(
+                    "R1",
+                    "3",
+                    "completed",
+                    attempts_used=1,
+                    attempt_refs=[
+                        {
+                            "attempt_id": "a",
+                            "attempt_ordinal": 0,
+                            "evidence_status": "bound",
+                        }
+                    ],
+                )
+            ],
+        )
+        with self.assertRaises(ArtifactError) as raised:
+            artifacts.load_leaderboard(root)
+        self.assertEqual(raised.exception.reason, "unsupported_schema")
 
     def test_launch_validation(self):
         root, _ = build_root("obsl-launch-")
