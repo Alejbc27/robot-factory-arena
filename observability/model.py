@@ -7,6 +7,13 @@ receipt-owned outcomes and scores, trace-only rows — plus ``assemble_items``
 (metadata-only, trace-ready records). ``plain`` is the single JSON-safe
 projection and fails closed rather than ever serializing guarded text.
 
+Tool-call contract (PR #29 review): provider requests carry the sealed
+writer shape ``{"tool", "arguments"}`` — ``tool`` is the source of truth,
+argument mappings stay in ``GuardedText`` and are never exported.
+Leaderboard ``status`` values are the closed derivation set
+(declined/completed/aborted/evidence_invalid), validated at load and
+passed through exactly — never normalized.
+
 Trace-only identity amendment (v1): the design's ``trace-v1`` input list gives
 trace-only rows null attempt/execution/digest slots, so two declined rows of
 one tournament would collide on one ``tr_`` ID. ``ids.trace_only_trace_id``
@@ -99,11 +106,17 @@ def _frozen_optional(value):
 
 @dataclass(frozen=True)
 class ToolCall:
-    """Structural tool call: name plus metadata; argument text stays guarded."""
+    """Writer-exact tool call (P4A-REQ-02): ``tool`` names the action.
 
-    name: str
+    Mirrors the sealed writer shape ``{"tool", "arguments"}`` — the
+    evidence contract has no "name" key. ``arguments`` is always a
+    mapping (A1 enforces it at load) and stays guarded: it exists in
+    the model but never in the metadata-only projection.
+    """
+
+    tool: str
     structural_fields: Mapping
-    arguments: GuardedText | None
+    arguments: GuardedText
 
 
 @dataclass(frozen=True)
@@ -277,13 +290,12 @@ def _tool_call(tool_call):
     structural = {
         key: value
         for key, value in tool_call.items()
-        if key not in ("name", "arguments")
+        if key not in ("tool", "arguments")
     }
-    arguments = tool_call.get("arguments")
     return ToolCall(
-        name=tool_call["name"],
+        tool=tool_call["tool"],
         structural_fields=_frozen_map(structural),
-        arguments=None if arguments is None else GuardedText(arguments),
+        arguments=GuardedText(tool_call["arguments"]),
     )
 
 
@@ -402,7 +414,9 @@ def assemble_items(root):
     (max-ordinal bound) attempt's launch with seed/condition/ordinal agreement.
     An unbound row stays trace-only: attempts_used > 0 requires each
     referenced attempt's launch to exist and agree; attempts_used == 0
-    (declined) needs none. Statuses pass through exactly, never normalized.
+    (declined) needs none. Row statuses are validated at load against the
+    closed harness derivation (declined/completed/aborted/evidence_invalid)
+    and pass through exactly, never normalized.
     """
     root = Path(root)
     try:
@@ -440,7 +454,7 @@ def _generation(request):
         tool_call=None
         if tool_call is None
         else _frozen_map(
-            {"name": tool_call.name, "structural_fields": tool_call.structural_fields}
+            {"tool": tool_call.tool, "structural_fields": tool_call.structural_fields}
         ),
         error=request.error,
     )

@@ -6,11 +6,22 @@ preserved explicit nulls and array order, integers-only numbers, and
 ``sha256:<64 lowercase hex>`` digests over exact canonical bytes. This
 module never imports ``robot_factory_arena``, ``harness``, or any
 third-party package.
+
+Parity notes (PR #29 review): the canonical rule is deep — floats are
+rejected inside tuples too, object keys must be strings, and unknown
+types fail closed (``tests/observability/test_canonical_parity.py``
+proves identical accept/reject/bytes against the core authority).
+Row ``status`` must equal the closed harness derivation over
+``declined``/``completed``/``aborted``/``evidence_invalid``; an
+observability-level "unresolved" projection, if ever wanted, must be an
+explicit projection — never faked as the sealed status. Provider tool
+calls must match the writer shape ``{"tool", "arguments"}`` exactly.
 """
 
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,6 +57,9 @@ LEADERBOARD_NAME = "leaderboard.json"
 LAUNCH_NAME = "launch.json"
 
 EVIDENCE_STATUSES = frozenset({"bound", "unresolved"})
+
+# Read-only mirror of the closed harness leaderboard rule.
+LEADERBOARD_STATUSES = ("declined", "completed", "aborted", "evidence_invalid")
 
 # Read-only mirror of the core outcome vocabulary.
 OUTCOMES = frozenset(
@@ -173,15 +187,46 @@ def contains_float(value):
         return True
     if isinstance(value, dict):
         return any(contains_float(v) for v in value.values())
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return any(contains_float(v) for v in value)
     return False
 
 
+def _validate_canonical(value, path):
+    """Deep canonical rule: only JSON-safe types, string keys, no floats.
+
+    Mirrors the core authority in isolation: ``None``/``str``/``bool``/``int``
+    pass, ``float`` (finite or not) fails, lists and tuples recurse, mappings
+    require string keys and recurse, and every other type fails closed.
+    """
+    if value is None or isinstance(value, (str, bool)):
+        return
+    if isinstance(value, float):
+        raise _err(NON_CANONICAL_JSON, "floats and NaN are not canonical", path)
+    if isinstance(value, int):
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _validate_canonical(item, path)
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise _err(
+                    NON_CANONICAL_JSON, "canonical object keys must be strings", path
+                )
+            _validate_canonical(item, path)
+        return
+    raise _err(
+        NON_CANONICAL_JSON,
+        f"unsupported value for canonical JSON: {type(value).__name__}",
+        path,
+    )
+
+
 def canonical_json_bytes(value):
     """Canonical UTF-8 bytes: sorted keys, compact, explicit nulls preserved."""
-    if contains_float(value):
-        raise _err(NON_CANONICAL_JSON, "floats and NaN are not canonical", "<value>")
+    _validate_canonical(value, "<value>")
     return json.dumps(
         value,
         sort_keys=True,
@@ -282,6 +327,34 @@ def validate_receipt(receipt, path):
         )
 
 
+def _validate_tool_call(tool_call, position, path):
+    """The exact writer shape (P4A-REQ-02): ``{"tool", "arguments"}`` only.
+
+    The sealed writer emits exactly these two keys — ``tool`` a non-empty
+    action name, ``arguments`` an object. Anything else (empty objects,
+    name-keyed shapes, extra keys) is not evidence this contract can speak
+    and fails closed instead of exploding later in the model layer.
+    """
+    if set(tool_call) != {"tool", "arguments"}:
+        raise _err(
+            UNSUPPORTED_SCHEMA,
+            f"request {position} tool_call must hold exactly tool and arguments",
+            path,
+        )
+    if not _nonempty(tool_call["tool"]):
+        raise _err(
+            UNSUPPORTED_SCHEMA,
+            f"request {position} tool_call tool must be a non-empty string",
+            path,
+        )
+    if not isinstance(tool_call["arguments"], dict):
+        raise _err(
+            UNSUPPORTED_SCHEMA,
+            f"request {position} tool_call arguments must be an object",
+            path,
+        )
+
+
 def validate_provider_run(provider_run, path):
     _check_schema_version(provider_run["schema_version"], "provider-run", path)
     requests = provider_run["requests"]
@@ -335,6 +408,9 @@ def validate_provider_run(provider_run, path):
                     f"request {position} {key} must be null or an object",
                     path,
                 )
+        tool_call = request.get("tool_call")
+        if tool_call is not None:
+            _validate_tool_call(tool_call, position, path)
 
 
 def validate_llm_receipt(llm_receipt, path):
@@ -358,6 +434,15 @@ def bind_run(run_dir):
     run_dir = Path(run_dir)
     receipt, raw = read_canonical(run_dir / RECEIPT_NAME, _RECEIPT_REQUIRED)
     validate_receipt(receipt, run_dir / RECEIPT_NAME)
+    if (
+        run_dir.parent.name != receipt["logical_run_id"]
+        or run_dir.name != receipt["execution_id"]
+    ):
+        raise _err(
+            IDENTITY_MISMATCH,
+            "core/runs path components disagree with the sealed receipt",
+            run_dir / RECEIPT_NAME,
+        )
     provider_run, _ = read_canonical(
         run_dir / PROVIDER_RUN_NAME, _PROVIDER_RUN_REQUIRED
     )
@@ -415,6 +500,21 @@ def leaderboard_path(root):
 
 def launch_path(root, attempt_id):
     return Path(root) / "attempts" / attempt_id / LAUNCH_NAME
+
+
+def _derived_row_status(row):
+    """Isolated re-derivation of the closed harness leaderboard rule.
+
+    No attempt refs -> ``declined``; all refs bound + terminal outcome
+    ``completed`` -> ``completed``; all refs bound + any other outcome ->
+    ``aborted``; anything else -> ``evidence_invalid``.
+    """
+    refs = row["attempt_refs"]
+    if not refs:
+        return "declined"
+    if all(ref["evidence_status"] == "bound" for ref in refs):
+        return "completed" if row["outcome"] == "completed" else "aborted"
+    return "evidence_invalid"
 
 
 def _validate_row(row, path, document):
@@ -508,6 +608,13 @@ def _validate_row(row, path, document):
         raise _err(
             UNSUPPORTED_SCHEMA, "bound row must declare a bound attempt ref", path
         )
+    if row["status"] != _derived_row_status(row):
+        raise _err(
+            UNSUPPORTED_SCHEMA,
+            f"row status {row['status']!r} disagrees with the closed "
+            f"derivation {_derived_row_status(row)!r}",
+            path,
+        )
     for key in ("harness_version", "core_version"):
         if not _nonempty(row[key]) or row[key] != document[key]:
             raise _err(
@@ -518,7 +625,7 @@ def _validate_row(row, path, document):
 
 
 def validate_leaderboard(document, path):
-    """Row rules: required keys, null-or-digest fields, sorted unique pairs."""
+    """Row rules: required keys, null-or-digest fields, derived status parity."""
     _check_schema_version(document["schema_version"], "leaderboard", path)
     for key in ("tournament_id", "harness_version", "core_version"):
         if not _nonempty(document[key]):

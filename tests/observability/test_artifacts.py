@@ -231,6 +231,44 @@ class TestAdversarialSkips(unittest.TestCase):
         self.assertIsNone(request["raw_visible_response"])
         self.assertNotEqual(request["latency_ms"], 0)
 
+    def test_malformed_tool_call_shapes_fail_closed(self):
+        """Only the writer shape binds; anything else is unsupported_schema."""
+        shapes = {
+            "empty": {},
+            "name_keyed": {"name": "move", "arguments": {"direction": "north"}},
+            "blank_tool": {"tool": "", "arguments": {"direction": "north"}},
+            "missing_arguments": {"tool": "move"},
+            "non_object_arguments": {"tool": "move", "arguments": ["north"]},
+            "extra_keys": {
+                "tool": "move",
+                "arguments": {"direction": "north"},
+                "call_id": "call-1",
+            },
+        }
+        for label, shape in shapes.items():
+            with self.subTest(shape=label):
+
+                def patch(d, shape=shape):
+                    provider = json.loads((d / "llm" / "provider-run.json").read_text())
+                    provider["requests"][0]["tool_call"] = shape
+                    _write_canonical(d / "llm" / "provider-run.json", provider)
+
+                root, _ = build_root(f"obsa-tool-{label}-", patch=patch)
+                self._assert_skip(root, "unsupported_schema")
+
+    def test_run_path_components_must_match_sealed_identity(self):
+        for component in ("execution", "logical"):
+            with self.subTest(component=component):
+                root, _ = build_root(f"obsa-pathid-{component}-")
+                run_dir = _run_dir(root)
+                if component == "execution":
+                    run_dir.rename(run_dir.parent / "moved-exec")
+                else:
+                    run_dir.parent.rename(run_dir.parent.parent / "lr_moved")
+                evidence, skips = artifacts.discover_evidence(root)
+                self.assertEqual(evidence, [])
+                self.assertEqual([s.reason for s in skips], ["identity_mismatch"])
+
 
 # --- Slice A2: leaderboard/launch loaders and authoritative row assembly ---
 
@@ -386,11 +424,15 @@ _OTHER = "sha256:" + "ef" * 32
 
 
 def _bound_row(**overrides):
-    """Aborted row bound to the fixture run; digests resolved by _sealed_root."""
+    """Completed row bound to the fixture run; digests resolved by _sealed_root.
+
+    All refs bound + receipt outcome "completed" derive status "completed"
+    under the closed harness rule.
+    """
     row = _row(
         "R1",
         "18",
-        "aborted",
+        "completed",
         attempts_used=1,
         declined_launches=0,
         outcome="completed",
@@ -411,11 +453,11 @@ def _bound_row(**overrides):
 
 
 def _unresolved_row():
-    """Unbound row whose single attempt reference needs launch evidence."""
+    """Unbound evidence-invalid row: one attempt ref still unresolved."""
     return _row(
         "R3",
         "20",
-        "unresolved",
+        "evidence_invalid",
         attempts_used=1,
         attempt_refs=[
             {
@@ -428,7 +470,7 @@ def _unresolved_row():
 
 
 def _variant_rows():
-    """Aborted bound + declined trace-only + unresolved-with-launch rows."""
+    """Completed bound + declined trace-only + evidence-invalid rows."""
     return [_bound_row(), _row("R2", "19", "declined"), _unresolved_row()]
 
 
@@ -499,7 +541,7 @@ class TestRowAssembly(unittest.TestCase):
                 _TOURNAMENT,
                 "R1",
                 "18",
-                "aborted",
+                "completed",
                 "completed",
                 100,
                 "attempt-t1",
@@ -543,18 +585,18 @@ class TestRowAssembly(unittest.TestCase):
         self.assertEqual(
             [(type(item).__name__, item.status) for item in items],
             [
-                ("ValidatedRun", "aborted"),
+                ("ValidatedRun", "completed"),
                 ("TraceOnlyRow", "declined"),
-                ("TraceOnlyRow", "unresolved"),
+                ("TraceOnlyRow", "evidence_invalid"),
             ],
         )
-        bound, declined, unresolved = items
+        bound, declined, invalid = items
         self.assertEqual(
-            (bound.attempts_used, declined.attempts_used, unresolved.attempts_used),
+            (bound.attempts_used, declined.attempts_used, invalid.attempts_used),
             (1, 0, 1),
         )
         self.assertIsNone(declined.outcome)
-        for row in (declined, unresolved):
+        for row in (declined, invalid):
             self.assertEqual(astuple(row.digests), (None,) * 7)
 
     def test_unresolved_requires_agreeing_launch(self):
@@ -646,36 +688,42 @@ class TestRowAssembly(unittest.TestCase):
                         skips[0].path, str(_run_dir(root) / "receipt.json")
                     )
 
-    def test_guarded_text_never_reaches_a_mapping(self):
+    def test_real_tool_call_shape_binds_and_stays_guarded(self):
+        """Writer-exact shape (P4A-REQ-02): {"tool", "arguments"}; no "name".
+
+        Built exactly like the sealed writer produces it and re-sealed, so
+        only a shape-faithful mirror can bind, assemble, and project it.
+        """
+
         def with_tool_call(d):
             provider = json.loads((d / "llm" / "provider-run.json").read_text())
             provider["requests"][0]["tool_call"] = {
-                "name": "bin",
-                "arguments": "bin-3",
-                "call_id": "call-1",
+                "tool": "move",
+                "arguments": {"direction": "north"},
             }
             _write_canonical(d / "llm" / "provider-run.json", provider)
 
-        root, _ = _sealed_root("obsrow-guarded-", [_bound_row()], patch=with_tool_call)
+        root, _ = _sealed_root("obsrow-toolcall-", [_bound_row()], patch=with_tool_call)
+        artifacts.bind_run(_run_dir(root))
         items, skips = assemble_items(root)
         self.assertEqual(skips, [])
         (item,) = items
+        self.assertIsInstance(item, model.ValidatedRun)
         (request,) = item.requests
-        self.assertEqual(
-            (request.tool_call.name, request.tool_call.structural_fields),
-            ("bin", {"call_id": "call-1"}),
-        )
+        self.assertEqual(request.tool_call.tool, "move")
+        self.assertEqual(request.tool_call.structural_fields, {})
         self.assertIsInstance(request.tool_call.arguments, model.GuardedText)
-        self.assertEqual(request.tool_call.arguments.value, "bin-3")
-        self.assertNotIn("bin-3", repr(item))
+        self.assertEqual(request.tool_call.arguments.value, {"direction": "north"})
+        self.assertNotIn("north", repr(item))
         (record,) = build_trace_records(items)
         (generation,) = record.generations
         self.assertEqual(
             generation.tool_call,
-            {"name": "bin", "structural_fields": {"call_id": "call-1"}},
+            {"tool": "move", "structural_fields": {}},
         )
+        self.assertNotIn("name", generation.tool_call)
         rendered = canonical_json_bytes(plain(record)).decode("utf-8")
-        for forbidden in ("arguments", "bin-3", "raw_visible_response"):
+        for forbidden in ("arguments", "north"):
             self.assertNotIn(forbidden, rendered)
         with self.assertRaises(ArtifactError) as raised:
             plain(item)
@@ -716,10 +764,10 @@ class TestRowAssembly(unittest.TestCase):
     def test_trace_records_preserve_authority_and_emptiness(self):
         items, skips = assemble_items(_variant_root("obsrow-trace-"))
         self.assertEqual(skips, [])
-        bound, declined, unresolved = build_trace_records(items)
+        bound, declined, invalid = build_trace_records(items)
         self.assertEqual(
-            [record.status for record in (bound, declined, unresolved)],
-            ["aborted", "declined", "unresolved"],
+            [record.status for record in (bound, declined, invalid)],
+            ["completed", "declined", "evidence_invalid"],
         )
         self.assertEqual(len(bound.generations), 1)
         (generation,) = bound.generations
@@ -759,7 +807,7 @@ class TestRowAssembly(unittest.TestCase):
             (bound.attempt_id, bound.execution_id),
             ("attempt-t1", "sealed-fixture-01"),
         )
-        for record in (declined, unresolved):
+        for record in (declined, invalid):
             self.assertEqual((record.generations, record.scores), ((), ()))
             self.assertIsNone(record.attempt_id)
             self.assertIsNone(record.attempt_ordinal)
@@ -767,7 +815,7 @@ class TestRowAssembly(unittest.TestCase):
             self.assertIsNone(record.logical_run_id)
             self.assertIsNone(record.outcome)
             self.assertIsNone(record.digests.core_receipt)
-        canonical_json_bytes(plain([bound, declined, unresolved]))
+        canonical_json_bytes(plain([bound, declined, invalid]))
 
     def test_missing_leaderboard_is_one_safe_skip(self):
         root, _ = build_root("obsrow-noleader-")
@@ -775,6 +823,99 @@ class TestRowAssembly(unittest.TestCase):
         self.assertEqual(items, [])
         self.assertEqual([skip.reason for skip in skips], ["missing_artifact"])
         self.assertTrue(skips[0].path.endswith("leaderboard.json"))
+
+
+class TestLeaderboardStatusDerivationParity(unittest.TestCase):
+    """Row status must equal the closed harness derivation, never raw passthrough.
+
+    The sealed writer only ever emits declined/completed/aborted/evidence_invalid
+    (harness rule: no attempts -> declined; all refs bound + terminal outcome
+    completed -> completed; all bound + other outcome -> aborted; otherwise
+    evidence_invalid). A1 rejects any row whose status disagrees.
+    """
+
+    def test_impossible_status_combinations_fail_closed(self):
+        cases = {
+            "completed_with_zero_attempts": [_row("R1", "18", "completed")],
+            "aborted_with_completed_outcome": [_bound_row(status="aborted")],
+            "raw_unresolved_status_with_refs": [
+                _row(
+                    "R3",
+                    "20",
+                    "unresolved",
+                    attempts_used=1,
+                    attempt_refs=[
+                        {
+                            "attempt_id": "attempt-u1",
+                            "attempt_ordinal": 0,
+                            "evidence_status": "unresolved",
+                        }
+                    ],
+                )
+            ],
+            "raw_unresolved_status_without_refs": [_row("R1", "18", "unresolved")],
+            "completed_with_unresolved_ref": [
+                _bound_row(
+                    attempts_used=2,
+                    attempt_refs=[
+                        {
+                            "attempt_id": "attempt-t1",
+                            "attempt_ordinal": 0,
+                            "evidence_status": "bound",
+                        },
+                        {
+                            "attempt_id": "attempt-u9",
+                            "attempt_ordinal": 1,
+                            "evidence_status": "unresolved",
+                        },
+                    ],
+                )
+            ],
+        }
+        for label, rows in cases.items():
+            with self.subTest(case=label):
+                root, _ = _sealed_root(f"obsl-derive-{label}-", rows)
+                with self.assertRaises(ArtifactError) as raised:
+                    artifacts.load_leaderboard(root)
+                self.assertEqual(raised.exception.reason, "unsupported_schema")
+
+    def test_derived_statuses_accept_every_real_status(self):
+        def safe_abort(d):
+            path = d / "receipt.json"
+            value = json.loads(path.read_text())
+            value["outcome"] = "safe_abort"
+            _write_canonical(path, value)
+
+        completed_root, _ = _sealed_root("obsl-derive-ok-completed-", [_bound_row()])
+        self.assertEqual(
+            artifacts.load_leaderboard(completed_root)["rows"][0]["status"],
+            "completed",
+        )
+        aborted_root, _ = _sealed_root(
+            "obsl-derive-ok-aborted-",
+            [_bound_row(status="aborted", outcome="safe_abort")],
+            patch=safe_abort,
+        )
+        items, skips = assemble_items(aborted_root)
+        self.assertEqual(skips, [])
+        (item,) = items
+        self.assertEqual((item.status, item.outcome), ("aborted", "safe_abort"))
+        declined_root, _ = _sealed_root(
+            "obsl-derive-ok-declined-", [_row("R2", "19", "declined")]
+        )
+        self.assertEqual(
+            artifacts.load_leaderboard(declined_root)["rows"][0]["status"], "declined"
+        )
+        invalid_root, _ = _sealed_root(
+            "obsl-derive-ok-invalid-",
+            [_unresolved_row()],
+            extra_launches=(("attempt-u1", "R3", "20", 0),),
+        )
+        items, skips = assemble_items(invalid_root)
+        self.assertEqual(skips, [])
+        (row,) = items
+        self.assertIsInstance(row, model.TraceOnlyRow)
+        self.assertEqual(row.status, "evidence_invalid")
 
 
 if __name__ == "__main__":
