@@ -1,7 +1,7 @@
 """One-shot per-item export orchestration (Unit B, tasks 2/4/6).
 
 Flow per the persisted design: validated items from :func:`model.assemble_items`
-map to exactly one atomic Langfuse batch each — one ``trace-create``, one
+map to exactly one Langfuse request batch each — one ``trace-create``, one
 ``generation-create`` per digest-bound provider request, one ``score-create``
 per receipt-owned score — using the design's versioned deterministic IDs and
 preserving trace/generation/score relationships. The health guard runs before
@@ -23,6 +23,7 @@ Guarded text is structurally unreachable in metadata mode: values live only in
 ``GuardedText`` slots, which ``canonical_json_bytes`` refuses to serialize.
 """
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import ids, langfuse_http, model
@@ -276,9 +277,13 @@ def guard_payload(batch, *, include_text, path):
         raise ExportError(SECRET_DETECTED, f"secret pattern {secret!r}", path)
 
 
-def build_batch(item, *, include_text=False, root=None):
-    """Compose one validated item into its single atomic event batch."""
+def build_batch(item, *, include_text=False, root=None, clock=None):
+    """Compose one item batch with one projection-only export timestamp."""
     path = item_path(root, item)
+    now = (clock or (lambda: datetime.now(timezone.utc)))()
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("clock must return an offset-aware datetime")
+    timestamp = now.isoformat()
     trace_id_value = _trace_id_for(item)
     batch = [
         {
@@ -293,6 +298,9 @@ def build_batch(item, *, include_text=False, root=None):
             for request in item.requests
         )
         batch.append(_score_event(item, trace_id_value))
+    for event in batch:
+        event["timestamp"] = timestamp
+        event["metadata"] = None
     guard_payload(batch, include_text=include_text, path=path)
     if include_text:
         size = len(canonical_json_bytes({"batch": batch}))
@@ -305,7 +313,7 @@ def build_batch(item, *, include_text=False, root=None):
     return batch
 
 
-def run_export(root, client, *, include_text=False):
+def run_export(root, client, *, include_text=False, clock=None):
     """One finite export run: health guard, per-item batches, redacted report."""
     items, validation_skips = model.assemble_items(root)
     skips = list(validation_skips)
@@ -319,39 +327,36 @@ def run_export(root, client, *, include_text=False):
     else:
         for item in items:
             try:
-                batch = build_batch(item, include_text=include_text, root=root)
-            except ExportError as exc:
-                skips.append(SkipRecord(exc.path, exc.reason))
+                batch = build_batch(
+                    item, include_text=include_text, root=root, clock=clock
+                )
+            except (ExportError, ValueError) as exc:
+                reason = getattr(exc, "reason", langfuse_http.UNSUPPORTED_RESPONSE)
+                path = getattr(exc, "path", item_path(root, item))
+                skips.append(SkipRecord(path, reason))
                 continue
             result = client.ingest(batch)
-            if result.accepted:
-                outcomes = result.event_outcomes
+            if result.accepted_events:
                 exported.append(
                     ExportedItem(
                         trace_id=_trace_id_for(item),
-                        created=outcomes.count(langfuse_http.CREATED),
-                        updated_or_replayed=outcomes.count(
-                            langfuse_http.UPDATED_OR_REPLAYED
-                        ),
-                        unchanged=outcomes.count(langfuse_http.UNCHANGED),
+                        accepted_events=result.accepted_events,
+                        error_events=result.error_events,
                     )
                 )
-            else:
+            if not result.accepted:
                 failed += 1
                 skips.append(
                     SkipRecord(
                         item_path(root, item),
-                        result.reason
-                        if result.reason
-                        else langfuse_http.INGESTION_FAILED,
+                        result.reason or langfuse_http.INGESTION_FAILED,
                     )
                 )
     counts = {
         "processed": len(items) + len(validation_skips),
-        "exported": len(exported),
-        "created": sum(entry.created for entry in exported),
-        "updated_or_replayed": sum(entry.updated_or_replayed for entry in exported),
-        "unchanged": sum(entry.unchanged for entry in exported),
+        "accepted_items": sum(1 for entry in exported if entry.error_events == 0),
+        "accepted_events": sum(entry.accepted_events for entry in exported),
+        "error_events": sum(entry.error_events for entry in exported),
         "failed": failed,
         "skipped": len(skips),
     }

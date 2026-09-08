@@ -18,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from unittest import mock
@@ -164,7 +165,7 @@ def _post_script(*outcomes, fail_first=0):
 
     def behavior(method, path, body, server):
         if method == "GET":
-            return 200, {"success": True}
+            return 200, {"status": "OK", "version": "3.114.0"}
         state["posts"] += 1
         if state["posts"] <= fail_first:
             return outcomes[0] if outcomes else (400, {})
@@ -178,7 +179,7 @@ def _always(status, payload):
 
 
 class TestBatchComposition(unittest.TestCase):
-    """Task 2: one atomic batch per validated item with the design IDs."""
+    """Task 2: one request batch per validated item with the design IDs."""
 
     def test_bound_item_batch_matches_design_contract(self):
         batch = exporter.build_batch(_synthetic_run())
@@ -298,9 +299,33 @@ class TestBatchComposition(unittest.TestCase):
         ]
         self.assertEqual(metadata_ids, text_ids)
 
-    def test_batch_bytes_are_deterministic_across_calls_and_copies(self):
-        first = canonical_json_bytes({"batch": exporter.build_batch(_synthetic_run())})
-        second = canonical_json_bytes({"batch": exporter.build_batch(_synthetic_run())})
+    def test_timestamp_is_shared_per_batch_and_excluded_from_ids(self):
+        times = iter(
+            (
+                datetime(2026, 7, 8, 12, tzinfo=timezone.utc),
+                datetime(2026, 7, 8, 13, tzinfo=timezone.utc),
+            )
+        )
+        first_batch = exporter.build_batch(_synthetic_run(), clock=lambda: next(times))
+        second_batch = exporter.build_batch(_synthetic_run(), clock=lambda: next(times))
+        self.assertEqual(len({event["timestamp"] for event in first_batch}), 1)
+        self.assertTrue(all(event["metadata"] is None for event in first_batch))
+        self.assertNotEqual(first_batch[0]["timestamp"], second_batch[0]["timestamp"])
+        self.assertEqual(
+            [event["id"] for event in first_batch],
+            [event["id"] for event in second_batch],
+        )
+
+    def test_batch_bytes_are_deterministic_with_injected_clock_and_copies(self):
+        def clock():
+            return datetime(2026, 7, 8, 12, tzinfo=timezone.utc)
+
+        first = canonical_json_bytes(
+            {"batch": exporter.build_batch(_synthetic_run(), clock=clock)}
+        )
+        second = canonical_json_bytes(
+            {"batch": exporter.build_batch(_synthetic_run(), clock=clock)}
+        )
         self.assertEqual(first, second)
         root_a, _ = _sealed_root("obsb-copy-a-", [_bound_row()])
         root_b, _ = _sealed_root("obsb-copy-b-", [_bound_row()])
@@ -308,10 +333,10 @@ class TestBatchComposition(unittest.TestCase):
         batch_b, _ = assemble_items(root_b)
         self.assertEqual(
             canonical_json_bytes(
-                {"batch": exporter.build_batch(batch_a[0], root=root_a)}
+                {"batch": exporter.build_batch(batch_a[0], root=root_a, clock=clock)}
             ),
             canonical_json_bytes(
-                {"batch": exporter.build_batch(batch_b[0], root=root_b)}
+                {"batch": exporter.build_batch(batch_b[0], root=root_b, clock=clock)}
             ),
         )
 
@@ -455,10 +480,9 @@ class TestRunExport(unittest.TestCase):
             result.counts,
             {
                 "processed": 2,
-                "exported": 2,
-                "created": 4,
-                "updated_or_replayed": 0,
-                "unchanged": 0,
+                "accepted_items": 2,
+                "accepted_events": 4,
+                "error_events": 0,
                 "failed": 0,
                 "skipped": 0,
             },
@@ -488,9 +512,9 @@ class TestRunExport(unittest.TestCase):
             second = exporter.run_export(root, client)
         finally:
             self.assertTrue(stub.close())
-        self.assertEqual(first.counts["created"], 3)
-        self.assertEqual(second.counts["created"], 0)
-        self.assertEqual(second.counts["updated_or_replayed"], 3)
+        self.assertEqual(first.counts["accepted_events"], 3)
+        self.assertEqual(second.counts["accepted_events"], 3)
+        self.assertEqual(second.counts["accepted_events"], 3)
         self.assertEqual(second.counts["skipped"], 0)
         self.assertEqual(objects_after_first, stub.objects)
         self.assertEqual(
@@ -503,7 +527,7 @@ class TestRunExport(unittest.TestCase):
         result, stub, _ = self._run(root)
         self.assertIsNone(result.error)
         self.assertEqual(result.counts["processed"], 2)
-        self.assertEqual(result.counts["exported"], 0)
+        self.assertEqual(result.counts["accepted_items"], 0)
         self.assertEqual(result.counts["failed"], 0)
         self.assertEqual(result.counts["skipped"], 2)
         self.assertEqual(
@@ -518,7 +542,7 @@ class TestRunExport(unittest.TestCase):
         )
         result, stub, _ = self._run(root, _post_script(fail_first=1))
         self.assertEqual(result.counts["processed"], 2)
-        self.assertEqual(result.counts["exported"], 1)
+        self.assertEqual(result.counts["accepted_items"], 1)
         self.assertEqual(result.counts["failed"], 1)
         self.assertEqual(result.counts["skipped"], 1)
         (skip,) = result.skipped
@@ -538,11 +562,78 @@ class TestRunExport(unittest.TestCase):
 
     def test_unsupported_envelope_skips_the_item(self):
         root, _ = _sealed_root("obsb-envelope-", [_bound_row()])
-        result, stub, _ = self._run(root, _always(200, {"nope": True}))
+
+        def behavior(method, path, body, server):
+            if method == "GET":
+                return 200, {"status": "OK", "version": "3.114.0"}
+            return 207, {"nope": True}
+
+        result, stub, _ = self._run(root, behavior)
         self.assertEqual(result.counts["failed"], 1)
         self.assertEqual(result.counts["skipped"], 1)
         self.assertEqual(result.skipped[0].reason, "unsupported_response")
         self.assertEqual(stub.objects, {})
+
+    def test_partial_ingestion_accounting_is_honest(self):
+        """A partial item appears in exported event accounting AND skipped/failed."""
+        root, digests = _sealed_root("obsb-partial-", [_bound_row()])
+        identity = _bound_fixture_ids(root, digests)
+
+        def behavior(method, path, body, server):
+            if method == "GET":
+                return 200, {"status": "OK", "version": "3.114.0"}
+            return 207, {
+                "successes": [
+                    {
+                        "id": ids.event_id("trace-create", identity["trace"]),
+                        "status": 201,
+                    },
+                    {
+                        "id": ids.event_id("generation-create", identity["generation"]),
+                        "status": 201,
+                    },
+                ],
+                "errors": [
+                    {
+                        "id": ids.event_id("score-create", identity["score"]),
+                        "status": 400,
+                    }
+                ],
+            }
+
+        result, stub, _ = self._run(root, behavior)
+        self.assertEqual(
+            result.counts,
+            {
+                "processed": 1,
+                "accepted_items": 0,
+                "accepted_events": 2,
+                "error_events": 1,
+                "failed": 1,
+                "skipped": 1,
+            },
+        )
+        (entry,) = result.exported
+        self.assertEqual(entry.trace_id, identity["trace"])
+        self.assertEqual(entry.accepted_events, 2)
+        self.assertEqual(entry.error_events, 1)
+        (skip,) = result.skipped
+        self.assertEqual(skip.reason, "ingestion_failed")
+        receipt = (
+            root
+            / "core"
+            / "runs"
+            / ("lr_" + "3a" * 32)
+            / "sealed-fixture-01"
+            / "receipt.json"
+        )
+        self.assertEqual(skip.path, str(receipt))
+        # Exact identity: each processed item is exactly one accounted unit —
+        # one accepted item or one skipped item; nothing is lost or counted twice.
+        self.assertEqual(
+            result.counts["accepted_items"] + result.counts["skipped"],
+            result.counts["processed"],
+        )
 
     def test_unhealthy_endpoint_skips_every_item_without_ingesting(self):
         root, _ = _sealed_root(
@@ -550,7 +641,7 @@ class TestRunExport(unittest.TestCase):
         )
         result, stub, _ = self._run(root, _always(503, {}))
         self.assertEqual(result.error, "endpoint_unhealthy")
-        self.assertEqual(result.counts["exported"], 0)
+        self.assertEqual(result.counts["accepted_items"], 0)
         self.assertEqual(result.counts["skipped"], 2)
         self.assertEqual(result.counts["failed"], 0)
         self.assertEqual(
@@ -564,14 +655,14 @@ class TestRunExport(unittest.TestCase):
 
         def behavior(method, path, body, server):
             if method == "GET":
-                return 200, {"success": True}
+                return 200, {"status": "OK", "version": "3.114.0"}
             state["posts"] += 1
             if state["posts"] <= 2:
                 return 503, {}
             return server.upsert_ok(method, path, body, server)
 
         result, stub, recorder = self._run(root, behavior)
-        self.assertEqual(result.counts["exported"], 1)
+        self.assertEqual(result.counts["accepted_items"], 1)
         self.assertEqual(result.counts["skipped"], 0)
         self.assertEqual(state["posts"], 3)
         self.assertEqual(recorder.delays, [0.25, 0.5])
@@ -625,6 +716,13 @@ class TestReportShape(unittest.TestCase):
         )
         document = json.loads(value.render())
         self.assertEqual(document["error"], "endpoint_unhealthy")
+
+    def test_report_docstring_states_the_honest_partial_invariant(self):
+        """The documented invariants match the real partial-ingestion accounting."""
+        doc = report.ExportReport.__doc__
+        self.assertIsNotNone(doc)
+        self.assertNotIn("exported + skipped ==", doc)
+        self.assertIn("accepted_items + skipped", doc)
 
     def test_skip_records_expose_path_and_reason_only(self):
         value = report.ExportReport(
@@ -720,7 +818,19 @@ class TestCliExitCodes(unittest.TestCase):
 
     def test_invalid_url_exit_two_without_echoing_the_value(self):
         root = _declined_root("obsb-url-")
-        for url in ("ftp://example.com", "not-a-url", "http://"):
+        for url in (
+            "ftp://example.com",
+            "not-a-url",
+            "http://",
+            "http://example.com/path",
+            "http://example.com?query=1",
+            "http://example.com#fragment",
+            "http://example.com/path;params",
+            "http://127.0.0.1:9?",
+            "http://127.0.0.1:9#",
+            "http://[::1",
+            "http://127.0.0.1:notaport",
+        ):
             with self.subTest(url=url):
                 code, out, err = self._exit(
                     ["export", "--artifacts-root", str(root), "--langfuse-url", url]
@@ -743,6 +853,25 @@ class TestCliExitCodes(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
         self.assertNotIn("user:pass", err)
+
+    def test_trailing_slash_origin_url_is_accepted(self):
+        """Origin-only contract preserves the normal root and its trailing slash."""
+        root = _declined_root("obsb-url-slash-")
+        stub = StubLangfuse()
+        try:
+            code, out, err = self._main(
+                [
+                    "export",
+                    "--artifacts-root",
+                    str(root),
+                    "--langfuse-url",
+                    stub.url + "/",
+                ]
+            )
+            self.assertEqual(code, 0)
+            self.assertIn("export ok", err)
+        finally:
+            self.assertTrue(stub.close())
 
     def test_clean_run_exits_zero_with_report_on_stdout(self):
         root = _declined_root("obsb-cli-clean-")

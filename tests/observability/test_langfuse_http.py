@@ -29,6 +29,8 @@ def _event(event_type, object_id):
     """Minimal synthetic ingestion event (transport tests need no artifacts)."""
     return {
         "id": ids.event_id(event_type, object_id),
+        "timestamp": "2026-07-08T12:34:56+00:00",
+        "metadata": None,
         "type": event_type,
         "body": {"id": object_id},
     }
@@ -104,16 +106,15 @@ class StubLangfuse(ThreadingHTTPServer):
         return f"http://{host}:{port}"
 
     def upsert_ok(self, method, path, body, server):
-        """Pinned v3 envelope: 201 for a new object id, 202 for a replay."""
+        """Pinned v3 envelope; independently retain object IDs to verify replay."""
         if method == "GET":
-            return 200, {"success": True}
+            return 200, {"status": "OK", "version": "3.114.0"}
         successes = []
         for event in json.loads(body)["batch"]:
             key = (event["type"], event["body"]["id"])
-            first = key not in server.objects
             server.objects.setdefault(key, 201)
-            successes.append({"id": event["id"], "status": 201 if first else 202})
-        return 200, {"successes": successes, "failures": []}
+            successes.append({"id": event["id"], "status": 201})
+        return 207, {"successes": successes, "errors": []}
 
     def close(self):
         """One-shot teardown: no background thread survives the test."""
@@ -161,6 +162,21 @@ class TestHealthGuard(unittest.TestCase):
         finally:
             self.assertTrue(stub.close())
 
+    def test_health_requires_exact_200_ok_shape(self):
+        cases = (
+            (201, {"status": "OK", "version": "3.114.0"}),
+            (200, {"status": "ok", "version": "3.114.0"}),
+            (200, {"status": "OK"}),
+            (200, {"status": "OK", "version": 3}),
+        )
+        for status, payload in cases:
+            with self.subTest(status=status, payload=payload):
+                stub = StubLangfuse(_script((status, payload)))
+                try:
+                    self.assertFalse(_client(stub).check_health().healthy)
+                finally:
+                    self.assertTrue(stub.close())
+
     def test_unhealthy_endpoints_fail_with_reason_codes(self):
         cases = {
             "transient_exhausted": (_script((503, {})), 3),
@@ -180,7 +196,7 @@ class TestHealthGuard(unittest.TestCase):
 
 
 class TestIngestContract(unittest.TestCase):
-    def test_single_atomic_post_per_batch(self):
+    def test_single_request_per_item_batch(self):
         stub = StubLangfuse()
         try:
             batch = [
@@ -190,18 +206,17 @@ class TestIngestContract(unittest.TestCase):
             ]
             result = _client(stub).ingest(batch)
             self.assertTrue(result.accepted)
-            self.assertEqual(result.event_outcomes, ("created",) * 3)
+            self.assertEqual(result.accepted_events, 3)
+            self.assertEqual(result.error_events, 0)
             self.assertEqual(len(stub.requests), 1)
             request = stub.requests[0]
             self.assertEqual(request["method"], "POST")
             self.assertEqual(request["path"], langfuse_http.INGESTION_PATH)
-            self.assertTrue(request["has_auth"])
-            self.assertEqual(request["content_type"], "application/json")
             self.assertEqual(json.loads(request["body"])["batch"], batch)
         finally:
             self.assertTrue(stub.close())
 
-    def test_replay_reports_updates_with_zero_new_objects(self):
+    def test_replay_has_same_acceptance_without_novelty_claims(self):
         stub = StubLangfuse()
         try:
             client = _client(stub)
@@ -213,138 +228,187 @@ class TestIngestContract(unittest.TestCase):
             objects_after_first = len(stub.objects)
             second = client.ingest(batch)
             self.assertTrue(first.accepted)
-            self.assertEqual(first.event_outcomes, ("created",) * 2)
+            self.assertEqual(first.accepted_events, 2)
             self.assertTrue(second.accepted)
-            self.assertEqual(second.event_outcomes, ("updated_or_replayed",) * 2)
+            self.assertEqual(second.accepted_events, 2)
             self.assertEqual(len(stub.objects), objects_after_first)
         finally:
             self.assertTrue(stub.close())
 
     def test_unsupported_envelopes_are_rejected_safely(self):
+        event = _event("trace-create", "tr_x")
         envelopes = {
             "not_json": b"not-json",
-            "missing_successes": {},
-            "successes_not_list": {"successes": "nope"},
-            "success_entry_missing_status": {"successes": [{"id": "e1"}]},
-            "success_entry_bad_status": {"successes": [{"id": "e1", "status": 400}]},
-            "unknown_signal": {"successes": [], "ingest_version": "other"},
-        }
-        for label, payload in envelopes.items():
-            with self.subTest(envelope=label):
-                stub = StubLangfuse(_script((200, payload)))
-                try:
-                    result = _client(stub).ingest([_event("trace-create", "tr_x")])
-                    self.assertFalse(result.accepted)
-                    self.assertEqual(result.reason, "unsupported_response")
-                finally:
-                    self.assertTrue(stub.close())
-
-    def test_non_mapping_success_entries_fail_closed(self):
-        """C1: malformed entry shapes classify safely, never raise."""
-        envelopes = {
-            "int_entry": {"successes": [1], "failures": []},
-            "bool_entry": {"successes": [True], "failures": []},
-            "null_entry": {"successes": [None], "failures": []},
-            "string_entry": {"successes": ["e1"], "failures": []},
-            "list_entry": {"successes": [["e1"]], "failures": []},
-        }
-        for label, payload in envelopes.items():
-            with self.subTest(envelope=label):
-                stub = StubLangfuse(_script((200, payload)))
-                try:
-                    result = _client(stub).ingest([_event("trace-create", "tr_x")])
-                    self.assertFalse(result.accepted)
-                    self.assertEqual(result.reason, "unsupported_response")
-                finally:
-                    self.assertTrue(stub.close())
-
-    def test_non_mapping_failure_entries_fail_closed(self):
-        """C1: malformed failure entries classify as unsupported, never raise."""
-        envelopes = {
-            "int_entry": {"successes": [], "failures": [1]},
-            "bool_entry": {"successes": [], "failures": [True]},
-            "null_entry": {"successes": [], "failures": [None]},
-            "string_entry": {"successes": [], "failures": ["e2"]},
-            "list_entry": {"successes": [], "failures": [["e2"]]},
-        }
-        for label, payload in envelopes.items():
-            with self.subTest(envelope=label):
-                stub = StubLangfuse(_script((200, payload)))
-                try:
-                    result = _client(stub).ingest([_event("trace-create", "tr_x")])
-                    self.assertFalse(result.accepted)
-                    self.assertEqual(result.reason, "unsupported_response")
-                finally:
-                    self.assertTrue(stub.close())
-
-    def test_response_cardinality_must_match_the_submitted_batch(self):
-        """C2: acceptance requires one outcome per submitted event, exactly."""
-        batch = [_event("trace-create", "tr_x"), _event("score-create", "sc_x")]
-        envelopes = {
-            "empty_successes": {"successes": [], "failures": []},
-            "too_few_successes": {
-                "successes": [{"id": "e1", "status": 201}],
-                "failures": [],
+            "missing_successes": {"errors": []},
+            "successes_not_list": {"successes": "nope", "errors": []},
+            "success_entry_missing_status": {
+                "successes": [{"id": event["id"]}],
+                "errors": [],
             },
-            "too_many_successes": {
-                "successes": [
-                    {"id": "e1", "status": 201},
-                    {"id": "e2", "status": 201},
-                    {"id": "e3", "status": 201},
-                ],
-                "failures": [],
+            "success_entry_bad_status": {
+                "successes": [{"id": event["id"], "status": 202}],
+                "errors": [],
+            },
+            "unknown_signal": {
+                "successes": [],
+                "errors": [],
+                "ingest_version": "other",
             },
         }
         for label, payload in envelopes.items():
             with self.subTest(envelope=label):
-                stub = StubLangfuse(_script((200, payload)))
+                stub = StubLangfuse(_script((207, payload)))
                 try:
-                    result = _client(stub).ingest(batch)
+                    result = _client(stub).ingest([event])
                     self.assertFalse(result.accepted)
                     self.assertEqual(result.reason, "unsupported_response")
                 finally:
                     self.assertTrue(stub.close())
 
-    def test_event_failures_fail_the_whole_batch(self):
-        payload = {
-            "successes": [{"id": "e1", "status": 201}],
-            "failures": [{"id": "e2", "status": 400, "error": "boom-body"}],
-        }
-        stub = StubLangfuse(_script((200, payload)))
+    def test_non_mapping_entries_fail_closed(self):
+        for key in ("successes", "errors"):
+            for entry in (1, True, None, "e1", ["e1"]):
+                payload = {"successes": [], "errors": []}
+                payload[key] = [entry]
+                stub = StubLangfuse(_script((207, payload)))
+                try:
+                    self.assertEqual(
+                        _client(stub).ingest([_event("trace-create", "tr_x")]).reason,
+                        "unsupported_response",
+                    )
+                finally:
+                    self.assertTrue(stub.close())
+
+    def test_malformed_utf8_response_bytes_fail_closed(self):
+        """Invalid UTF-8 response bytes classify safely; no body ever escapes."""
+        for surface, status, payload in (
+            ("health", 200, b"\xff"),
+            ("ingest", 207, b"\xff\xfe"),
+        ):
+            with self.subTest(surface=surface):
+                stub = StubLangfuse(_script((status, payload)))
+                try:
+                    client = _client(stub)
+                    if surface == "health":
+                        result = client.check_health()
+                        self.assertFalse(result.healthy)
+                        self.assertEqual(result.reason, "endpoint_unhealthy")
+                    else:
+                        result = client.ingest([_event("trace-create", "tr_x")])
+                        self.assertFalse(result.accepted)
+                        self.assertEqual(result.reason, "unsupported_response")
+                    self.assertNotIn("\\xff", repr(result))
+                finally:
+                    self.assertTrue(stub.close())
+
+    def test_malformed_submitted_ids_fail_closed_before_transport(self):
+        """Event shape/ID validity gates hashing, accounting, and transport."""
+        for value in (7, True, None, ["u1"], {"k": 1}, ""):
+            with self.subTest(id=repr(value)):
+                stub = StubLangfuse()
+                try:
+                    event = _event("trace-create", "tr_x")
+                    event["id"] = value
+                    result = _client(stub).ingest([event])
+                    self.assertFalse(result.accepted)
+                    self.assertEqual(result.reason, "unsupported_response")
+                    self.assertIsNone(result.status)
+                    self.assertEqual(stub.requests, [])
+                finally:
+                    self.assertTrue(stub.close())
+
+    def test_empty_batch_and_non_mapping_events_fail_closed(self):
+        stub = StubLangfuse()
         try:
-            result = _client(stub).ingest([_event("trace-create", "tr_x")])
+            self.assertEqual(_client(stub).ingest([]).reason, "unsupported_response")
+            for event in (42, "event", None, ["id"]):
+                with self.subTest(event=repr(event)):
+                    result = _client(stub).ingest([event])
+                    self.assertFalse(result.accepted)
+                    self.assertEqual(result.reason, "unsupported_response")
+            self.assertEqual(stub.requests, [])
+        finally:
+            self.assertTrue(stub.close())
+
+    def test_event_errors_report_partial_counts_without_message_leak(self):
+        batch = [_event("trace-create", "tr_x"), _event("score-create", "sc_x")]
+        payload = {
+            "successes": [{"id": batch[0]["id"], "status": 201}],
+            "errors": [{"id": batch[1]["id"], "status": 400, "message": "boom-body"}],
+        }
+        stub = StubLangfuse(_script((207, payload)))
+        try:
+            result = _client(stub).ingest(batch)
             self.assertFalse(result.accepted)
             self.assertEqual(result.reason, "ingestion_failed")
-            self.assertNotIn("boom-body", str(result))
+            self.assertEqual(result.accepted_events, 1)
+            self.assertEqual(result.error_events, 1)
             self.assertNotIn("boom-body", repr(result))
         finally:
             self.assertTrue(stub.close())
 
-    def test_mixed_outcomes_classify_per_event(self):
-        payload = {
-            "successes": [
-                {"id": "e1", "status": 201},
-                {"id": "e2", "status": 202},
-                {"id": "e3", "status": 200},
-            ],
-            "failures": [],
+    def test_result_ids_require_exact_unique_complete_accounting(self):
+        batch = [_event("trace-create", "tr_x"), _event("score-create", "sc_x")]
+        first, second = (event["id"] for event in batch)
+        envelopes = {
+            "duplicate": {
+                "successes": [{"id": first, "status": 201}] * 2,
+                "errors": [],
+            },
+            "missing": {"successes": [{"id": first, "status": 201}], "errors": []},
+            "unknown": {
+                "successes": [
+                    {"id": first, "status": 201},
+                    {"id": "unknown", "status": 201},
+                ],
+                "errors": [],
+            },
+            "overlap": {
+                "successes": [{"id": first, "status": 201}],
+                "errors": [{"id": first, "status": 400}],
+            },
+            "bad_error_id": {
+                "successes": [{"id": first, "status": 201}],
+                "errors": [{"id": 7, "status": 400}],
+            },
+            "duplicate_errors": {
+                "successes": [],
+                "errors": [{"id": first}, {"id": first}],
+            },
+            "valid_control": {
+                "successes": [
+                    {"id": first, "status": 201},
+                    {"id": second, "status": 201},
+                ],
+                "errors": [],
+            },
         }
-        stub = StubLangfuse(_script((200, payload)))
-        try:
-            result = _client(stub).ingest(
-                [
-                    _event("trace-create", "tr_x"),
-                    _event("score-create", "sc_x"),
-                    _event("generation-create", "gn_x"),
-                ]
-            )
-            self.assertTrue(result.accepted)
-            self.assertEqual(
-                result.event_outcomes,
-                ("created", "updated_or_replayed", "unchanged"),
-            )
-        finally:
-            self.assertTrue(stub.close())
+        for label, payload in envelopes.items():
+            stub = StubLangfuse(_script((207, payload)))
+            try:
+                result = _client(stub).ingest(batch)
+                if label == "valid_control":
+                    self.assertTrue(result.accepted)
+                else:
+                    self.assertEqual(result.reason, "unsupported_response")
+            finally:
+                self.assertTrue(stub.close())
+
+    def test_exact_http_status_and_top_level_keys_are_required(self):
+        event = _event("trace-create", "tr_x")
+        valid = {"successes": [{"id": event["id"], "status": 201}], "errors": []}
+        for status, payload in (
+            (200, valid),
+            (201, valid),
+            (207, {**valid, "extra": []}),
+        ):
+            stub = StubLangfuse(_script((status, payload)))
+            try:
+                self.assertEqual(
+                    _client(stub).ingest([event]).reason, "unsupported_response"
+                )
+            finally:
+                self.assertTrue(stub.close())
 
 
 class TestBoundedRetry(unittest.TestCase):
@@ -354,10 +418,12 @@ class TestBoundedRetry(unittest.TestCase):
                 (503, {}),
                 (503, {}),
                 (
-                    200,
+                    207,
                     {
-                        "successes": [{"id": "e1", "status": 201}],
-                        "failures": [],
+                        "successes": [
+                            {"id": _event("trace-create", "tr_x")["id"], "status": 201}
+                        ],
+                        "errors": [],
                     },
                 ),
             )
@@ -385,10 +451,15 @@ class TestBoundedRetry(unittest.TestCase):
                     _script(
                         (429, {}, headers),
                         (
-                            200,
+                            207,
                             {
-                                "successes": [{"id": "e1", "status": 201}],
-                                "failures": [],
+                                "successes": [
+                                    {
+                                        "id": _event("trace-create", "tr_x")["id"],
+                                        "status": 201,
+                                    }
+                                ],
+                                "errors": [],
                             },
                         ),
                     )
@@ -440,7 +511,7 @@ class TestBoundedRetry(unittest.TestCase):
     def test_timeout_is_retried_bounded(self):
         def slow(method, path, body, server):
             threading.Event().wait(0.4)
-            return 200, {"successes": [], "failures": []}
+            return 207, {"successes": [], "errors": []}
 
         stub = StubLangfuse(slow)
         try:

@@ -19,10 +19,9 @@ SCHEMA_VERSION = 1
 
 COUNT_KEYS = (
     "processed",
-    "exported",
-    "created",
-    "updated_or_replayed",
-    "unchanged",
+    "accepted_items",
+    "accepted_events",
+    "error_events",
     "failed",
     "skipped",
 )
@@ -30,23 +29,31 @@ COUNT_KEYS = (
 
 @dataclass(frozen=True)
 class ExportedItem:
-    """One accepted item: its deterministic trace ID plus per-outcome counts."""
+    """Evidence-backed per-item ingestion accounting, including partials."""
 
     trace_id: str
-    created: int
-    updated_or_replayed: int
-    unchanged: int
+    accepted_events: int
+    error_events: int
 
 
 @dataclass(frozen=True)
 class ExportReport:
     """Aggregate of one finite export run.
 
-    Counter semantics: ``processed`` is the full accounted item set
-    (validated candidates plus validation skips), ``exported + skipped ==
-    processed``, and ``failed`` (item-level ingestion failures) is a subset of
-    ``skipped``. Validation skips, endpoint-guard skips, and ingestion failures
-    all appear in ``skipped`` with their stable reason code.
+    Counter semantics: ``processed`` is the full accounted item set —
+    validated candidates plus validation skips — each counted exactly once,
+    and the exact identity ``accepted_items + skipped == processed`` always
+    holds. ``exported`` carries per-item event accounting for every item
+    with at least one accepted event: ``accepted_items`` counts its
+    ``error_events == 0`` entries, while a partial item (some accepted and
+    some errored events) also appears in ``skipped`` and is counted in
+    ``failed`` — that overlap is why ``len(exported)`` and
+    ``accepted_events`` may exceed ``accepted_items`` without any processed
+    item being counted twice. ``failed`` (item-level ingestion failures:
+    partial or zero-accepted) is a subset of ``skipped``; validation skips,
+    endpoint-guard skips, and ingestion failures all appear in ``skipped``
+    with their stable reason code. The report carries item/event accounting
+    only — it never claims a transaction outcome or object novelty.
     """
 
     counts: Mapping

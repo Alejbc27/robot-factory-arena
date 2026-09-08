@@ -59,13 +59,28 @@ def build_parser(stderr=None):
 
 
 def _validated_url(value, parser):
-    """http(s) URL with a host and no embedded credentials; never echoed."""
-    parts = urllib.parse.urlsplit(value)
+    """http(s) URL with a host and no embedded credentials; never echoed.
+
+    Explicit empty query/fragment delimiters, malformed IPv6 hosts, and
+    malformed ports all exit 2 before any processing; the offending value is
+    never echoed.
+    """
+    try:
+        parts = urllib.parse.urlsplit(value)
+        hostname = parts.hostname
+        _ = parts.port  # evaluated to fail closed on malformed ports (ValueError)
+    except ValueError:
+        parser.error(
+            "--langfuse-url must be an http(s) URL without embedded credentials"
+        )
     if (
         parts.scheme not in URL_SCHEMES
-        or not parts.netloc
+        or not hostname
         or parts.username is not None
         or parts.password is not None
+        or parts.path not in ("", "/")
+        or "?" in value
+        or "#" in value
     ):
         parser.error(
             "--langfuse-url must be an http(s) URL without embedded credentials"
@@ -91,7 +106,10 @@ def _report_line(report):
             f"export incomplete: failed={counts['failed']} "
             f"skipped={counts['skipped']}\n"
         )
-    return f"export ok: processed={counts['processed']} exported={counts['exported']}\n"
+    return (
+        f"export ok: processed={counts['processed']} "
+        f"accepted_items={counts['accepted_items']}\n"
+    )
 
 
 def main(argv=None, *, environ=None, stdout=None, stderr=None):

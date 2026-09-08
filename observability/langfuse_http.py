@@ -9,12 +9,13 @@ this session, so no API field beyond the persisted design's pinned contract is
 assumed; any response that does not match it fails closed as
 ``unsupported_response``.
 
-Reliability contract: one atomic batch per :meth:`LangfuseClient.ingest` call;
+Reliability contract: one request batch per :meth:`LangfuseClient.ingest` call;
 at most three attempts for network errors, timeouts, HTTP 408/429 and 5xx;
 scheduled delays of 250 ms then 500 ms with a valid ``Retry-After`` header
 honored up to 2 s; authentication, schema and other 4xx responses are
 non-retryable. Classifications carry safe status/reason codes only — never a
-response body, credential material, or payload text.
+response body, credential material, or payload text. Responses that are not
+decodable UTF-8 fail closed identically to malformed JSON.
 """
 
 import base64
@@ -23,17 +24,15 @@ import math
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 
 from .artifacts import canonical_json_bytes
 
 SUPPORTED_LANGFUSE_RELEASE = "3.114.0"
 INGESTION_PATH = "/api/public/ingestion"
 HEALTH_PATH = "/api/public/health"
-
-CREATED = "created"
-UPDATED_OR_REPLAYED = "updated_or_replayed"
-UNCHANGED = "unchanged"
 
 ENDPOINT_UNHEALTHY = "endpoint_unhealthy"
 INGESTION_FAILED = "ingestion_failed"
@@ -44,8 +43,7 @@ MAX_ATTEMPTS = 3
 BACKOFF_S = (0.25, 0.5)
 MAX_RETRY_DELAY_S = 2.0
 RETRYABLE_STATUSES = frozenset({408, 429, *range(500, 600)})
-_ENVELOPE_KEYS = frozenset({"successes", "failures"})
-_EVENT_OUTCOMES = {201: CREATED, 202: UPDATED_OR_REPLAYED}
+_ENVELOPE_KEYS = frozenset({"successes", "errors"})
 
 
 @dataclass(frozen=True)
@@ -61,15 +59,17 @@ class HealthResult:
 class IngestResult:
     """Safe batch classification; never carries bodies, headers, or secrets.
 
-    ``event_outcomes`` aligns with the submitted batch order when accepted and
-    is empty otherwise. ``status`` is the bare HTTP status code or None for
-    network-level failures.
+    ``accepted_events``/``error_events`` carry the endpoint's 207 per-event
+    accounting once a well-formed envelope matches the submitted batch;
+    they stay 0 otherwise. ``status`` is the bare HTTP status code or None
+    for network-level failures.
     """
 
     accepted: bool
     reason: str | None = None
     status: int | None = None
-    event_outcomes: tuple = ()
+    accepted_events: int = 0
+    error_events: int = 0
 
 
 @dataclass(frozen=True)
@@ -81,48 +81,41 @@ class _Answer:
     error: int | None = None
 
 
-def _classify_envelope(status, body, expected_count):
-    """Strict pinned-v3 ingestion envelope; any deviation fails closed.
-
-    ``expected_count`` is the submitted batch size: the response must
-    account for exactly that many event outcomes — no fewer (an empty or
-    partial accounting invents undocumented success) and no more — before
-    any acceptance is reported. Every entry must be a mapping; malformed
-    entries classify as ``unsupported_response`` instead of raising.
-    """
+def _classify_envelope(status, body, submitted_ids):
+    """Validate the exact 207 per-event result without retaining diagnostics."""
     try:
         envelope = json.loads(body)
-    except ValueError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return IngestResult(False, UNSUPPORTED_RESPONSE, status)
-    failures = envelope.get("failures", []) if isinstance(envelope, dict) else None
     if (
-        not isinstance(envelope, dict)
-        or set(envelope) - _ENVELOPE_KEYS
-        or not isinstance(envelope.get("successes"), list)
-        or not isinstance(failures, list)
+        status != 207
+        or not isinstance(envelope, dict)
+        or set(envelope) != _ENVELOPE_KEYS
+        or not isinstance(envelope["successes"], list)
+        or not isinstance(envelope["errors"], list)
     ):
         return IngestResult(False, UNSUPPORTED_RESPONSE, status)
-    if failures:
-        if not all(isinstance(entry, dict) for entry in failures):
-            return IngestResult(False, UNSUPPORTED_RESPONSE, status)
-        return IngestResult(False, INGESTION_FAILED, status)
-    successes = envelope["successes"]
-    if len(successes) != expected_count:
-        return IngestResult(False, UNSUPPORTED_RESPONSE, status)
-    outcomes = []
+    successes, errors = envelope["successes"], envelope["errors"]
+    success_ids = []
     for entry in successes:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or set(entry) != {"id", "status"}:
             return IngestResult(False, UNSUPPORTED_RESPONSE, status)
-        entry_status = entry.get("status")
-        if (
-            not isinstance(entry.get("id"), str)
-            or isinstance(entry_status, bool)
-            or not isinstance(entry_status, int)
-            or not 200 <= entry_status <= 299
-        ):
+        if not isinstance(entry["id"], str) or entry["status"] != 201:
             return IngestResult(False, UNSUPPORTED_RESPONSE, status)
-        outcomes.append(_EVENT_OUTCOMES.get(entry_status, UNCHANGED))
-    return IngestResult(True, None, status, tuple(outcomes))
+        success_ids.append(entry["id"])
+    error_ids = []
+    for entry in errors:
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            return IngestResult(False, UNSUPPORTED_RESPONSE, status)
+        error_ids.append(entry["id"])
+    result_ids = success_ids + error_ids
+    if len(result_ids) != len(set(result_ids)) or set(result_ids) != set(submitted_ids):
+        return IngestResult(False, UNSUPPORTED_RESPONSE, status)
+    if errors:
+        return IngestResult(
+            False, INGESTION_FAILED, status, len(successes), len(errors)
+        )
+    return IngestResult(True, None, status, len(successes), 0)
 
 
 class LangfuseClient:
@@ -203,16 +196,44 @@ class LangfuseClient:
                 return HealthResult(False, ENDPOINT_UNHEALTHY, answer.error)
             try:
                 parsed = json.loads(answer.body)
-            except ValueError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 return HealthResult(False, ENDPOINT_UNHEALTHY, answer.status)
-            if not isinstance(parsed, dict):
+            if (
+                answer.status != 200
+                or not isinstance(parsed, dict)
+                or parsed.get("status") != "OK"
+                or not isinstance(parsed.get("version"), str)
+            ):
                 return HealthResult(False, ENDPOINT_UNHEALTHY, answer.status)
             return HealthResult(True)
+
         return HealthResult(False, ENDPOINT_UNHEALTHY)
 
     def ingest(self, batch):
-        """Submit one atomic item batch; classify the pinned response envelope."""
+        """Submit one item request batch; classify complete or partial results.
+
+        Every batch event must be a mapping with a non-empty string ``id``;
+        anything else is classified ``unsupported_response`` before any hashing,
+        accounting, serialization, or transport can observe it.
+        """
         if not batch:  # fail closed: no submitted events, no invented success
+            return IngestResult(False, UNSUPPORTED_RESPONSE)
+        try:
+            for event in batch:
+                if (
+                    not isinstance(event, Mapping)
+                    or not isinstance(event["id"], str)
+                    or not event["id"]
+                ):
+                    return IngestResult(False, UNSUPPORTED_RESPONSE)
+            submitted_ids = [event["id"] for event in batch]
+            for event in batch:
+                timestamp = datetime.fromisoformat(event["timestamp"])
+                if timestamp.utcoffset() is None or "metadata" not in event:
+                    raise ValueError
+        except (KeyError, TypeError, ValueError):
+            return IngestResult(False, UNSUPPORTED_RESPONSE)
+        if len(submitted_ids) != len(set(submitted_ids)):
             return IngestResult(False, UNSUPPORTED_RESPONSE)
         payload = canonical_json_bytes({"batch": batch})
         request = self._request("POST", INGESTION_PATH, payload)
@@ -221,5 +242,5 @@ class LangfuseClient:
                 if answer.error is not None:
                     return IngestResult(False, INGESTION_FAILED, answer.error)
                 return IngestResult(False, INGESTION_UNREACHABLE)
-            return _classify_envelope(answer.status, answer.body, len(batch))
+            return _classify_envelope(answer.status, answer.body, submitted_ids)
         return IngestResult(False, UNSUPPORTED_RESPONSE)
