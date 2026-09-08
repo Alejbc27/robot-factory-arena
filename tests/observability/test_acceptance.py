@@ -1,0 +1,284 @@
+"""Unit C end-to-end acceptance (task 5): layout-shaped stub export runs.
+
+Drives the one-shot CLI and :func:`exporter.run_export` against temporary
+artifact roots shaped exactly like the sealed evidence layout —
+``leaderboard.json``, ``attempts/*/launch.json`` and
+``core/runs/*/{receipt.json,llm/provider-run.json,llm/llm-receipt.json}`` —
+with valid independent items (bound ``completed``, trace-only ``declined`` and
+trace-only ``evidence_invalid``), one invalid item, an ``aborted`` status root,
+and secret/markup variants. Asserts authority preservation, terminal-status
+fidelity, metadata/text policy at the HTTP stub, report/exit semantics, and
+zero new objects on re-export. Stub only: no LLM, no live Langfuse, no
+retained process; source artifact bytes stay untouched throughout.
+"""
+
+import contextlib
+import io
+import json
+import unittest
+
+import observability_runtime.cli as cli  # pyright: ignore[reportMissingImports]
+
+from observability import assemble_items, build_trace_records, canonical_json_bytes
+
+from .test_artifacts import (
+    _DIGEST,
+    _bound_row,
+    _row,
+    _sealed_root,
+    _unresolved_row,
+)
+from .test_langfuse_http import StubLangfuse
+
+RESPONSE_MARKER = "RESPONSE-MARKER-acceptance-9z"
+ARGUMENTS_MARKER = "north"
+SECRET_RESPONSE = "sk-secret-acceptance"
+
+_ENV = {
+    "LANGFUSE_PUBLIC_KEY": "pub-acceptance-dummy",
+    "LANGFUSE_SECRET_KEY": "sec-acceptance-dummy",
+}
+
+
+def _inject(run_dir, response, arguments):
+    """Patch the fixture copy's provider evidence with text/arguments."""
+    path = run_dir / "llm" / "provider-run.json"
+    value = json.loads(path.read_text())
+    value["requests"][0]["raw_visible_response"] = response
+    if arguments is not None:
+        value["requests"][0]["tool_call"] = {
+            "tool": "move",
+            "arguments": arguments,
+        }
+    path.write_bytes(canonical_json_bytes(value))
+
+
+def _layout_root(prefix, *, ghost=True, response=None, arguments=None):
+    """Sealed layout root: three valid independent items plus options.
+
+    Default adds a fourth row whose ``core_receipt_digest`` cannot bind any
+    sealed run — the one invalid item. ``response``/``arguments`` inject
+    eligible text into the bound run's provider evidence.
+    """
+
+    def patch(run_dir):
+        if response is not None:
+            _inject(run_dir, response, arguments)
+
+    rows = [
+        _bound_row(),
+        _row("R2", "19", "declined"),
+        _unresolved_row(),
+    ]
+    if ghost:
+        rows.append(_bound_row(condition="R4", seed="21", core_receipt_digest=_DIGEST))
+    root, _ = _sealed_root(
+        prefix,
+        rows,
+        extra_launches=[("attempt-u1", "R3", "20", 0)],
+        **({"patch": patch} if response is not None else {}),
+    )
+    return root
+
+
+def _aborted_root(prefix):
+    """Bound run whose outcome is a safe abort: terminal status ``aborted``.
+
+    The receipt outcome is patched before reseal so the row's declared
+    outcome agrees with its digest-bound evidence.
+    """
+
+    def safe_abort(run_dir):
+        path = run_dir / "receipt.json"
+        value = json.loads(path.read_text())
+        value["outcome"] = "safe_abort"
+        path.write_bytes(canonical_json_bytes(value))
+
+    root, _ = _sealed_root(
+        prefix,
+        [_bound_row(status="aborted", outcome="safe_abort")],
+        patch=safe_abort,
+    )
+    return root
+
+
+def _run_cli(root, stub, *flags):
+    """One CLI invocation against the stub; returns (exit, report, stderr)."""
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        code = cli.main(
+            [
+                "export",
+                "--artifacts-root",
+                str(root),
+                "--langfuse-url",
+                stub.url,
+                *flags,
+            ],
+            environ=dict(_ENV),
+            stdout=stdout,
+            stderr=stderr,
+        )
+    return code, json.loads(stdout.getvalue()), stderr.getvalue()
+
+
+def _post_bodies(stub):
+    """Decoded canonical bodies of every POST the stub recorded."""
+    return [json.loads(r["body"]) for r in stub.requests if r["method"] == "POST"]
+
+
+def _root_bytes(root):
+    """Every artifact byte the export may read, for immutability checks."""
+    paths = [root / "leaderboard.json"]
+    for launch in sorted((root / "attempts").glob("*/launch.json")):
+        paths.append(launch)
+    for receipt in sorted((root / "core" / "runs").glob("*/*/receipt.json")):
+        paths.append(receipt)
+        paths.append(receipt.parent / "llm" / "provider-run.json")
+        paths.append(receipt.parent / "llm" / "llm-receipt.json")
+    return {str(path): path.read_bytes() for path in paths}
+
+
+class TestLayoutShapedAcceptance(unittest.TestCase):
+    def test_mixed_validity_report_status_authority_and_exit_one(self):
+        root = _layout_root("obs-acc-mixed-")
+        before = _root_bytes(root)
+        stub = StubLangfuse()
+        try:
+            code, report, _ = _run_cli(root, stub)
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                report["counts"],
+                {
+                    "processed": 4,
+                    "exported": 3,
+                    "created": 5,
+                    "updated_or_replayed": 0,
+                    "unchanged": 0,
+                    "failed": 0,
+                    "skipped": 1,
+                },
+            )
+            (skip,) = report["skipped"]
+            self.assertEqual(skip["reason"], "missing_artifact")
+            self.assertTrue(skip["path"].endswith("core/runs"))
+            statuses = {
+                record.status for record in build_trace_records(assemble_items(root)[0])
+            }
+            self.assertEqual(statuses, {"completed", "declined", "evidence_invalid"})
+            self.assertEqual(
+                sorted(entry["trace_id"] for entry in report["exported"]),
+                sorted(
+                    entry["body"]["id"]
+                    for batch in _post_bodies(stub)
+                    for entry in batch["batch"]
+                    if entry["type"] == "trace-create"
+                ),
+            )
+            self.assertEqual(len(stub.objects), 5)
+            for batch in _post_bodies(stub):
+                self.assertNotIn(RESPONSE_MARKER.encode(), canonical_json_bytes(batch))
+            self.assertEqual(_root_bytes(root), before)
+        finally:
+            self.assertTrue(stub.close())
+
+    def test_clean_root_exit_zero_and_replay_creates_zero_new_objects(self):
+        root = _layout_root("obs-acc-clean-", ghost=False, response="plain-ok")
+        stub = StubLangfuse()
+        try:
+            first_code, first, _ = _run_cli(root, stub)
+            self.assertEqual(first_code, 0)
+            self.assertEqual(first["counts"]["exported"], 3)
+            self.assertEqual(first["counts"]["skipped"], 0)
+            identities_after_first = set(stub.objects)
+            self.assertEqual(len(identities_after_first), 5)
+            second_code, second, _ = _run_cli(root, stub)
+            self.assertEqual(second_code, 0)
+            self.assertEqual(second["counts"]["created"], 0)
+            self.assertEqual(second["counts"]["updated_or_replayed"], 5)
+            self.assertEqual(set(stub.objects), identities_after_first)
+        finally:
+            self.assertTrue(stub.close())
+
+    def test_include_text_exports_eligible_text_report_stays_redacted(self):
+        root = _layout_root(
+            "obs-acc-text-",
+            ghost=False,
+            response=RESPONSE_MARKER,
+            arguments={"direction": ARGUMENTS_MARKER},
+        )
+        before = _root_bytes(root)
+        stub = StubLangfuse()
+        try:
+            code, report, _ = _run_cli(root, stub, "--include-text")
+            self.assertEqual(code, 0)
+            bodies = canonical_json_bytes({"batches": _post_bodies(stub)})
+            self.assertIn(RESPONSE_MARKER.encode(), bodies)
+            self.assertIn(ARGUMENTS_MARKER.encode(), bodies)
+            self.assertNotIn(RESPONSE_MARKER, report)
+            self.assertNotIn(ARGUMENTS_MARKER, report)
+            self.assertEqual(_root_bytes(root), before)
+            self.assertEqual(len(stub.objects), 5)
+        finally:
+            self.assertTrue(stub.close())
+
+    def test_secret_item_skips_in_both_modes_and_leaks_nowhere(self):
+        root = _layout_root("obs-acc-secret-", ghost=False, response=SECRET_RESPONSE)
+        for flags in ((), ("--include-text",)):
+            stub = StubLangfuse()
+            try:
+                code, report, stderr = _run_cli(root, stub, *flags)
+                self.assertEqual(code, 1)
+                # The loader-level scan skips the unreadable run itself and the
+                # bound row whose receipt digest can no longer bind any
+                # readable evidence — both fail closed, nothing is exported.
+                self.assertEqual(report["counts"]["skipped"], 2)
+                self.assertEqual(
+                    {skip["reason"] for skip in report["skipped"]},
+                    {"secret_detected", "missing_artifact"},
+                )
+                all_output = canonical_json_bytes(
+                    {"batches": _post_bodies(stub), "report": report, "stderr": stderr}
+                )
+                self.assertNotIn(SECRET_RESPONSE.encode(), all_output)
+            finally:
+                self.assertTrue(stub.close())
+
+    def test_aborted_status_preserved_end_to_end(self):
+        root = _aborted_root("obs-acc-aborted-")
+        stub = StubLangfuse()
+        try:
+            code, report, _ = _run_cli(root, stub)
+            self.assertEqual(code, 0)
+            self.assertEqual(report["counts"]["exported"], 1)
+            (trace,) = (
+                entry["body"]
+                for batch in _post_bodies(stub)
+                for entry in batch["batch"]
+                if entry["type"] == "trace-create"
+            )
+            self.assertEqual(trace["metadata"]["status"], "aborted")
+            self.assertEqual(trace["metadata"]["outcome"], "safe_abort")
+        finally:
+            self.assertTrue(stub.close())
+
+    def test_usage_error_exits_two_without_processing(self):
+        stub = StubLangfuse()
+        try:
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with self.assertRaises(SystemExit) as raised:
+                cli.main(
+                    ["export", "--artifacts-root", ""],
+                    environ=dict(_ENV),
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            self.assertEqual(raised.exception.code, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(stub.requests, [])
+        finally:
+            self.assertTrue(stub.close())
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

@@ -97,6 +97,10 @@ What the harness guarantees, and what it does not:
 - **Internal identity consistency** — binding precision note: "First-bind-wins for prompt_digest/tool_schema_digest is INTERNAL consistency after the first run — not a pre-frozen tournament expectation recorded before the tournament."
 - **No composite score** and no scientific/security/exactly-once claims; replay never calls an LLM.
 
+## Observability (optional — self-hosted Langfuse)
+
+`observability/` is a downstream-only tracing projection: a pinned Langfuse v3.114.0 Compose stack (only the UI port 3000 published, all credentials environment-only) plus a stdlib-only one-shot exporter that submits sealed run evidence deterministically. Sealed artifacts remain the only authority — removing the stack cannot alter source evidence. Exact pins, official provenance (researched 2026-09-08), environment variable names, start/teardown, and the optional gated smoke live in `docs/observability.md`.
+
 ## Roadmap
 
 | Phase | Deliverable | Exit criteria |
