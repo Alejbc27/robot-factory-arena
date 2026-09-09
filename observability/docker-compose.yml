@@ -5,6 +5,9 @@
 # tests/observability/test_compose_docs.py). Only the Langfuse UI port 3000 is
 # published. All credentials are environment-only and use non-empty ${VAR:?}
 # guards — supply them in your shell or an uncommitted .env next to this file.
+# The Langfuse S3 event-upload credentials reuse the MinIO root credentials
+# (the official deployment defaults both pairs to the same values) — this
+# stack provisions no separate MinIO user.
 services:
   langfuse-worker:
     image: docker.io/langfuse/langfuse-worker:3.114.0
@@ -31,8 +34,11 @@ services:
       CLICKHOUSE_CLUSTER_ENABLED: "false"
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse}
       LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID:?set LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID}
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY:?set LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY}
+      # Official v3.114.0 deployment defaults the upload credentials to the
+      # same values as the MinIO root user/password and provisions no
+      # separate user — derive them instead of duplicating prerequisites.
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
       LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
@@ -106,15 +112,20 @@ services:
     command: >
       --requirepass ${REDIS_AUTH:?set REDIS_AUTH}
     environment:
-      # Runtime-only supply for the healthcheck probe; the value is never
-      # interpolated host-side into the composed config.
+      # Runtime-only supply for the healthcheck probe: $$ in the
+      # healthcheck defers expansion to the container shell, so the
+      # command is not host-interpolated into the composed config. The
+      # password is still ordinary container configuration, readable by
+      # any Docker-privileged user via container inspection or exec —
+      # convenience, not secret protection.
       REDIS_AUTH: ${REDIS_AUTH:?set REDIS_AUTH}
     volumes:
       - langfuse_redis_data:/data
     healthcheck:
       # $$ defers expansion to the container shell, so the authenticated
-      # ping (requirepass rejects an anonymous one) never embeds the
-      # secret in the compose file or `docker inspect` output.
+      # ping (requirepass rejects an anonymous one) is not host-side
+      # interpolated into the composed config; this does not hide the
+      # password from Docker-privileged users.
       test:
         [
           "CMD-SHELL",

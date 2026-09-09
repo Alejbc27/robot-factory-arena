@@ -6,16 +6,22 @@ artifact roots shaped exactly like the sealed evidence layout —
 ``core/runs/*/{receipt.json,llm/provider-run.json,llm/llm-receipt.json}`` —
 with valid independent items (bound ``completed``, trace-only ``declined`` and
 trace-only ``evidence_invalid``), one invalid item, an ``aborted`` status root,
-and secret/markup variants. Asserts authority preservation, terminal-status
-fidelity, metadata/text policy at the HTTP stub, report/exit semantics, and
-zero new objects on re-export. Stub only: no LLM, no live Langfuse, no
-retained process; source artifact bytes stay untouched throughout.
+a partial 207 batch, and secret/markup variants. Asserts authority
+preservation, terminal-status fidelity, metadata/text policy at the HTTP
+stub, and the inherited exact PR32 ingestion contract: HTTP 207 envelopes
+``{successes, errors}`` with 201 successes, required per-event offset-aware
+timestamps, honest accepted/error counters, and no created/replay novelty
+or atomic claims anywhere in the report — replay stability is observed
+independently on the stub's object-ID set, never claimed by the report.
+Stub only: no LLM, no live Langfuse, no retained process; source artifact
+bytes stay untouched throughout.
 """
 
 import contextlib
 import io
 import json
 import unittest
+from datetime import datetime
 
 import observability_runtime.cli as cli  # pyright: ignore[reportMissingImports]
 
@@ -127,6 +133,30 @@ def _post_bodies(stub):
     return [json.loads(r["body"]) for r in stub.requests if r["method"] == "POST"]
 
 
+_NOVELTY_KEYS = ("created", "updated_or_replayed", "unchanged")
+
+
+def _assert_wire_shape(test, stub):
+    """Inherited wire contract on every posted event.
+
+    Offset-aware ``timestamp`` plus a ``metadata`` key are required; the
+    client fails closed on anything but the exact v3 207 envelope with 201
+    successes, so accepted counters additionally prove the envelope round-trip.
+    """
+    for batch in _post_bodies(stub):
+        for event in batch["batch"]:
+            timestamp = datetime.fromisoformat(event["timestamp"])
+            test.assertIsNotNone(timestamp.utcoffset())
+            test.assertIn("metadata", event)
+
+
+def _assert_no_novelty_claims(test, report):
+    """The report carries item/event accounting only — never novelty/atomicity."""
+    for key in _NOVELTY_KEYS:
+        test.assertNotIn(key, report)
+        test.assertNotIn(key, report["counts"])
+
+
 def _root_bytes(root):
     """Every artifact byte the export may read, for immutability checks."""
     paths = [root / "leaderboard.json"]
@@ -151,14 +181,18 @@ class TestLayoutShapedAcceptance(unittest.TestCase):
                 report["counts"],
                 {
                     "processed": 4,
-                    "exported": 3,
-                    "created": 5,
-                    "updated_or_replayed": 0,
-                    "unchanged": 0,
+                    "accepted_items": 3,
+                    "accepted_events": 5,
+                    "error_events": 0,
                     "failed": 0,
                     "skipped": 1,
                 },
             )
+            _assert_no_novelty_claims(self, report)
+            for entry in report["exported"]:
+                self.assertEqual(
+                    set(entry), {"trace_id", "accepted_events", "error_events"}
+                )
             (skip,) = report["skipped"]
             self.assertEqual(skip["reason"], "missing_artifact")
             self.assertTrue(skip["path"].endswith("core/runs"))
@@ -179,24 +213,38 @@ class TestLayoutShapedAcceptance(unittest.TestCase):
             for batch in _post_bodies(stub):
                 self.assertNotIn(RESPONSE_MARKER.encode(), canonical_json_bytes(batch))
             self.assertEqual(_root_bytes(root), before)
+            _assert_wire_shape(self, stub)
         finally:
             self.assertTrue(stub.close())
 
-    def test_clean_root_exit_zero_and_replay_creates_zero_new_objects(self):
+    def test_clean_root_exit_zero_and_replay_reuses_stable_object_ids(self):
         root = _layout_root("obs-acc-clean-", ghost=False, response="plain-ok")
         stub = StubLangfuse()
         try:
             first_code, first, _ = _run_cli(root, stub)
             self.assertEqual(first_code, 0)
-            self.assertEqual(first["counts"]["exported"], 3)
-            self.assertEqual(first["counts"]["skipped"], 0)
+            self.assertEqual(
+                first["counts"],
+                {
+                    "processed": 3,
+                    "accepted_items": 3,
+                    "accepted_events": 5,
+                    "error_events": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                },
+            )
+            _assert_no_novelty_claims(self, first)
             identities_after_first = set(stub.objects)
             self.assertEqual(len(identities_after_first), 5)
             second_code, second, _ = _run_cli(root, stub)
             self.assertEqual(second_code, 0)
-            self.assertEqual(second["counts"]["created"], 0)
-            self.assertEqual(second["counts"]["updated_or_replayed"], 5)
+            self.assertEqual(second["counts"], first["counts"])
+            # Independent stub-side observation only: the report itself
+            # makes no novelty or replay claim; stable object IDs are
+            # verified here, on the stub, never in the report.
             self.assertEqual(set(stub.objects), identities_after_first)
+            _assert_no_novelty_claims(self, second)
         finally:
             self.assertTrue(stub.close())
 
@@ -250,7 +298,8 @@ class TestLayoutShapedAcceptance(unittest.TestCase):
         try:
             code, report, _ = _run_cli(root, stub)
             self.assertEqual(code, 0)
-            self.assertEqual(report["counts"]["exported"], 1)
+            self.assertEqual(report["counts"]["accepted_items"], 1)
+            self.assertEqual(report["counts"]["accepted_events"], 3)
             (trace,) = (
                 entry["body"]
                 for batch in _post_bodies(stub)
@@ -259,6 +308,44 @@ class TestLayoutShapedAcceptance(unittest.TestCase):
             )
             self.assertEqual(trace["metadata"]["status"], "aborted")
             self.assertEqual(trace["metadata"]["outcome"], "safe_abort")
+        finally:
+            self.assertTrue(stub.close())
+
+    def test_partial_207_batch_reports_honest_accepted_and_error_counters(self):
+        """A 207 with one errored event yields honest per-event accounting."""
+        root = _aborted_root("obs-acc-partial-")
+
+        def partial_errors(method, path, body, server):
+            if method == "GET":
+                return 200, {"status": "OK", "version": "3.114.0"}
+            batch = json.loads(body)["batch"]
+            return 207, {
+                "successes": [
+                    {"id": event["id"], "status": 201} for event in batch[1:]
+                ],
+                "errors": [{"id": batch[0]["id"]}],
+            }
+
+        stub = StubLangfuse(behavior=partial_errors)
+        try:
+            code, report, _ = _run_cli(root, stub)
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                report["counts"],
+                {
+                    "processed": 1,
+                    "accepted_items": 0,
+                    "accepted_events": 2,
+                    "error_events": 1,
+                    "failed": 1,
+                    "skipped": 1,
+                },
+            )
+            (entry,) = report["exported"]
+            self.assertEqual(entry["accepted_events"], 2)
+            self.assertEqual(entry["error_events"], 1)
+            (skip,) = report["skipped"]
+            self.assertEqual(skip["reason"], "ingestion_failed")
         finally:
             self.assertTrue(stub.close())
 

@@ -28,7 +28,7 @@ contract; the README only points here.
 | Docker + Compose v2 | The stack is six containers; no other tooling is needed. |
 | Memory / disk | Plan roughly 4 GB RAM and a few GB disk (Postgres, ClickHouse, MinIO, Redis, two Next.js services); the first start pulls images and runs migrations. |
 | Network | Only the Langfuse UI port `3000` is published; internal services have no published ports. |
-| Credentials | All secrets are environment-only with non-empty `${VAR:?}` guards; nothing sensitive is committed. |
+| Credentials | All secrets are environment-only with non-empty `${VAR:?}` guards; nothing sensitive is committed. They remain plain container configuration: any Docker-privileged user can read them (e.g. `docker inspect`, `docker exec`). |
 
 ## Pins and provenance
 
@@ -74,8 +74,14 @@ Required by Compose (hard `${VAR:?}` guards — startup refuses without them):
 | `POSTGRES_USER`, `POSTGRES_PASSWORD` | postgres (+ DATABASE_URL) |
 | `CLICKHOUSE_PASSWORD` | clickhouse (+ clients) |
 | `REDIS_AUTH` | redis |
-| `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | minio |
-| `LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID`, `LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY` | blob storage (MinIO) |
+| `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | minio — and the S3 event-upload credentials derived from them |
+
+The S3 event-upload credentials are deliberately **not** separate
+prerequisites: the official v3.114.0 deployment defaults them to the same
+values as the MinIO root user/password (official defaults
+`minio`/`miniosecret`), and this stack provisions no separate MinIO user.
+Compose derives the upload credentials directly from the MinIO root pair —
+set one pair, rotate one pair.
 
 Optional overrides (safe defaults built in): `NEXTAUTH_URL`
 (`http://localhost:3000`), `POSTGRES_DB` (`langfuse`), `CLICKHOUSE_USER`
@@ -97,19 +103,22 @@ env NEXTAUTH_SECRET=<ephemeral> SALT=<ephemeral> ENCRYPTION_KEY=<ephemeral> \
     POSTGRES_USER=<ephemeral> POSTGRES_PASSWORD=<ephemeral> \
     CLICKHOUSE_PASSWORD=<ephemeral> REDIS_AUTH=<ephemeral> \
     MINIO_ROOT_USER=<ephemeral> MINIO_ROOT_PASSWORD=<ephemeral> \
-    LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID=<ephemeral> \
-    LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY=<ephemeral> \
     docker compose -f observability/docker-compose.yml config --quiet
 
 # start the stack
 docker compose -f observability/docker-compose.yml up -d
 ```
 
-Readiness: `docker compose -f observability/docker-compose.yml ps` shows all
-six services healthy — the four dependencies run official healthchecks and
-`langfuse-web` polls `/api/public/health`; the worker starts only after its
-dependencies are healthy. First visit: sign up at <http://localhost:3000>,
-create an organization/project, and generate the exporter API keys.
+Readiness: `docker compose -f observability/docker-compose.yml ps` should show
+five `healthy` services — `langfuse-web` (polls `/api/public/health`) plus the
+four dependencies (official healthchecks). `langfuse-worker` defines **no
+healthcheck**: it is only expected to reach `running`, and a running worker is
+not proof that ingestion works — event-upload/S3 or ClickHouse failures surface
+in `docker compose -f observability/docker-compose.yml logs langfuse-worker`,
+not in any health status. The first start also runs database migrations, so
+allow extra time before the first health check turns green. First visit: sign
+up at <http://localhost:3000>, create an organization/project, and generate
+the exporter API keys.
 
 ## Export sealed evidence
 
@@ -130,11 +139,22 @@ Normal tests remain **stub-only** (in-process HTTP stub on an ephemeral port);
 this smoke is **optional** and manual, gated like the Luna live-acceptance
 procedure in `docs/sdd/phase6-langgraph-harness.md` — never part of CI:
 
-1. Start the stack, create a project, export its keys into the environment.
+1. Start the stack and wait for readiness as above: web plus the four
+   dependencies healthy, the worker `running` (it has no healthcheck — check
+   `docker compose logs langfuse-worker` if ingestion misbehaves). The first
+   start runs migrations; allow extra time.
 2. Copy a sealed run root to a temporary directory (never export in place).
-3. Run the export command above; confirm the trace, generations, and scores in
-   the UI; re-run and confirm no new objects (idempotent replay).
-4. Tear down with `down` (or `down -v`).
+3. Run the export command above and inspect the report's honest accepted/error
+   counters, including **partial errors**: a 207 ingestion response can carry
+   per-event `errors` alongside `successes`, and the report accounts for them
+   instead of claiming atomic success. Confirm the trace, generations, and
+   scores in the UI. Re-run and compare the stable object-ID set yourself —
+   the report makes no novelty claim.
+4. Remember the credential coupling: the upload credentials are the MinIO root
+   pair, so rotating them means rotating `MINIO_ROOT_USER`/
+   `MINIO_ROOT_PASSWORD` together.
+5. Tear down with `down`; `down -v` additionally deletes the named volumes and
+   is irreversible for Langfuse data.
 
 Never point the exporter at a hosted Langfuse cloud, and never place provider
 keys in traces or export commands.

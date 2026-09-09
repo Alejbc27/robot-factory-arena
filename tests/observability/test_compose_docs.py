@@ -7,7 +7,12 @@ the exact official service set (no exporter/daemon/watcher service), env-only
 credentials with non-empty guards, named downstream volumes, and readiness
 checks. ``docker compose config`` validates the file when Docker is available.
 Documentation checks pin the official source URLs, the research date, and the
-operational contract; the README must point at the dedicated document.
+operational contract — including the official credential coupling (S3
+event-upload credentials equal the MinIO root credentials; no separate
+MinIO user), honest secret-visibility wording (never a docker-inspect
+secrecy claim), worker readiness limits (running, never healthy), and the
+smoke procedure's partial-error/log/migration/destructive-teardown checks;
+the README must point at the dedicated document.
 """
 
 import os
@@ -44,8 +49,6 @@ SECRET_VARS = (
     "REDIS_AUTH",
     "MINIO_ROOT_USER",
     "MINIO_ROOT_PASSWORD",
-    "LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID",
-    "LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY",
 )
 NAMED_VOLUMES = (
     "langfuse_postgres_data",
@@ -74,8 +77,6 @@ _CONFIG_ENV = {
     "REDIS_AUTH": "config-check-only",
     "MINIO_ROOT_USER": "config-check-only",
     "MINIO_ROOT_PASSWORD": "config-check-only",
-    "LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID": "config-check-only",
-    "LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY": "config-check-only",
 }
 
 
@@ -90,6 +91,13 @@ def _image_values(text):
         if stripped.startswith("image:"):
             images.append(stripped.removeprefix("image:").strip())
     return images
+
+
+def _docs_section(title):
+    """Body of one ``## <title>`` documentation section (up to the next heading)."""
+    return (
+        DOCS.read_text(encoding="utf-8").split(f"## {title}", 1)[1].split("\n## ", 1)[0]
+    )
 
 
 def _service_names(text):
@@ -157,18 +165,52 @@ class TestComposeBoundaries(unittest.TestCase):
         for dependency in ("postgres:", "clickhouse:", "redis:", "minio:"):
             self.assertIn(dependency, text)
 
-    def test_redis_healthcheck_authenticates_without_leaking_password(self):
-        """C3: the requirepass-protected probe must authenticate from env."""
+    def test_redis_healthcheck_authenticates_without_host_interpolation(self):
+        """C3: the requirepass-protected probe authenticates from env, and the
+        file only ever claims interpolation control — never secrecy."""
         text = _compose_text()
         redis_block = text.split("\n  redis:\n", 1)[1].split("\n  postgres:\n", 1)[0]
         healthcheck = redis_block.split("healthcheck:", 1)[1]
         self.assertIn("redis-cli", healthcheck)
         self.assertIn("ping", healthcheck)
-        # $$ keeps the password inside the container's runtime environment;
-        # host-side interpolation would bake the secret into compose config.
+        # $$ defers expansion to the container shell so the healthcheck
+        # command is not host-interpolated; the password still remains
+        # ordinary container configuration, readable by any
+        # Docker-privileged user (docker inspect/exec).
         self.assertIn('"$$REDIS_AUTH"', healthcheck)
         self.assertNotIn("${REDIS_AUTH", healthcheck)
         self.assertIn("REDIS_AUTH: ${REDIS_AUTH:?", redis_block)
+
+    def test_compose_never_claims_docker_inspect_secrecy(self):
+        """$$ is interpolation control, not secrecy: no inspect claim here."""
+        self.assertNotIn("docker inspect", _compose_text())
+
+    def test_worker_service_defines_no_healthcheck(self):
+        """Readiness honesty: the worker is expected ``running``, never healthy."""
+        worker = (
+            _compose_text()
+            .split("\n  langfuse-worker:\n", 1)[1]
+            .split("\n  langfuse-web:\n", 1)[0]
+        )
+        self.assertNotIn("healthcheck", worker)
+
+    def test_s3_upload_credentials_derive_from_minio_root(self):
+        """Official v3.114.0 coupling: upload credentials are the MinIO root pair."""
+        text = _compose_text()
+        self.assertIn(
+            "LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID:"
+            " ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}",
+            text,
+        )
+        self.assertIn(
+            "LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY:"
+            " ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}",
+            text,
+        )
+        # No duplicate credential prerequisites: the dedicated variables
+        # must not exist as env guards anywhere in the file.
+        self.assertNotIn("${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID:", text)
+        self.assertNotIn("${LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY:", text)
 
     def test_docker_compose_config_validates(self):
         if shutil.which("docker") is None:  # pragma: no cover
@@ -208,6 +250,45 @@ class TestDocumentationContract(unittest.TestCase):
         self.assertIn("optional", docs.lower())
         self.assertIn("smoke", docs.lower())
         self.assertIn("cannot alter", docs)
+
+    def test_docs_state_credential_coupling_without_second_user(self):
+        docs = DOCS.read_text(encoding="utf-8")
+        # No duplicate S3 credential prerequisites in any list or example.
+        self.assertNotIn("LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID", docs)
+        self.assertNotIn("LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY", docs)
+        # Official coupling, stated: upload credentials equal the MinIO
+        # root pair; the stack provisions no separate user.
+        self.assertIn("MINIO_ROOT_USER", docs)
+        self.assertIn("no separate MinIO user", docs)
+
+    def test_docs_state_secret_visibility_honestly(self):
+        docs = DOCS.read_text(encoding="utf-8")
+        self.assertIn("Docker-privileged", docs)
+        self.assertIn("docker inspect", docs)
+
+    def test_docs_readiness_honest_about_worker(self):
+        readiness = _docs_section("Start, validate, readiness, UI")
+        # Whitespace-normalized: the honest phrases must hold across the doc's
+        # line wrapping (markdown bold splits ``no healthcheck`` across lines).
+        flat = " ".join(readiness.split())
+        self.assertNotIn("six services healthy", flat)
+        self.assertIn("no healthcheck", flat)
+        self.assertIn("`running`", readiness)
+
+    def test_smoke_procedure_checks_operational_reality(self):
+        smoke = _docs_section("Optional gated real-instance smoke")
+        for needle in (
+            "partial",
+            "errors",
+            "worker",
+            "logs",
+            "MinIO root",
+            "migration",
+            "running",
+            "down -v",
+            "irreversible",
+        ):
+            self.assertIn(needle, smoke)
 
     def test_readme_points_at_observability_doc(self):
         self.assertIn("docs/observability.md", README.read_text(encoding="utf-8"))
