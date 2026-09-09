@@ -56,16 +56,18 @@ services:
       <<: *langfuse-env
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET}
     # The v3.114.0 images are alpine-based (official Dockerfiles), so busybox
-    # wget is available for the public health endpoint.
+    # wget is available for the public health endpoint. The probe targets the
+    # container's own hostname: an instrumented v3.114.0 start showed the web
+    # listener bound to the container interface address only, so both
+    # localhost ([::1]) and 127.0.0.1 were connection-refused inside the
+    # container. CMD-SHELL plus $$ defers $HOSTNAME expansion to the
+    # in-container shell (never host interpolation; same control as the
+    # redis probe).
     healthcheck:
       test:
         [
-          "CMD",
-          "wget",
-          "--no-verbose",
-          "--tries=1",
-          "--spider",
-          "http://localhost:3000/api/public/health",
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 --spider http://$${HOSTNAME}:3000/api/public/health",
         ]
       interval: 15s
       timeout: 10s

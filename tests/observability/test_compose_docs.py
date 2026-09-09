@@ -12,9 +12,13 @@ event-upload credentials equal the MinIO root credentials; no separate
 MinIO user), honest secret-visibility wording (never a docker-inspect
 secrecy claim), worker readiness limits (running, never healthy), and the
 smoke procedure's partial-error/log/migration/destructive-teardown checks;
-the README must point at the dedicated document.
+the web healthcheck must probe the container hostname (``$$HOSTNAME``,
+expanded by the in-container shell — never loopback, which the instrumented
+v3.114.0 diagnosis showed connection-refused); the README must point at the
+dedicated document.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -184,6 +188,54 @@ class TestComposeBoundaries(unittest.TestCase):
     def test_compose_never_claims_docker_inspect_secrecy(self):
         """$$ is interpolation control, not secrecy: no inspect claim here."""
         self.assertNotIn("docker inspect", _compose_text())
+
+    def test_web_healthcheck_probes_container_hostname(self):
+        """Instrumented v3.114.0 diagnosis on clean 9521048: after all 339
+        migrations and Next ``Ready``, ``/proc/net/tcp`` showed the web
+        listener bound to the container interface address only (no tcp6 or
+        loopback listener), so ``localhost`` (resolved to [::1]) and
+        ``127.0.0.1`` probes were connection-refused while the published
+        host port returned 200. The probe must target the container's own
+        hostname; ``$$`` defers expansion to the container shell (the same
+        interpolation control as the redis probe), never host interpolation."""
+        web = (
+            _compose_text()
+            .split("\n  langfuse-web:\n", 1)[1]
+            .split("\n  clickhouse:\n", 1)[0]
+        )
+        healthcheck = web.split("healthcheck:", 1)[1]
+        self.assertIn("http://$${HOSTNAME}:3000/api/public/health", healthcheck)
+        self.assertNotIn("http://localhost:3000/api/public/health", healthcheck)
+        self.assertNotIn("http://127.0.0.1:3000/api/public/health", healthcheck)
+
+    def test_rendered_web_healthcheck_expands_container_hostname_only(self):
+        """The rendered command must keep the escaped ``$$HOSTNAME`` (Compose
+        re-escapes ``$$`` in round-trippable ``config`` output, so the escaped
+        form persisting verbatim proves host interpolation did not consume or
+        error on the variable — the in-container shell then expands the single
+        ``$HOSTNAME``, the same live-verified semantics as the redis
+        ``$$REDIS_AUTH`` probe), keep the wget flags, and name no loopback
+        host. Structural check only: the rendered config is parsed as JSON and
+        never printed, so no env values can leak into test output."""
+        if shutil.which("docker") is None:  # pragma: no cover
+            self.skipTest("docker not available")
+        done = subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE), "config", "--format", "json"],
+            capture_output=True,
+            text=True,
+            env=_CONFIG_ENV,
+            timeout=120,
+            check=False,
+        )
+        self.assertEqual(done.returncode, 0, f"compose config failed:\n{done.stderr}")
+        rendered = json.loads(done.stdout)
+        test_cmd = rendered["services"]["langfuse-web"]["healthcheck"]["test"]
+        command = test_cmd if isinstance(test_cmd, str) else " ".join(test_cmd)
+        self.assertIn("http://$${HOSTNAME}:3000/api/public/health", command)
+        self.assertNotIn("localhost", command)
+        self.assertNotIn("127.0.0.1", command)
+        for flag in ("--no-verbose", "--tries=1", "--spider"):
+            self.assertIn(flag, command)
 
     def test_worker_service_defines_no_healthcheck(self):
         """Readiness honesty: the worker is expected ``running``, never healthy."""
