@@ -7,7 +7,9 @@
 # guards — supply them in your shell or an uncommitted .env next to this file.
 # The Langfuse S3 event-upload credentials reuse the MinIO root credentials
 # (the official deployment defaults both pairs to the same values) — this
-# stack provisions no separate MinIO user.
+# stack provisions no separate MinIO user. The UI host port defaults to 3000
+# and can be remapped without editing the file via LANGFUSE_WEB_HOST_PORT
+# (the ephemeral smoke sets it to a free loopback port per run).
 services:
   langfuse-worker:
     image: docker.io/langfuse/langfuse-worker:3.114.0
@@ -51,7 +53,7 @@ services:
     restart: always
     depends_on: *langfuse-depends-on
     ports:
-      - "3000:3000"
+      - "${LANGFUSE_WEB_HOST_PORT:-3000}:3000"
     environment:
       <<: *langfuse-env
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET}

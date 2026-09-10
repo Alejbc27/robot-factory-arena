@@ -143,13 +143,20 @@ class TestComposeBoundaries(unittest.TestCase):
         self.assertEqual(_service_names(_compose_text()), EXPECTED_SERVICES)
 
     def test_only_ui_port_3000_published(self):
+        """Single publish: container 3000, host defaulting to 3000 via
+        LANGFUSE_WEB_HOST_PORT (the ephemeral smoke remaps it per run)."""
         ports = [
             line.strip()
             for line in _compose_text().splitlines()
             if line.strip().startswith("- ") and ":3" in line
         ]
-        published = [item for item in ports if item.lstrip("- ").count(":") == 1]
-        self.assertEqual(published, ['- "3000:3000"'])
+        published = [item for item in ports if item.lstrip("- ").count(":") >= 1]
+        self.assertEqual(len(published), 1)
+        mapping = published[0].lstrip("- ").strip('"')
+        host, container = mapping.rsplit(":", 1)
+        self.assertEqual(container, "3000")
+        self.assertIn("3000", host)
+        self.assertIn("LANGFUSE_WEB_HOST_PORT", host)
 
     def test_env_only_secrets_with_non_empty_guards(self):
         text = _compose_text()
@@ -328,19 +335,38 @@ class TestDocumentationContract(unittest.TestCase):
         self.assertIn("`running`", readiness)
 
     def test_smoke_procedure_checks_operational_reality(self):
-        smoke = _docs_section("Optional gated real-instance smoke")
+        smoke = _docs_section("Automated real-instance smoke")
         for needle in (
-            "partial",
-            "errors",
+            "pull request",
+            "manual dispatch",
+            "never on a schedule",
+            "no repository or GitHub secrets",
+            "v3.114.0",
             "worker",
-            "logs",
-            "MinIO root",
-            "migration",
-            "running",
-            "down -v",
-            "irreversible",
+            "20–30 minutes",
+            "4 GB",
+            "LANGFUSE_WEB_HOST_PORT",
+            "two",
+            "0 → 1 → 1",
+            "207",
+            "diagnostics",
+            "down -v --remove-orphans",
+            "cleanup_failed",
+            "downstream-only",
+            "image provenance",
+            "10 successful",
+            "14 days",
+            "cold start",
+            "failure drill",
         ):
             self.assertIn(needle, smoke)
+        for forbidden in (
+            "nightly",
+            "every push",
+            "required check",
+            "port 3000 must be free",
+        ):
+            self.assertNotIn(forbidden, smoke.lower())
 
     def test_readme_points_at_observability_doc(self):
         self.assertIn("docs/observability.md", README.read_text(encoding="utf-8"))

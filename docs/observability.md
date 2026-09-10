@@ -133,31 +133,60 @@ touching artifacts. Export is deterministic: re-running over unchanged
 evidence creates zero new objects. The redacted machine-readable report on
 stdout never contains raw text or credentials.
 
-## Optional gated real-instance smoke
+## Automated real-instance smoke
 
-Normal tests remain **stub-only** (in-process HTTP stub on an ephemeral port);
-this smoke is **optional** and manual, gated like the Luna live-acceptance
-procedure in `docs/sdd/phase6-langgraph-harness.md` — never part of CI:
+The smoke proves the repository's observability contract against a real,
+ephemeral Langfuse v3.114.0 stack as an **optional red check**: it runs for
+pull requests touching smoke-affecting surfaces and on manual dispatch in
+`.github/workflows/langfuse-smoke.yml` — never on a schedule or push trigger,
+and never as a merge-blocking gate. Required-check promotion is a later manual
+branch-protection decision; the workflow cannot enact it.
+It uses no repository or GitHub secrets: the runtime generates short-lived
+stack credentials, masks them before first use, scans outputs, and fails
+closed on any exposure, then headlessly provisions an ephemeral organization,
+project, and API key through Langfuse v3.114.0's official `LANGFUSE_INIT_*`
+interface.
 
-1. Start the stack and wait for readiness as above: web plus the four
-   dependencies healthy, the worker `running` (it has no healthcheck — check
-   `docker compose logs langfuse-worker` if ingestion misbehaves). The first
-   start runs migrations; allow extra time.
-2. Copy a sealed run root to a temporary directory (never export in place).
-3. Run the export command above and inspect the report's honest accepted/error
-   counters, including **partial errors**: a 207 ingestion response can carry
-   per-event `errors` alongside `successes`, and the report accounts for them
-   instead of claiming atomic success. Confirm the trace, generations, and
-   scores in the UI. Re-run and compare the stable object-ID set yourself —
-   the report makes no novelty claim.
-4. Remember the credential coupling: the upload credentials are the MinIO root
-   pair, so rotating them means rotating `MINIO_ROOT_USER`/
-   `MINIO_ROOT_PASSWORD` together.
-5. Tear down with `down`; `down -v` additionally deletes the named volumes and
-   is irreversible for Langfuse data.
+Run the same procedure locally (the same contract as CI):
 
-Never point the exporter at a hosted Langfuse cloud, and never place provider
-keys in traces or export commands.
+```text
+python3 scripts/langfuse_smoke.py
+# Optional non-secret options: --compose-file PATH --report PATH --timeout-seconds N
+```
+
+Plan for **4 GB or more RAM**, several GB of free disk, and **20–30 minutes**
+on a cold run while images download and migrations finish. The smoke picks a
+free loopback host port per run (`LANGFUSE_WEB_HOST_PORT` override) and a
+unique Compose project label, aborts on any pre-existing project-labelled
+resource, and never touches unrelated Docker resources.
+
+The bounded phase machine runs: dependency readiness → web health (fixed
+v3.114.0 response) → an **independent worker proof** (v3.114.0 startup marker
+plus a stable no-restart window — `running` alone never suffices) → an empty
+scoped API baseline → **two identical real metadata-only CLI exports** (both
+reporting exactly processed=1, accepted_items=1, accepted_events=3, failed=0,
+skipped=0, error_events=0; `exporter_invocations` must equal 2) → authenticated
+API proofs of **0 → 1 → 1** trace/generation/score counts with deterministic
+IDs, identical ID sets, and zero growth. A 207 ingestion response is transport
+accounting only and is never treated as proof that an object is new.
+
+Every run reports sanitized **diagnostics before teardown**, six-service
+**image provenance** (requested image, resolved digest, runtime image ID, or
+an explicit unavailable record), and one authoritative report: cleanup always
+runs `down -v --remove-orphans` against the exact project label only — which
+destructively deletes the smoke project's downstream volumes — and a cleanup
+failure makes the overall result `FAIL` with `reason: cleanup_failed` even
+when all assertions passed. The report carries promotion evidence fields but
+never self-promotes: merge-blocking promotion needs **10 successful
+independent PR runs over 14 days**, including a cold start and a deliberate
+failure drill, correct cleanup in every run, no rerun-derived green, and a
+window reset on any flake or false acceptance.
+
+The smoke is Langfuse downstream-only: it builds a deterministic sealed
+metadata-only fixture in a system temporary directory (never importing test
+fixtures or touching the checkout), and never modifies authoritative repository
+artifacts. Never point it at hosted Langfuse Cloud or put provider keys in
+traces or command arguments.
 
 ## Stop, teardown, rollback
 
