@@ -96,6 +96,7 @@ class FakeApi:
         }
         self.on_snapshot: Callable[[FakeApi], None] | None = None
         self.snapshots = 0
+        self.generation_text_fields: dict[str, object] = {"input": None, "output": None}
 
     def snapshot(self):
         self.snapshots += 1
@@ -130,6 +131,7 @@ class FakeApi:
             "type": "GENERATION",
             "traceId": EXPECTED_IDS["trace"],
             "model": "fake-v1",
+            **self.generation_text_fields,
         }
 
     def score(self, score_id):
@@ -177,7 +179,8 @@ class FakeRunner:
         self.inspect_states = deque(
             [{"Running": True, "RestartCount": 0}, {"Running": True, "RestartCount": 0}]
         )
-        self.worker_logs = "boot\nNest application successfully started\nqueue ok\n"
+        self.worker_logs = "boot\nworker ready\nqueue ok\n"
+        self.worker_health = smoke.RunResult(0, "", "")
 
     def run(self, argv, *, env=None, timeout=None):
         parts = [str(part) for part in argv]
@@ -189,12 +192,20 @@ class FakeRunner:
                 return smoke.RunResult(1, "", "compose up failed")
         if "ps" in parts and "-a" not in parts and "-q" in parts:
             return smoke.RunResult(0, "container-id\n", "")
+        if "exec" in parts:
+            return self.worker_health
         if "logs" in parts:
             return smoke.RunResult(0, self.worker_logs, "")
         if "inspect" in parts:
             state = self.inspect_states[0]
             if len(self.inspect_states) > 1:
                 self.inspect_states.rotate(-1)
+            if "--format" in parts:
+                template = parts[parts.index("--format") + 1]
+                if template == "{{json .State}}":
+                    return smoke.RunResult(0, json.dumps(state), "")
+                if template == "{{.Image}}":
+                    return smoke.RunResult(0, "image-id-1\n", "")
             return smoke.RunResult(0, json.dumps([{"State": state}]), "")
         if "label=" in " ".join(parts):
             return smoke.RunResult(0, self.labelled, "")
@@ -303,6 +314,22 @@ class CommandRunnerTest(unittest.TestCase):
         runner = smoke.CommandRunner(guard, cwd=ROOT, base_env={})
         with self.assertRaises(smoke.CredentialExposureError) as caught:
             runner.run([sys.executable, "-c", "print('sk-lf-secret')"])
+        self.assertNotIn("sk-lf-secret", str(caught.exception))
+        self.assertNotIn("sk-lf-secret", caught.exception.redacted_output or "")
+
+    def test_full_inspect_payload_with_registered_secret_fails_closed(self):
+        guard = smoke.LeakGuard(sink=_Sink())
+        guard.register("sk-lf-secret", "secret_key")
+        runner = smoke.CommandRunner(guard, cwd=ROOT, base_env={})
+        probe = (
+            "import json,os;print(json.dumps([{'Config': "
+            "{'Env': [os.environ['SMOKE_SECRET']]} }]))"
+        )
+        with self.assertRaises(smoke.CredentialExposureError) as caught:
+            runner.run(
+                [sys.executable, "-c", probe],
+                env={"SMOKE_SECRET": "sk-lf-secret"},
+            )
         self.assertNotIn("sk-lf-secret", str(caught.exception))
         self.assertNotIn("sk-lf-secret", caught.exception.redacted_output or "")
 
@@ -462,16 +489,9 @@ class ImageInventoryTest(unittest.TestCase):
                     return smoke.RunResult(0, "", "")
                 return smoke.RunResult(0, f"cid-{service}\n", "")
             if "inspect" in parts and "image" not in parts:
-                state = {"Image": "image-id-1", "State": {"Running": True}}
-                return smoke.RunResult(0, json.dumps([state]), "")
+                return smoke.RunResult(0, "image-id-1\n", "")
             if "image" in parts:
-                payload = [
-                    {
-                        "RepoDigests": digests
-                        if digests is not None
-                        else ["repo@sha256:abc"]
-                    }
-                ]
+                payload = digests if digests is not None else ["repo@sha256:abc"]
                 return smoke.RunResult(0, json.dumps(payload), "")
             return smoke.RunResult(0, "", "")
 
@@ -510,6 +530,45 @@ class ImageInventoryTest(unittest.TestCase):
         self.assertFalse(web["available"])
         self.assertEqual(web["unavailable_reason"], "missing_digest")
         self.assertIn("requested_image", web)
+
+    def test_format_inspections_are_least_data_and_are_parsed(self):
+        runner = self._runner()
+        inner = runner.run
+
+        def run(argv, **kwargs):
+            runner.calls.append(
+                {
+                    "argv": [str(part) for part in argv],
+                    "env": dict(kwargs.get("env") or {}),
+                }
+            )
+            return inner(argv, **kwargs)
+
+        runner.run = run
+        records = smoke.ImageInventory(runner, base=["docker", "compose"]).collect()
+        for name, record in records.items():
+            with self.subTest(service=name):
+                self.assertEqual(record["image_id"], "image-id-1")
+                self.assertEqual(record["resolved_digest"], "sha256:abc")
+        inspect_calls = [call for call in runner.calls if "inspect" in call["argv"]]
+        self.assertEqual(len(inspect_calls), 12)
+        container_inspect_calls = [
+            call for call in inspect_calls if call["argv"][1] == "inspect"
+        ]
+        image_inspect_calls = [
+            call for call in inspect_calls if call["argv"][1] == "image"
+        ]
+        self.assertEqual(len(container_inspect_calls), 6)
+        self.assertEqual(len(image_inspect_calls), 6)
+        for call in container_inspect_calls:
+            self.assertEqual(
+                call["argv"][0:4], ["docker", "inspect", "--format", "{{.Image}}"]
+            )
+        for call in image_inspect_calls:
+            self.assertEqual(
+                call["argv"][0:5],
+                ["docker", "image", "inspect", "--format", "{{json .RepoDigests}}"],
+            )
 
     def test_ps_commands_carry_the_run_env(self):
         """compose ps loads and interpolates the guarded compose model."""
@@ -571,6 +630,35 @@ class CleanupManagerTest(unittest.TestCase):
         ).execute()
         self.assertTrue(any("down" in problem for problem in problems))
 
+    def test_port_release_polls_after_down_until_callback_is_free(self):
+        runner = FakeRunner()
+        states = deque([False, True])
+        sleeper = _Sleeper()
+        problems = smoke.CleanupManager(
+            runner,
+            base=["docker", "compose", "-p", "proj"],
+            port_is_free=lambda: states.popleft(),
+            sleeper=sleeper,
+            port_poll_s=3,
+            port_poll_interval_s=1,
+        ).execute()
+        self.assertEqual(problems, [])
+        self.assertEqual(sleeper.naps, [1])
+
+    def test_port_release_poll_is_bounded_when_callback_stays_false(self):
+        runner = FakeRunner()
+        sleeper = _Sleeper()
+        problems = smoke.CleanupManager(
+            runner,
+            base=["docker", "compose", "-p", "proj"],
+            port_is_free=lambda: False,
+            sleeper=sleeper,
+            port_poll_s=3,
+            port_poll_interval_s=1,
+        ).execute()
+        self.assertTrue(any("port" in problem for problem in problems))
+        self.assertLessEqual(len(sleeper.naps), 3)
+
     def test_down_command_carries_the_run_env(self):
         """compose down re-interpolates the guarded compose/override files."""
         runner = FakeRunner()
@@ -586,19 +674,59 @@ class CleanupManagerTest(unittest.TestCase):
 
 
 class WorkerProofTest(unittest.TestCase):
-    def test_marker_plus_stable_no_restart_passes(self):
+    def test_health_probe_plus_stable_no_restart_passes_with_state_format(self):
+        runner = FakeRunner()
         proof = smoke.worker_proof(
-            FakeRunner(),
+            runner,
             base=["docker", "compose", "-p", "proj"],
             stability_s=0,
             sleeper=_Sleeper(),
         )
-        self.assertTrue(proof["marker_found"])
+        self.assertEqual(
+            proof["health_probe"],
+            {"endpoint": "http://${HOSTNAME}:3030/api/health", "status": "PASS"},
+        )
         self.assertEqual(proof["restarts"], 0)
+        inspect_calls = [call for call in runner.calls if "inspect" in call["argv"]]
+        self.assertEqual(
+            [call["argv"] for call in inspect_calls],
+            [
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{json .State}}",
+                    "container-id",
+                ],
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{json .State}}",
+                    "container-id",
+                ],
+            ],
+        )
+        health_calls = [call for call in runner.calls if "exec" in call["argv"]]
+        self.assertEqual(
+            [call["argv"] for call in health_calls],
+            [
+                [
+                    "docker",
+                    "exec",
+                    "container-id",
+                    "sh",
+                    "-c",
+                    'wget --no-verbose --tries=1 --spider "http://${HOSTNAME}:3030/api/health"',
+                ]
+            ],
+        )
+        self.assertEqual(health_calls[0]["timeout"], 60)
+        self.assertEqual([call for call in runner.calls if "logs" in call["argv"]], [])
 
-    def test_running_without_marker_is_unproven(self):
+    def test_nonzero_health_probe_is_unproven(self):
         runner = FakeRunner()
-        runner.worker_logs = "running but silent\n"
+        runner.worker_health = smoke.RunResult(1, "", "health unavailable")
         with self.assertRaises(smoke.SmokeFailure) as caught:
             smoke.worker_proof(
                 runner,
@@ -622,7 +750,7 @@ class WorkerProofTest(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "worker_unstable")
 
-    def test_dead_container_fails_before_marker_check(self):
+    def test_dead_container_fails_before_health_probe(self):
         runner = FakeRunner()
         runner.inspect_states = deque(
             [
@@ -707,6 +835,11 @@ class OrchestratorHappyPathTest(unittest.TestCase):
         self.assertFalse(promotion["counted_for_promotion"])
         self.assertFalse(promotion["promotion_eligible"])
         self.assertEqual(report["cleanup"]["status"], "PASS")
+        self.assertEqual(
+            report["phases"]["worker"]["health_probe"],
+            {"endpoint": "http://${HOSTNAME}:3030/api/health", "status": "PASS"},
+        )
+        self.assertNotIn("marker_found", report["phases"]["worker"])
 
     def test_both_cli_invocations_are_identical_real_exports(self):
         runner = FakeRunner()
@@ -763,7 +896,7 @@ class OrchestratorFailureMatrixTest(unittest.TestCase):
         if name == "deps":
             runner.fail_up = True
         elif name == "worker":
-            runner.worker_logs = "silent\n"
+            runner.worker_health = smoke.RunResult(1, "", "health unavailable")
         elif name == "baseline":
             api.state.update({"traces": ["tr_preexisting"], "observations_total": 1})
         elif name == "export1":
@@ -835,6 +968,29 @@ class OrchestratorFailureMatrixTest(unittest.TestCase):
         self.assertEqual(report["overall"], "PASS")
         self.assertIn("incomplete", json.dumps(report["phases"]["diagnostics"]))
 
+    def test_diagnostics_credential_exposure_is_terminal_and_redacted(self):
+        runner = FakeRunner()
+
+        def run(argv, **kwargs):
+            if "logs" in [str(part) for part in argv] and "langfuse-web" in argv:
+                raise smoke.CredentialExposureError(
+                    "diagnostics leaked sk-lf-secret",
+                    redacted_output="diagnostics leaked [REDACTED]",
+                )
+            return FakeRunner.run(runner, argv, **kwargs)
+
+        runner.run = run
+        cleanup = FakeCleanup()
+        api = FakeApi()
+        api.on_snapshot = OrchestratorHappyPathTest._seed_at(2)
+        report = _run_orchestrator(runner, api, cleanup=cleanup)
+        self.assertEqual(report["overall"], "FAIL")
+        self.assertEqual(report["primary_failure"]["phase"], "security")
+        self.assertEqual(report["primary_failure"]["code"], "credential_exposure")
+        self.assertEqual(report["phases"]["diagnostics"]["status"], "incomplete")
+        self.assertTrue(cleanup.executed)
+        self.assertNotIn("sk-lf-secret", json.dumps(report))
+
     def test_preflight_label_collision_fails_before_mutation(self):
         runner = FakeRunner()
         runner.labelled = "preexisting"
@@ -895,6 +1051,19 @@ class TriangulationTest(unittest.TestCase):
         report = _run_orchestrator(runner)
         self.assertEqual(report["primary_failure"]["phase"], "export_1")
         self.assertEqual(report["primary_failure"]["code"], "export_command_failed")
+
+    def test_non_null_generation_text_fields_fail_proof(self):
+        for field in ("input", "output"):
+            with self.subTest(field=field):
+                runner = FakeRunner()
+                api = FakeApi()
+                api.generation_text_fields[field] = f"visible {field}"
+                api.on_snapshot = OrchestratorHappyPathTest._seed_at(2)
+                report = _run_orchestrator(runner, api)
+                self.assertEqual(report["primary_failure"]["phase"], "api_proof_1")
+                self.assertEqual(
+                    report["primary_failure"]["code"], "api_object_proof_failed"
+                )
 
     def test_extra_non_generation_observation_fails_proof(self):
         runner = FakeRunner()
@@ -1155,10 +1324,9 @@ class RemediationGateTest(unittest.TestCase):
             if "ps" in parts and "-q" in parts:
                 return smoke.RunResult(0, "cid\n", "")
             if "inspect" in parts and "image" not in parts:
-                return smoke.RunResult(0, json.dumps([{"Image": "img-1"}]), "")
+                return smoke.RunResult(0, "img-1\n", "")
             if "image" in parts:
-                payload = [{"RepoDigests": ["repo@sha256:abc"]}]
-                return smoke.RunResult(0, json.dumps(payload), "")
+                return smoke.RunResult(0, json.dumps(["repo@sha256:abc"]), "")
             return smoke.RunResult(0, "", "")
 
         runner.run = run
@@ -1426,7 +1594,7 @@ class ContinuationAuditTest(unittest.TestCase):
         runner = FakeRunner()
         _run_orchestrator(runner, self._happy_api())
         # Six orchestrator-issued model-loading calls are visible here (deps/web
-        # up, worker ps/logs, diagnostics ps/logs); the inventory ps and cleanup
+        # up, worker ps/health probe, diagnostics ps/logs); the inventory ps and cleanup
         # down calls run behind FakeInventory/FakeCleanup and are covered at
         # seam level in ImageInventoryTest/CleanupManagerTest.
         model_calls = [

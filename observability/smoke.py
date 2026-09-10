@@ -3,8 +3,8 @@
 Contract (CI-LF-01..05, corrected design): downstream-only, fixed official
 v3.114.0 images, ephemeral headless stack with generated credentials, dynamic
 host port and exact-label project isolation, prevent -> mask -> scan -> fail
-credential handling, an independent worker proof (v3.114.0 NestJS bootstrap
-marker plus stable no-restart window), an empty scoped API baseline, exactly
+credential handling, an independent worker proof (in-container `/api/health`
+probe plus stable no-restart window), an empty scoped API baseline, exactly
 two identical real metadata-only CLI exports with exact counters, scoped API
 proof 0 -> 1 -> 1 with identical ID sets and zero growth (HTTP 207 is never
 novelty evidence), six-service image provenance, sanitized diagnostics before
@@ -38,7 +38,8 @@ from .artifacts import canonical_json_bytes
 SMOKE_SCHEMA_VERSION = 2
 CONTRACT = "CI-LF-01..05"
 LANGFUSE_VERSION = "3.114.0"
-WORKER_MARKER = "Nest application successfully started"
+WORKER_HEALTH_ENDPOINT = "http://${HOSTNAME}:3030/api/health"
+WORKER_HEALTH_PROBE = f'wget --no-verbose --tries=1 --spider "{WORKER_HEALTH_ENDPOINT}"'
 COMPOSE_LABEL = "com.docker.compose.project"
 WEB_HOST_PORT_VAR = "LANGFUSE_WEB_HOST_PORT"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -638,11 +639,10 @@ def worker_proof(
     stability_s,
     sleeper,
     env=None,
-    logs_tail=200,
     state_timeout=30,
-    logs_timeout=60,
+    health_timeout=60,
 ):
-    """Prove the worker: running, stable, and the v3.114.0 startup marker."""
+    """Prove the worker: running, stable, and its in-container health endpoint."""
     listed = runner.run(
         [*base, "ps", "-q", "langfuse-worker"], env=env, timeout=state_timeout
     )
@@ -660,26 +660,41 @@ def worker_proof(
         raise SmokeFailure(
             "worker", "worker_unstable", f"restarts {state.get('RestartCount')}"
         )
-    logs = runner.run(
-        [*base, "logs", "--no-color", "--tail", str(logs_tail), "langfuse-worker"],
+    health = runner.run(
+        [
+            "docker",
+            "exec",
+            container[0],
+            "sh",
+            "-c",
+            WORKER_HEALTH_PROBE,
+        ],
         env=env,
-        timeout=logs_timeout,
+        timeout=health_timeout,
     )
-    if WORKER_MARKER not in logs.stdout + logs.stderr:
+    if health.returncode:
         raise SmokeFailure(
             "worker",
             "worker_readiness_unproven",
-            f"startup marker absent: {WORKER_MARKER!r}",
+            f"health probe failed (exit {health.returncode})",
         )
-    return {"marker_found": True, "marker": WORKER_MARKER, "restarts": restarts}
+    return {
+        "health_probe": {"endpoint": WORKER_HEALTH_ENDPOINT, "status": "PASS"},
+        "restarts": restarts,
+    }
 
 
 def _inspect_state(runner, container, timeout=30):
-    inspected = runner.run(["docker", "inspect", container], timeout=timeout)
+    inspected = runner.run(
+        ["docker", "inspect", "--format", "{{json .State}}", container],
+        timeout=timeout,
+    )
     try:
         payload = json.loads(inspected.stdout)
-        return payload[0]["State"]
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        if not isinstance(payload, dict):
+            raise TypeError
+        return payload
+    except (json.JSONDecodeError, TypeError):
         raise SmokeFailure(
             "worker", "worker_inspect_failed", "no State payload"
         ) from None
@@ -747,26 +762,44 @@ class ImageInventory:
             record["unavailable_reason"] = "not_materialized"
             return record
         try:
-            inspected = json.loads(
-                self.runner.run(
-                    ["docker", "inspect", containers[0]], timeout=timeout
-                ).stdout
-            )
-            record["image_id"] = inspected[0]["Image"]
-        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+            image_id = self.runner.run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.Image}}",
+                    containers[0],
+                ],
+                timeout=timeout,
+            ).stdout.strip()
+            if not image_id:
+                raise TypeError
+            record["image_id"] = image_id
+        except (AttributeError, TypeError):
             record["unavailable_reason"] = "inspect_failed"
             return record
         try:
-            image = json.loads(
+            digests = json.loads(
                 self.runner.run(
-                    ["docker", "image", "inspect", record["image_id"]], timeout=timeout
+                    [
+                        "docker",
+                        "image",
+                        "inspect",
+                        "--format",
+                        "{{json .RepoDigests}}",
+                        record["image_id"],
+                    ],
+                    timeout=timeout,
                 ).stdout
             )
-            digests = image[0]["RepoDigests"]
-        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        except (json.JSONDecodeError, TypeError):
             record["unavailable_reason"] = "missing_digest"
             return record
-        if not digests:
+        if (
+            not isinstance(digests, list)
+            or not digests
+            or not isinstance(digests[0], str)
+        ):
             record["unavailable_reason"] = "missing_digest"
             return record
         record["resolved_digest"] = digests[0].split("@", 1)[-1]
@@ -784,14 +817,20 @@ class CleanupManager:
         port_is_free: Callable[[], bool],
         down_timeout: int = 180,
         env: dict[str, str] | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
+        port_poll_s: float = 5,
+        port_poll_interval_s: float = 1,
     ):
         self.runner = runner
         self._base = base
         self._port_is_free = port_is_free
         self.down_timeout = down_timeout
         self._env = env
+        self._sleeper = sleeper
+        self.port_poll_s = port_poll_s
+        self.port_poll_interval_s = port_poll_interval_s
 
-    def execute(self, *, down_timeout=None, query_timeout=30):
+    def execute(self, *, down_timeout=None, query_timeout=30, port_timeout=None):
         def budget(value, default):
             return default if value is None else (value() if callable(value) else value)
 
@@ -805,6 +844,9 @@ class CleanupManager:
         )
         if down.returncode:
             problems.append(f"compose down failed (exit {down.returncode})")
+        port_released = self._wait_for_port_release(
+            budget(port_timeout, self.port_poll_s)
+        )
         label = f"label={COMPOSE_LABEL}={project}"
         for kind, argv in (
             ("containers", ["docker", "ps", "-aq"]),
@@ -820,9 +862,27 @@ class CleanupManager:
                 )
             elif found.stdout.strip():
                 problems.append(f"project-labelled {kind} remain")
-        if not self._port_is_free():
+        if not port_released:
             problems.append("selected host port is not released")
         return problems
+
+    def _wait_for_port_release(self, poll_budget):
+        """Poll release after down without exceeding the supplied budget."""
+        poll_budget = max(0.0, poll_budget)
+        interval = max(0.001, self.port_poll_interval_s)
+        deadline = time.monotonic() + poll_budget
+        sleeps = 0
+        max_sleeps = math.floor(poll_budget / interval)
+        while True:
+            if self._port_is_free():
+                return True
+            if sleeps >= max_sleeps:
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            self._sleeper(min(interval, remaining))
+            sleeps += 1
 
 
 def _generate_runtime_values():
@@ -1058,6 +1118,10 @@ class SmokeOrchestrator:
         left = self._final_deadline - time.monotonic()
         return max(1, math.ceil(min(ceiling, left))) if left > 0 else 1
 
+    def _finalization_sleep_remaining(self, ceiling):
+        """Return exact remaining finalization time for sleep-based polling."""
+        return max(0.0, min(ceiling, self._final_deadline - time.monotonic()))
+
     def run(self):
         self._deadline = time.monotonic() + self.bounds.global_deadline_s
         self.report.run = {
@@ -1292,7 +1356,7 @@ class SmokeOrchestrator:
             self.deps.sleeper,
             env=self._env,
             state_timeout=self._remaining(30),
-            logs_timeout=self._remaining(60),
+            health_timeout=self._remaining(60),
         )
         self.report.phases["worker"] = {"status": "PASS", **proof}
 
@@ -1485,7 +1549,7 @@ class SmokeOrchestrator:
             or generation.get("type") != "GENERATION"
             or generation.get("traceId") != expected["trace"]
             or not generation.get("model")
-            or set(generation) & {"input", "output"}
+            or any(generation.get(field) is not None for field in ("input", "output"))
         ):
             raise bad("generation identity/type/text-field violation")
         score = self._read(api, "score", expected["score"])
@@ -1546,6 +1610,12 @@ class SmokeOrchestrator:
                 "ps_tail": guard.redact(ps.stdout)[-2000:],
                 "logs_tail": guard.redact(logs.stdout)[-2000:],
             }
+        except CredentialExposureError as exc:
+            self.report.primary(exc)
+            self.report.phases["diagnostics"] = {
+                "status": "incomplete",
+                "reason": type(exc).__name__,
+            }
         except Exception as exc:  # noqa: BLE001 - diagnostics never abort cleanup
             self.report.phases["diagnostics"] = {
                 "status": "incomplete",
@@ -1559,12 +1629,17 @@ class SmokeOrchestrator:
             # port callback (if any) still validates release explicitly.
             manager = self._cleanup_manager(self._port_free or (lambda: True))
         try:
-            return manager.execute(
-                down_timeout=lambda: self._finalization_remaining(
+            execute_kwargs: dict[str, Any] = {
+                "down_timeout": lambda: self._finalization_remaining(
                     self.bounds.cleanup_s
                 ),
-                query_timeout=lambda: self._finalization_remaining(30),
-            )
+                "query_timeout": lambda: self._finalization_remaining(30),
+            }
+            if isinstance(manager, CleanupManager):
+                execute_kwargs["port_timeout"] = lambda: (
+                    self._finalization_sleep_remaining(self.bounds.cleanup_s)
+                )
+            return manager.execute(**execute_kwargs)
         except Exception as exc:  # noqa: BLE001 - cleanup failure is reported
             return [f"cleanup execution error: {type(exc).__name__}"]
 
@@ -1591,7 +1666,13 @@ def run_smoke(config):
         port_is_free=None,
         web_probe=None,
         cleanup_factory=lambda base, port_free, env: CleanupManager(
-            runner, base, port_free, down_timeout=config.bounds.cleanup_s, env=env
+            runner,
+            base,
+            port_free,
+            down_timeout=config.bounds.cleanup_s,
+            env=env,
+            sleeper=time.sleep,
+            port_poll_s=min(5, config.bounds.cleanup_s),
         ),
         inventory_factory=lambda base, env: ImageInventory(runner, base, env=env),
     )

@@ -112,9 +112,12 @@ docker compose -f observability/docker-compose.yml up -d
 Readiness: `docker compose -f observability/docker-compose.yml ps` should show
 five `healthy` services — `langfuse-web` (polls `/api/public/health`) plus the
 four dependencies (official healthchecks). `langfuse-worker` defines **no
-healthcheck**: it is only expected to reach `running`, and a running worker is
-not proof that ingestion works — event-upload/S3 or ClickHouse failures surface
-in `docker compose -f observability/docker-compose.yml logs langfuse-worker`,
+healthcheck**: it is only expected to reach `running`; the worker binds to its
+container hostname/interface, so the smoke independently proves readiness with
+`docker exec <container-id> sh -c 'wget --no-verbose --tries=1 --spider
+"http://${HOSTNAME}:3030/api/health"'`. A running worker is not proof that
+ingestion works — event-upload/S3 or ClickHouse failures surface in
+`docker compose -f observability/docker-compose.yml logs langfuse-worker`,
 not in any health status. The first start also runs database migrations, so
 allow extra time before the first health check turns green. First visit: sign
 up at <http://localhost:3000>, create an organization/project, and generate
@@ -161,8 +164,10 @@ unique Compose project label, aborts on any pre-existing project-labelled
 resource, and never touches unrelated Docker resources.
 
 The bounded phase machine runs: dependency readiness → web health (fixed
-v3.114.0 response) → an **independent worker proof** (v3.114.0 startup marker
-plus a stable no-restart window — `running` alone never suffices) → an empty
+v3.114.0 response) → an **independent worker proof** (a stable no-restart
+window followed by an in-container `GET /api/health` probe via BusyBox `wget`
+using the worker container's `$HOSTNAME` interface — `running` alone never
+suffices) → an empty
 scoped API baseline → **two identical real metadata-only CLI exports** (both
 reporting exactly processed=1, accepted_items=1, accepted_events=3, failed=0,
 skipped=0, error_events=0; `exporter_invocations` must equal 2) → authenticated
