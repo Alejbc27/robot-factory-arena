@@ -623,6 +623,12 @@ def validate_projection(mapping: Mapping) -> VisualizerProjection:
         _fail("terminal final_state_digest does not bind the final state")
     if digests["policy_digest"] != logical["policy_digest"]:
         _fail("policy digest aliases disagree")
+    for name in ("strategy_context_digest", "tool_schema_digest", "prompt_digest"):
+        if digests[name] != logical[name]:
+            _fail(name + " digest aliases disagree")
+    # Config, task, trace, and fault-tape digests are source-bound claims:
+    # build_projection binds them to verified artifacts; this standalone
+    # validator only preserves their grammar and explicit nullability.
     digest_input = _canonical(value)
     del digest_input["semantic_digests"]["projection_digest"]
     if digests["projection_digest"] != sha256_digest(
