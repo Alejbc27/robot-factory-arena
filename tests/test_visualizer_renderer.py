@@ -126,19 +126,82 @@ class VisualizerRendererTests(unittest.TestCase):
             with self.subTest(classification=classification):
                 self.assertIn(classification + ":", html)
 
-    def test_renderer_preserves_six_distinct_positions_across_repeated_steps(self):
+    def test_renderer_keeps_six_positions_with_consecutive_deduped_pips(self):
         from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
 
         html = render_visualizer(self.projection).decode("utf-8")
-        self.assertIn("const seenPositions = new Set();", html)
+        self.assertIn("let lastPositionKey = null;", html)
         self.assertIn(
             "for (let index = selectedFrame; index >= 0 && positions.length < PATH_TRAIL_LENGTH; index -= 1)",
             html,
         )
-        self.assertIn("seenPositions.has(positionKey)", html)
-        self.assertIn("seenPositions.add(positionKey)", html)
+        self.assertIn("if (positionKey === lastPositionKey) continue;", html)
+        self.assertIn("lastPositionKey = positionKey;", html)
         self.assertIn("positions.unshift(position)", html)
+        self.assertIn("function drawMovementPip", html)
+        self.assertIn("drawMovementPip(position, index, positions.length)", html)
+        self.assertNotIn("const seenPositions = new Set();", html)
         self.assertNotIn("projection.frames.slice(Math.max", html)
+
+    def test_renderer_formats_current_safe_action_arguments_for_the_hud(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        html = render_visualizer(self.projection).decode("utf-8")
+        for marker in (
+            "function actionArgumentText(frame)",
+            'case "move":',
+            'case "pick":',
+            'case "place":',
+            'return "MOVE "',
+            'return "PICK "',
+            'return "PLACE "',
+            "call.arguments.direction",
+            "call.arguments.shelf_id",
+            "call.arguments.item_id",
+            "call.arguments.order_id",
+            "drawText(actionArgumentText(frame)",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, html)
+
+    def test_renderer_separates_classification_from_fault_and_retry_hud_subevents(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        html = render_visualizer(self.projection).decode("utf-8")
+        for marker in (
+            "function subeventStatus(frame)",
+            'event.kind === "fault_injected"',
+            'event.kind === "internal_retry"',
+            'drawText("STATUS",',
+            'drawText("FAULT",',
+            'drawText("RETRY",',
+            "drawHudSubevents(frame)",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, html)
+        self.assertIn('drawText(status.label, HUD_X + 82, 112', html)
+
+    def test_renderer_draws_target_cues_only_from_safe_tool_call_arguments(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        html = render_visualizer(self.projection).decode("utf-8")
+        for marker in (
+            "function safeTargetForFrame(frame, world)",
+            "const call = frame === null ? null : frame.tool_call;",
+            "call.arguments.direction",
+            "call.arguments.shelf_id",
+            "call.arguments.order_id",
+            "function drawTargetCue(target)",
+            "drawTargetCue(safeTargetForFrame(frame, world))",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, html)
+        for forbidden in (
+            "frame.committed_domain_events",
+            "frame.state_delta",
+            "frame.attempts",
+        ):
+            self.assertNotIn(forbidden, html[html.index("function safeTargetForFrame"):html.index("function drawTargetCue")])
 
     def test_renderer_uses_fixed_ten_order_grid_before_fixed_sections(self):
         from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
