@@ -35,11 +35,11 @@ class VisualizerRendererTests(unittest.TestCase):
 
         html = render_visualizer(self.projection).decode("utf-8")
         for marker in (
-            '<canvas id="visualizer-canvas" width="640" height="480">',
+            '<canvas id="visualizer-canvas" width="640" height="480" aria-label="2D mission replay arena">',
             "const GRID_SIZE = 10;",
-            "const CELL_SIZE = 40;",
-            "const ORIGIN_X = 16;",
-            "const ORIGIN_Y = 16;",
+            "const CELL_SIZE = 44;",
+            "const ORIGIN_X = 20;",
+            "const ORIGIN_Y = 20;",
             "#101820",
             "#203040",
             "#2d4059",
@@ -75,6 +75,33 @@ class VisualizerRendererTests(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, html)
+
+    def test_renderer_makes_arena_primary_and_details_collapsible(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        html = render_visualizer(self.projection).decode("utf-8")
+        for marker in (
+            'class="visualizer-shell"',
+            'aria-label="2D mission replay arena"',
+            'id="mission-progress"',
+            '<details id="frame-details-panel" class="details-panel">',
+            '<summary>Frame evidence',
+            '<pre id="frame-details"',
+            'frameDetails.textContent = detailLines(frame, world).join("\\n")',
+            'detailsSummary.textContent',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, html)
+        self.assertNotIn("drawText(lines[index]", html)
+
+    def test_renderer_keeps_verifier_owned_result_in_the_visible_overview(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        html = render_visualizer(self.projection).decode("utf-8")
+        self.assertIn('class="terminal-panel overview-panel"', html)
+        self.assertIn('terminalText.textContent =', html)
+        self.assertIn("Verifier-owned score", html)
+        self.assertIn("Verifier-owned outcome", html)
 
     def test_renderer_is_projection_only_and_has_no_external_or_raw_evidence_access(
         self,
