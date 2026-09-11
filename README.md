@@ -4,6 +4,10 @@ A deterministic, reproducible agent-evaluation system: a **factory** that assemb
 
 **Status: v0 implemented.** The deterministic evidence-chain core (SDD batches B1–B6) is complete and green under the one-command gate below; no live providers yet. The charter sections of this document are unchanged.
 
+![Robot Factory and Arena system overview](docs/architecture/system-overview.svg)
+
+See the [human semantic architecture reference](docs/architecture/system-overview.md) for layer boundaries, authority, and connector semantics. The diagram is documentation, not a new runtime source of truth.
+
 ## What I want to achieve
 
 | Goal | Statement |

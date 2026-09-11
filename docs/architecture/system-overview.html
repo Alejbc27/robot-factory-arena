@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Robot Factory / Arena — System Overview</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      background: #020617;
+      color: #f8fafc;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 1080px; background: #020617; }
+    main { width: min(100% - 48px, 1680px); margin: 0 auto; padding: 24px 0 32px; }
+    .intro { margin: 0 0 16px; color: #94a3b8; font-size: 12px; line-height: 1.6; }
+    .diagram { overflow-x: auto; border: 1px solid #1e293b; border-radius: 14px; background: rgba(15, 23, 42, .55); padding: 12px; }
+    svg { display: block; width: 100%; min-width: 1080px; height: auto; }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+    .card { border: 1px solid #1e293b; border-radius: 10px; background: rgba(15, 23, 42, .65); padding: 14px 16px; }
+    .card h2 { margin: 0 0 8px; font-size: 12px; }
+    .card p { margin: 0; color: #94a3b8; font-size: 11px; line-height: 1.55; }
+    .cyan { color: #67e8f9; }
+    .amber { color: #fde68a; }
+    .rose { color: #fda4af; }
+    footer { margin-top: 14px; color: #475569; font-size: 10px; text-align: center; }
+    @media (max-width: 1200px) {
+      main { width: calc(100% - 24px); }
+      .cards { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="intro">Portfolio architecture map for the bounded experiment loop. The diagram is a visual companion to the semantic reference; implementation contracts remain in the repository code, tests, and phase documents.</p>
+    <section class="diagram" aria-label="Robot Factory and Arena architecture diagram">
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="970" viewBox="0 0 1600 970" role="img" aria-labelledby="diagram-title diagram-description">
+  <title id="diagram-title">Robot Factory and Arena system overview</title>
+  <desc id="diagram-description">Left-to-right architecture: experiment and search feed policy providers, providers emit tool calls into a deterministic execution core, and sealed evidence reaches an independent verifier. Langfuse and Visualizer are secondary observation projections.</desc>
+
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arrow-solid" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#cbd5e1"/>
+    </marker>
+    <marker id="arrow-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24"/>
+    </marker>
+    <marker id="arrow-dotted" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="970" fill="#020617"/>
+  <rect width="1600" height="970" fill="url(#grid)"/>
+
+  <!-- Header -->
+  <circle cx="48" cy="31" r="6" fill="#22d3ee"/>
+  <text x="66" y="37" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="19" font-weight="700" letter-spacing="1">ROBOT FACTORY / ARENA</text>
+  <text x="48" y="59" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="10">offline system overview • bounded search around an authoritative deterministic core</text>
+  <rect x="40" y="75" width="850" height="30" rx="7" fill="#082f49" fill-opacity="0.72" stroke="#22d3ee" stroke-opacity="0.6"/>
+  <text x="465" y="95" fill="#cffafe" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">LLM proposes  →  deterministic system executes  →  verifier decides</text>
+
+  <!-- Header legend, outside all architecture boundaries -->
+  <text x="980" y="19" fill="#cbd5e1" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" font-weight="700">SEMANTIC COLOR KEY</text>
+  <rect x="980" y="28" width="10" height="10" rx="2" fill="#083344" stroke="#22d3ee"/>
+  <text x="996" y="36" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">search</text>
+  <rect x="1060" y="28" width="10" height="10" rx="2" fill="#4c1d95" stroke="#a78bfa"/>
+  <text x="1076" y="36" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">providers</text>
+  <rect x="1160" y="28" width="10" height="10" rx="2" fill="#064e3b" stroke="#34d399"/>
+  <text x="1176" y="36" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">core</text>
+  <rect x="1230" y="28" width="10" height="10" rx="2" fill="#78350f" stroke="#fbbf24"/>
+  <text x="1246" y="36" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">evidence</text>
+  <rect x="1320" y="28" width="10" height="10" rx="2" fill="#1e293b" stroke="#94a3b8"/>
+  <text x="1336" y="36" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">external</text>
+  <rect x="1410" y="28" width="10" height="10" rx="2" fill="#881337" stroke="#fb7185"/>
+  <text x="1426" y="36" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">projection</text>
+  <line x1="980" y1="55" x2="1005" y2="55" stroke="#cbd5e1" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  <text x="1013" y="58" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">runtime / authoritative</text>
+  <line x1="1150" y1="55" x2="1175" y2="55" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="7 4" marker-end="url(#arrow-dashed)"/>
+  <text x="1183" y="58" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">evidence / projection</text>
+  <line x1="1350" y1="55" x2="1375" y2="55" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="2 5" marker-end="url(#arrow-dotted)"/>
+  <text x="1383" y="58" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">observation only</text>
+  <text x="980" y="95" fill="#64748b" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">solid = flow • dashed = evidence • dotted = non-authoritative observation</text>
+
+  <!-- Grouped boundaries -->
+  <rect x="30" y="125" width="315" height="650" rx="12" fill="#083344" fill-opacity="0.08" stroke="#22d3ee" stroke-opacity="0.75" stroke-width="1" stroke-dasharray="8 4"/>
+  <text x="48" y="151" fill="#67e8f9" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="700">EXPERIMENT / SEARCH</text>
+  <text x="48" y="166" fill="#0891b2" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">conditions and frozen context</text>
+
+  <rect x="365" y="125" width="300" height="650" rx="12" fill="#4c1d95" fill-opacity="0.08" stroke="#a78bfa" stroke-opacity="0.75" stroke-width="1" stroke-dasharray="8 4"/>
+  <text x="383" y="151" fill="#c4b5fd" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="700">POLICY / PROVIDERS</text>
+  <text x="383" y="166" fill="#8b5cf6" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">one bounded proposal interface</text>
+
+  <rect x="685" y="125" width="425" height="650" rx="12" fill="#064e3b" fill-opacity="0.08" stroke="#34d399" stroke-opacity="0.75" stroke-width="1" stroke-dasharray="8 4"/>
+  <text x="703" y="151" fill="#6ee7b7" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="700">DETERMINISTIC CORE</text>
+  <text x="703" y="166" fill="#10b981" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">authoritative execution and state</text>
+
+  <rect x="1130" y="125" width="440" height="650" rx="12" fill="#78350f" fill-opacity="0.08" stroke="#fbbf24" stroke-opacity="0.75" stroke-width="1" stroke-dasharray="8 4"/>
+  <text x="1148" y="151" fill="#fde68a" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="700">EVIDENCE / VERIFICATION</text>
+  <text x="1148" y="166" fill="#d97706" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">sealed artifacts and independent decision</text>
+
+  <rect x="685" y="805" width="885" height="120" rx="12" fill="#881337" fill-opacity="0.07" stroke="#fb7185" stroke-opacity="0.7" stroke-width="1" stroke-dasharray="8 4"/>
+  <text x="703" y="831" fill="#fda4af" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="700">PROJECTION / OBSERVABILITY</text>
+  <text x="703" y="846" fill="#e11d48" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">secondary outputs • never the source of truth</text>
+
+  <!-- Connectors: behind component boxes -->
+  <!-- Search conditions converge on the discovery store. -->
+  <path d="M 187 237 H 325" fill="none" stroke="#22d3ee" stroke-width="1.5"/>
+  <path d="M 187 329 H 325" fill="none" stroke="#22d3ee" stroke-width="1.5"/>
+  <path d="M 187 421 H 325" fill="none" stroke="#22d3ee" stroke-width="1.5"/>
+  <path d="M 325 237 V 465 H 187 V 475" fill="none" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  <line x1="187" y1="539" x2="187" y2="585" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+
+  <!-- Frozen context crosses into the policy boundary. -->
+  <path d="M 315 620 H 350 V 231 H 405" fill="none" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  <text x="357" y="214" fill="#67e8f9" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">StrategyContext</text>
+
+  <!-- Provider path converges on the core's Runner. -->
+  <line x1="515" y1="267" x2="515" y2="325" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  <path d="M 515 397 V 440 H 442 V 475" fill="none" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  <path d="M 515 397 V 440 H 588 V 475" fill="none" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  <path d="M 442 540 V 575 H 650" fill="none" stroke="#a78bfa" stroke-width="1.5"/>
+  <path d="M 588 540 V 575 H 650" fill="none" stroke="#a78bfa" stroke-width="1.5"/>
+  <path d="M 650 575 H 715 V 228 H 735" fill="none" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  <text x="650" y="563" fill="#c4b5fd" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">ToolCall</text>
+
+  <!-- Authoritative core flow. -->
+  <line x1="898" y1="266" x2="898" y2="315" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  <line x1="898" y1="373" x2="898" y2="410" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  <line x1="898" y1="468" x2="898" y2="505" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  <line x1="898" y1="575" x2="898" y2="615" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  <text x="945" y="602" fill="#6ee7b7" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">committed operations</text>
+  <line x1="898" y1="673" x2="898" y2="710" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+
+  <!-- Evidence and verification flow. -->
+  <path d="M 1060 740 H 1120 V 221 H 1180" fill="none" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="7 4" marker-end="url(#arrow-dashed)"/>
+  <line x1="1350" y1="252" x2="1350" y2="295" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="7 4" marker-end="url(#arrow-dashed)"/>
+  <line x1="1350" y1="357" x2="1350" y2="400" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="7 4" marker-end="url(#arrow-dashed)"/>
+  <line x1="1350" y1="462" x2="1350" y2="520" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="7 4" marker-end="url(#arrow-dashed)"/>
+  <line x1="1350" y1="592" x2="1350" y2="650" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrow-solid)"/>
+  <text x="1417" y="624" fill="#fde68a" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8">verified evidence</text>
+
+  <!-- Non-authoritative observation projections. -->
+  <path d="M 1350 252 H 1550 V 840 H 1360 V 850" fill="none" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="2 5" marker-end="url(#arrow-dotted)"/>
+  <path d="M 1350 712 H 1170 V 840 H 910 V 850" fill="none" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="2 5" marker-end="url(#arrow-dotted)"/>
+  <text x="1510" y="821" fill="#fda4af" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="end">projection only</text>
+  <text x="1035" y="821" fill="#fda4af" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">projection only</text>
+
+  <!-- Experiment / search components -->
+  <rect x="60" y="185" width="255" height="52" rx="6" fill="#0f172a"/>
+  <rect x="60" y="185" width="255" height="52" rx="6" fill="#083344" fill-opacity="0.72" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="187" y="207" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">R1</text>
+  <text x="187" y="223" fill="#a5f3fc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">human-directed search</text>
+
+  <rect x="60" y="277" width="255" height="52" rx="6" fill="#0f172a"/>
+  <rect x="60" y="277" width="255" height="52" rx="6" fill="#083344" fill-opacity="0.72" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="187" y="299" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">R2</text>
+  <text x="187" y="315" fill="#a5f3fc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">autonomous search</text>
+
+  <rect x="60" y="369" width="255" height="52" rx="6" fill="#0f172a"/>
+  <rect x="60" y="369" width="255" height="52" rx="6" fill="#083344" fill-opacity="0.72" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="187" y="391" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">R3</text>
+  <text x="187" y="407" fill="#a5f3fc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">shared-discovery search</text>
+
+  <rect x="60" y="475" width="255" height="64" rx="6" fill="#0f172a"/>
+  <rect x="60" y="475" width="255" height="64" rx="6" fill="#083344" fill-opacity="0.72" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="187" y="501" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">DiscoveryStore</text>
+  <text x="187" y="519" fill="#a5f3fc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">evidence-backed discoveries</text>
+
+  <rect x="60" y="585" width="255" height="70" rx="6" fill="#0f172a"/>
+  <rect x="60" y="585" width="255" height="70" rx="6" fill="#083344" fill-opacity="0.72" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="187" y="613" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">StrategyContext</text>
+  <text x="187" y="632" fill="#a5f3fc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">frozen per run</text>
+  <text x="187" y="646" fill="#22d3ee" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="7" text-anchor="middle">advisory context, not WorldState</text>
+
+  <!-- Policy / provider components -->
+  <rect x="405" y="195" width="220" height="72" rx="6" fill="#0f172a"/>
+  <rect x="405" y="195" width="220" height="72" rx="6" fill="#4c1d95" fill-opacity="0.72" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="515" y="225" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="12" font-weight="600" text-anchor="middle">LLMPolicy</text>
+  <text x="515" y="244" fill="#ddd6fe" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">bounded Policy protocol</text>
+
+  <rect x="405" y="325" width="220" height="72" rx="6" fill="#0f172a"/>
+  <rect x="405" y="325" width="220" height="72" rx="6" fill="#4c1d95" fill-opacity="0.72" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="515" y="355" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">ProviderAdapter</text>
+  <text x="515" y="374" fill="#ddd6fe" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">common normalization boundary</text>
+
+  <rect x="390" y="475" width="105" height="65" rx="6" fill="#0f172a"/>
+  <rect x="390" y="475" width="105" height="65" rx="6" fill="#4c1d95" fill-opacity="0.72" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="442" y="503" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">OpenAI</text>
+  <text x="442" y="521" fill="#ddd6fe" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">pinned adapter</text>
+
+  <rect x="535" y="475" width="105" height="65" rx="6" fill="#0f172a"/>
+  <rect x="535" y="475" width="105" height="65" rx="6" fill="#4c1d95" fill-opacity="0.72" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="588" y="503" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">GLM</text>
+  <text x="588" y="521" fill="#ddd6fe" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">pinned adapter</text>
+
+  <!-- Deterministic core components -->
+  <rect x="735" y="190" width="325" height="76" rx="6" fill="#0f172a"/>
+  <rect x="735" y="190" width="325" height="76" rx="6" fill="#064e3b" fill-opacity="0.72" stroke="#34d399" stroke-width="1.5"/>
+  <text x="898" y="221" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="12" font-weight="600" text-anchor="middle">Runner</text>
+  <text x="898" y="241" fill="#a7f3d0" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">attempt lifecycle / release gate</text>
+
+  <rect x="735" y="315" width="325" height="58" rx="6" fill="#0f172a"/>
+  <rect x="735" y="315" width="325" height="58" rx="6" fill="#064e3b" fill-opacity="0.72" stroke="#34d399" stroke-width="1.5"/>
+  <text x="898" y="340" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">Budget</text>
+  <text x="898" y="357" fill="#a7f3d0" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">hard step ceiling</text>
+
+  <rect x="735" y="410" width="325" height="58" rx="6" fill="#0f172a"/>
+  <rect x="735" y="410" width="325" height="58" rx="6" fill="#064e3b" fill-opacity="0.72" stroke="#34d399" stroke-width="1.5"/>
+  <text x="898" y="435" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">Grants</text>
+  <text x="898" y="452" fill="#a7f3d0" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">authorized tools</text>
+
+  <rect x="735" y="505" width="325" height="70" rx="6" fill="#0f172a"/>
+  <rect x="735" y="505" width="325" height="70" rx="6" fill="#064e3b" fill-opacity="0.72" stroke="#34d399" stroke-width="1.5"/>
+  <text x="898" y="533" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">ToolBay</text>
+  <text x="898" y="552" fill="#a7f3d0" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">idempotency ledger + fault boundary</text>
+
+  <rect x="735" y="615" width="325" height="58" rx="6" fill="#0f172a"/>
+  <rect x="735" y="615" width="325" height="58" rx="6" fill="#064e3b" fill-opacity="0.72" stroke="#34d399" stroke-width="1.5"/>
+  <text x="898" y="640" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">apply()</text>
+  <text x="898" y="657" fill="#a7f3d0" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">domain transition</text>
+
+  <rect x="735" y="710" width="325" height="60" rx="6" fill="#0f172a"/>
+  <rect x="735" y="710" width="325" height="60" rx="6" fill="#064e3b" fill-opacity="0.72" stroke="#34d399" stroke-width="1.5"/>
+  <text x="898" y="736" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">WorldState</text>
+  <text x="898" y="753" fill="#a7f3d0" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">serializable authoritative state</text>
+
+  <!-- Evidence / verification components -->
+  <rect x="1180" y="190" width="340" height="62" rx="6" fill="#0f172a"/>
+  <rect x="1180" y="190" width="340" height="62" rx="6" fill="#78350f" fill-opacity="0.72" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="1350" y="217" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">Trace</text>
+  <text x="1350" y="235" fill="#fef3c7" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">append-only JSONL evidence</text>
+
+  <rect x="1180" y="295" width="340" height="62" rx="6" fill="#0f172a"/>
+  <rect x="1180" y="295" width="340" height="62" rx="6" fill="#78350f" fill-opacity="0.72" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="1350" y="322" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">Receipt</text>
+  <text x="1350" y="340" fill="#fef3c7" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">sealed run result</text>
+
+  <rect x="1180" y="400" width="340" height="62" rx="6" fill="#0f172a"/>
+  <rect x="1180" y="400" width="340" height="62" rx="6" fill="#78350f" fill-opacity="0.72" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="1350" y="427" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">Replay / Rerun</text>
+  <text x="1350" y="445" fill="#fef3c7" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">offline comparison path</text>
+
+  <rect x="1180" y="520" width="340" height="72" rx="6" fill="#0f172a"/>
+  <rect x="1180" y="520" width="340" height="72" rx="6" fill="#78350f" fill-opacity="0.72" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="1350" y="550" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">Independent Verifier</text>
+  <text x="1350" y="569" fill="#fef3c7" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">artifact-only / anti-cheat</text>
+
+  <rect x="1180" y="650" width="340" height="62" rx="6" fill="#0f172a"/>
+  <rect x="1180" y="650" width="340" height="62" rx="6" fill="#78350f" fill-opacity="0.72" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="1350" y="677" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">Verified Score</text>
+  <text x="1350" y="695" fill="#fef3c7" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">official outcome and signals</text>
+
+  <!-- Projection components -->
+  <rect x="760" y="850" width="300" height="48" rx="6" fill="#0f172a"/>
+  <rect x="760" y="850" width="300" height="48" rx="6" fill="#881337" fill-opacity="0.72" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="910" y="872" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">Visualizer</text>
+  <text x="910" y="887" fill="#fecdd3" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">read-only timeline projection</text>
+
+  <rect x="1210" y="850" width="300" height="48" rx="6" fill="#0f172a"/>
+  <rect x="1210" y="850" width="300" height="48" rx="6" fill="#881337" fill-opacity="0.72" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="1360" y="872" fill="#f8fafc" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="11" font-weight="600" text-anchor="middle">Langfuse</text>
+  <text x="1360" y="887" fill="#fecdd3" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="8" text-anchor="middle">downstream trace projection</text>
+
+  <text x="1130" y="916" fill="#fda4af" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" font-size="9" font-weight="600" text-anchor="middle">Langfuse / Visualizer observe, never decide</text>
+</svg>
+
+    </section>
+    <section class="cards" aria-label="Architecture notes">
+      <article class="card">
+        <h2 class="cyan">Authority</h2>
+        <p>LLMPolicy and providers can propose only normalized ToolCalls. Runner, Budget, Grants, ToolBay, apply(), and WorldState own execution.</p>
+      </article>
+      <article class="card">
+        <h2 class="amber">Evidence</h2>
+        <p>Trace, Receipt, Replay / Rerun, and the Independent Verifier produce the official Verified Score from sealed artifacts, not self-report.</p>
+      </article>
+      <article class="card">
+        <h2 class="rose">Observation</h2>
+        <p>Langfuse and Visualizer are optional downstream projections. They observe verified inputs and never decide, score, or gate a run.</p>
+      </article>
+    </section>
+    <footer>Offline artifact • no network calls • local/system monospace fallback</footer>
+  </main>
+</body>
+</html>
