@@ -58,6 +58,13 @@ from robot_factory_arena.evidence.canonical import (
 from robot_factory_arena.evidence.receipt import ReceiptWriter
 from robot_factory_arena.evidence.replay import replay
 from robot_factory_arena.evidence.report import render_report
+from robot_factory_arena.evidence.visualizer_projection import VisualizerLogicalMetadata
+from robot_factory_arena.evidence.visualizer_release import (
+    VISUALIZER_NAME,
+    VerifiedRelease,
+    VisualizerGenerationError,
+    release_visualizer,
+)
 from robot_factory_arena.faults.model import (
     FAULT_ID_RESPONSE_LOST,
     HOOK_AFTER_COMMIT_BEFORE_RESPONSE,
@@ -307,7 +314,8 @@ def _execute_run(
             return 1, None, verification, recorder.directory
 
     # Binding re-verification with receipt.json present (T-20-proven order).
-    recheck = Verifier().verify(load_verification_artifacts(recorder.directory))
+    release_artifacts = load_verification_artifacts(recorder.directory)
+    recheck = Verifier().verify(release_artifacts)
     if not recheck.valid:
         print(
             "error: the released receipt failed binding re-verification",
@@ -319,6 +327,40 @@ def _execute_run(
                 file=sys.stderr,
             )
         return 1, None, verification, recorder.directory
+
+    metadata = VisualizerLogicalMetadata(None, None, None, None, None)
+    if llm is not None:
+        from robot_factory_arena.policies.llm import (
+            prompt_composition_digest,
+            strategy_context_digest,
+            tool_schema_digest,
+        )
+
+        provider, model, _, strategy_context = llm
+        metadata = VisualizerLogicalMetadata(
+            provider,
+            model,
+            strategy_context_digest(strategy_context)
+            if strategy_context is not None
+            else None,
+            tool_schema_digest(),
+            prompt_composition_digest(),
+        )
+    try:
+        release_visualizer(
+            VerifiedRelease(
+                directory=recorder.directory,
+                artifacts=release_artifacts,
+                receipt=receipt,
+                verification=recheck,
+                replay_result=replayed,
+                report_path=recorder.directory / REPORT_NAME,
+                report_bytes=report_html.encode("utf-8"),
+                logical_metadata=metadata,
+            )
+        )
+    except VisualizerGenerationError as error:
+        print(f"visualizer: unavailable (non-authoritative: {error})", file=sys.stderr)
     return 0, receipt, verification, recorder.directory
 
 
@@ -379,8 +421,17 @@ def _deterministic_mismatches(dir_a: Path, dir_b: Path):
     return mismatches
 
 
+def _visualizer_comparison(dir_a: Path, dir_b: Path) -> str:
+    """Compare the optional artifact without affecting core evidence agreement."""
+    path_a = dir_a / VISUALIZER_NAME
+    path_b = dir_b / VISUALIZER_NAME
+    if not path_a.is_file() or not path_b.is_file():
+        return "unavailable"
+    return "agree" if path_a.read_bytes() == path_b.read_bytes() else "differ"
+
+
 def _compare_with_prior_runs(artifacts_root, logical_run_id, execution_id):
-    """Report rerun equality against every prior execution (REQ-07)."""
+    """Report core and optional visualizer agreement separately."""
     logical_dir = Path(artifacts_root) / "runs" / logical_run_id
     priors = []
     if logical_dir.is_dir():
@@ -391,10 +442,15 @@ def _compare_with_prior_runs(artifacts_root, logical_run_id, execution_id):
         )
     if not priors:
         print("deterministic agreement: true (no prior executions recorded)")
+        print("visualizer agreement: unavailable (no prior executions recorded)")
         return 0
     agreed = True
+    visualizers_agree = True
+    unavailable_pairs = 0
     for prior in priors:
-        mismatches = _deterministic_mismatches(logical_dir / execution_id, prior)
+        current = logical_dir / execution_id
+        mismatches = _deterministic_mismatches(current, prior)
+        visualizer_status = _visualizer_comparison(current, prior)
         if mismatches:
             agreed = False
             print(f"deterministic agreement vs {prior.name}: false")
@@ -402,8 +458,22 @@ def _compare_with_prior_runs(artifacts_root, logical_run_id, execution_id):
                 print(f"  MISMATCH {mismatch}")
         else:
             print(f"deterministic agreement vs {prior.name}: true")
+        print(f"visualizer agreement vs {prior.name}: {visualizer_status}")
+        if visualizer_status == "differ":
+            visualizers_agree = False
+        elif visualizer_status == "unavailable":
+            unavailable_pairs += 1
     print(f"deterministic agreement: {str(agreed).lower()}")
-    return 0 if agreed else 1
+    if not visualizers_agree:
+        print("visualizer agreement: differ (non-authoritative)")
+    elif unavailable_pairs:
+        print(
+            f"visualizer agreement: unavailable "
+            f"({unavailable_pairs} of {len(priors)} pairs lacked the optional file)"
+        )
+    else:
+        print("visualizer agreement: agree")
+    return 0 if agreed and visualizers_agree else 1
 
 
 def _load_script(path: Path):
@@ -524,6 +594,13 @@ def _run_and_report(args, rerun: bool) -> int:
     print(f"verified_score: {verification.verified_score}")
     print(f"verifier: valid ({verification.verifier_version})")
     print(f"report: {directory / REPORT_NAME}")
+    visualizer_path = directory / VISUALIZER_NAME
+    if visualizer_path.is_file():
+        print(f"visualizer: {visualizer_path}")
+    else:
+        print(
+            "visualizer: unavailable (non-authoritative; core evidence remains valid)"
+        )
     if llm is not None:
         print(f"llm_report: {directory / 'llm' / 'llm-report.html'}")
         # Expected context/policy identity for harness launch metadata.
