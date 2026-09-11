@@ -25,7 +25,8 @@ Projection, rendering, or atomic-write failures remove `visualizer.html` and its
 - v0 tool-call arguments follow the exact per-tool grammar (`move` direction is `north`/`east`/`south`/`west`; `pick` IDs match `shelf-00`–`shelf-09`/`item-00`–`item-09`; `place` IDs match `order-00`–`order-09`); a present tool requires `schema_version: 1`, and a parse-level record keeps absent fields explicitly `null`.
 - The projection builder strips unsafe or malformed argument values to `arguments: null` instead of leaking them, so rejected policy steps remain visible without embedding raw candidates.
 - `last_result.operation_key` is either the runner's empty-string parse-rejection sentinel or a valid operation key bound to the same logical run; forged, foreign, mapping, or absent keys fail closed.
-- Required semantic digests (`config`, `task`, `policy`, `trace`, `initial_state`, `final_state`, `projection`) are non-null; only `fault_tape`, provider-context digests are nullable by design.
+- Self-verifiable digest claims bind to canonical projection content: `policy_digest` agrees with its logical alias; `initial_state_digest`, `final_state_digest`, and the duplicate terminal final-state digest bind to canonical worlds; the three provider-context aliases agree when present; and `projection_digest` binds the canonical projection with its own key omitted.
+- Source-bound digest claims (`config`, `task`, `trace`, and `fault_tape`) are grammar-checked here and are bound to verified artifacts by `build_projection`; the standalone validator does not pretend to reconstruct those opaque sources.
 - Committed domain-event data must be the exact v0 shape per `event_type` (bounded coordinates, closed direction enum, grammatical IDs), so arbitrary payloads such as paths or secrets are rejected.
 - Frame states chain from the initial world through every frame to the verifier's final state; non-committed frames carry equal snapshots and no committed events.
 
