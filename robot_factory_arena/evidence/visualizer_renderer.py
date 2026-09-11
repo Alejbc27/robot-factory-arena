@@ -304,8 +304,15 @@ function drawRobotSprite(robot) {
 }
 function drawPathTrail(world, frame) {
   if (frame === null) return;
-  const trailFrames = projection.frames.slice(Math.max(0, selectedFrame - PATH_TRAIL_LENGTH + 1), selectedFrame + 1);
-  const positions = trailFrames.map((safeFrame) => safeFrame.state_after.robot.position);
+  const positions = [];
+  const seenPositions = new Set();
+  for (let index = selectedFrame; index >= 0 && positions.length < PATH_TRAIL_LENGTH; index -= 1) {
+    const position = projection.frames[index].state_after.robot.position;
+    const positionKey = position.join(",");
+    if (seenPositions.has(positionKey)) continue;
+    seenPositions.add(positionKey);
+    positions.unshift(position);
+  }
   if (positions.length === 0) return;
   context.save();
   context.strokeStyle = PALETTE.trail;
@@ -327,36 +334,23 @@ function drawPathTrail(world, frame) {
   });
   context.restore();
 }
-function frameFeedback(frame) {
-  const feedback = { label: "FRAME", color: PALETTE.muted };
-  if (frame === null) return feedback;
-  const hasFault = frame.subevents.some((event) => event.kind === "fault_injected" || event.fault_id !== null);
-  const hasRetry = frame.subevents.some((event) => event.kind === "internal_retry" || event.status === "idempotent_replay");
-  if (hasFault) {
-    feedback.label = "FAULT";
-    feedback.color = PALETTE.fault;
-  } else if (hasRetry) {
-    feedback.label = "RETRY";
-    feedback.color = PALETTE.retry;
-  } else if (frame.classification === "committed") {
-    feedback.label = "COMMITTED";
-    feedback.color = PALETTE.completed;
-  } else if (frame.classification === "rejected" || frame.classification === "malformed") {
-    feedback.label = "REJECTED";
-    feedback.color = PALETTE.rejection;
-  }
-  return feedback;
+const CLASSIFICATION_STATUS = Object.freeze({
+  committed: { label: "COMMITTED", color: PALETTE.completed },
+  rejected: { label: "REJECTED", color: PALETTE.rejection },
+  malformed: { label: "MALFORMED", color: PALETTE.rejection },
+  unsupported: { label: "UNSUPPORTED", color: PALETTE.rejection },
+  invalid: { label: "INVALID", color: PALETTE.rejection },
+  unauthorized: { label: "UNAUTHORIZED", color: PALETTE.rejection },
+  idempotent_replay: { label: "IDEMPOTENT REPLAY", color: PALETTE.retry }
+});
+function classificationStatus(frame) {
+  if (frame === null) return { label: "INITIAL", color: PALETTE.muted };
+  return CLASSIFICATION_STATUS[frame.classification] || { label: "UNKNOWN", color: PALETTE.muted };
 }
-function drawFrameFeedback(frame) {
-  const feedback = frameFeedback(frame);
-  const x = ORIGIN_X + 8;
-  const y = ORIGIN_Y + 8;
-  context.fillStyle = "rgba(13, 21, 26, .9)";
-  context.fillRect(x, y, 124, 24);
-  context.strokeStyle = feedback.color;
-  context.strokeRect(x + .5, y + .5, 123, 23);
-  context.font = "bold 9px ui-monospace, monospace";
-  drawText("FRAME " + feedback.label, x + 8, y + 15, feedback.color);
+function normalizedActionText(frame) {
+  if (frame === null) return "none";
+  const call = frame.tool_call;
+  return valueText(call.tool, "none") + " " + argumentsText(call.arguments);
 }
 function drawWorld(world, frame) {
   drawFloor();
@@ -365,10 +359,12 @@ function drawWorld(world, frame) {
   for (const shelf of world.shelves) drawShelfSprite(shelf);
   drawRobotSprite(world.robot);
 }
-function drawHud(world) {
+function drawHud(world, frame) {
   const result = projection.terminal_result;
   const completed = world.completed_orders.length;
   const total = world.orders.length;
+  const action = frame === null ? { tool: null, arguments: null } : frame.tool_call;
+  const status = classificationStatus(frame);
   context.fillStyle = PALETTE.hud;
   context.fillRect(HUD_X, 0, canvas.width - HUD_X, canvas.height);
   context.strokeStyle = PALETTE.hudLine;
@@ -383,7 +379,13 @@ function drawHud(world) {
   context.fillRect(HUD_X + 12, 86, 132, 4);
   context.fillStyle = PALETTE.completed;
   context.fillRect(HUD_X + 12, 86, total ? 132 * completed / total : 0, 4);
-  drawText("ORDER QUEUE", HUD_X + 12, 116, PALETTE.warm);
+  context.font = "bold 7px ui-monospace, monospace";
+  drawText("ACTION", HUD_X + 12, 100, PALETTE.warm);
+  drawText("STATUS", HUD_X + 82, 100, status.color);
+  context.font = "7px ui-monospace, monospace";
+  drawText(valueText(action.tool, "none"), HUD_X + 12, 112, PALETTE.pending);
+  drawText(status.label, HUD_X + 82, 112, status.color);
+  drawText("ORDER QUEUE", HUD_X + 12, 124, PALETTE.warm);
   context.font = "8px ui-monospace, monospace";
   for (let index = 0; index < ORDER_SLOT_COUNT; index += 1) {
     const column = index % ORDER_GRID_COLUMNS;
@@ -442,11 +444,10 @@ function render() {
   const frame = projection.frames.length ? projection.frames[selectedFrame] : null;
   const world = worldForFrame();
   drawWorld(world, frame);
-  drawFrameFeedback(frame);
-  drawHud(world);
+  drawHud(world, frame);
   const result = projection.terminal_result;
-  const feedback = frameFeedback(frame);
-  statusText.textContent = "frame " + (frame ? frame.policy_step : "initial") + " · " + valueText(frame && frame.classification, "initial") + " · visual cue " + feedback.label;
+  const status = classificationStatus(frame);
+  statusText.textContent = "frame " + (frame ? frame.policy_step : "initial") + " · action " + normalizedActionText(frame) + " · status " + status.label;
   missionProgress.textContent = world.completed_orders.length + " / " + world.orders.length + " orders";
   robotStatus.textContent = "(" + world.robot.position.join(", ") + ")";
   inventoryStatus.textContent = valueText(world.robot.inventory_item_id, "empty");
