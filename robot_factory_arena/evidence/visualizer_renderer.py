@@ -141,6 +141,15 @@ const CELL_SIZE = 44;
 const ORIGIN_X = 20;
 const ORIGIN_Y = 20;
 const HUD_X = 484;
+const ORDER_SLOT_COUNT = 10;
+const ORDER_GRID_COLUMNS = 2;
+const ORDER_GRID_ROWS = 5;
+const ORDER_GRID_Y = 128;
+const ORDER_SLOT_WIDTH = 64;
+const ORDER_SLOT_HEIGHT = 28;
+const ORDER_SLOT_GAP = 4;
+const ROBOT_SECTION_Y = 304;
+const VERIFIER_SECTION_Y = 410;
 const NOMINAL_FRAME_MS = 500;
 const PALETTE = {
   background: "#101820", floor: "#203040", grid: "#2d4059", shelf: "#8f5b34",
@@ -248,25 +257,37 @@ function drawHud(world) {
   context.fillStyle = PALETTE.completed;
   context.fillRect(HUD_X + 12, 86, total ? 132 * completed / total : 0, 4);
   drawText("ORDER QUEUE", HUD_X + 12, 116, PALETTE.warm);
-  let orderY = 135;
-  for (const order of world.orders) {
+  context.font = "8px ui-monospace, monospace";
+  for (let index = 0; index < ORDER_SLOT_COUNT; index += 1) {
+    const column = index % ORDER_GRID_COLUMNS;
+    const row = Math.floor(index / ORDER_GRID_COLUMNS);
+    const slotX = HUD_X + 12 + column * (ORDER_SLOT_WIDTH + ORDER_SLOT_GAP);
+    const slotY = ORDER_GRID_Y + row * (ORDER_SLOT_HEIGHT + ORDER_SLOT_GAP);
+    const order = world.orders[index] || null;
+    context.fillStyle = PALETTE.background;
+    context.fillRect(slotX, slotY, ORDER_SLOT_WIDTH, ORDER_SLOT_HEIGHT);
+    context.strokeStyle = PALETTE.hudLine;
+    context.strokeRect(slotX + 0.5, slotY + 0.5, ORDER_SLOT_WIDTH - 1, ORDER_SLOT_HEIGHT - 1);
+    if (order === null) {
+      drawText("—", slotX + 8, slotY + 18, PALETTE.muted);
+      continue;
+    }
     const done = world.completed_orders.includes(order.order_id);
     context.fillStyle = done ? PALETTE.completed : PALETTE.item;
-    context.fillRect(HUD_X + 12, orderY - 9, 7, 7);
-    drawText(order.order_id, HUD_X + 26, orderY, done ? PALETTE.completed : PALETTE.pending);
-    drawText(order.item_id + " x" + order.quantity, HUD_X + 26, orderY + 14, PALETTE.muted);
-    orderY += 36;
+    context.fillRect(slotX + 5, slotY + 7, 6, 6);
+    drawText(order.order_id, slotX + 15, slotY + 12, done ? PALETTE.completed : PALETTE.pending);
+    drawText(order.item_id + " x" + order.quantity, slotX + 15, slotY + 23, PALETTE.muted);
   }
   context.strokeStyle = PALETTE.hudLine;
-  context.beginPath(); context.moveTo(HUD_X + 12, 304); context.lineTo(canvas.width - 12, 304); context.stroke();
+  context.beginPath(); context.moveTo(HUD_X + 12, ROBOT_SECTION_Y); context.lineTo(canvas.width - 12, ROBOT_SECTION_Y); context.stroke();
   const robot = world.robot;
   context.font = "10px ui-monospace, monospace";
-  drawText("ROBOT", HUD_X + 12, 327, PALETTE.robot);
-  drawText("POS  " + robot.position.join(", "), HUD_X + 12, 346, PALETTE.pending);
-  drawText("LOAD " + valueText(robot.inventory_item_id, "empty"), HUD_X + 12, 365, robot.inventory_item_id === null ? PALETTE.muted : PALETTE.carried);
-  drawText("VERIFIER-OWNED", HUD_X + 12, 410, PALETTE.warm);
-  drawText("score " + result.verified_score, HUD_X + 12, 429, PALETTE.pending);
-  drawText("outcome " + result.outcome, HUD_X + 12, 448, PALETTE.pending);
+  drawText("ROBOT", HUD_X + 12, ROBOT_SECTION_Y + 23, PALETTE.robot);
+  drawText("POS  " + robot.position.join(", "), HUD_X + 12, ROBOT_SECTION_Y + 42, PALETTE.pending);
+  drawText("LOAD " + valueText(robot.inventory_item_id, "empty"), HUD_X + 12, ROBOT_SECTION_Y + 61, robot.inventory_item_id === null ? PALETTE.muted : PALETTE.carried);
+  drawText("VERIFIER-OWNED", HUD_X + 12, VERIFIER_SECTION_Y, PALETTE.warm);
+  drawText("score " + result.verified_score, HUD_X + 12, VERIFIER_SECTION_Y + 19, PALETTE.pending);
+  drawText("outcome " + result.outcome, HUD_X + 12, VERIFIER_SECTION_Y + 38, PALETTE.pending);
 }
 function detailLines(frame, world) {
   const counters = frame ? frame.counters.after : projection.counters;
