@@ -391,7 +391,7 @@ function drawPathTrail(world, frame) {
   positions.forEach((position, index) => drawMovementPip(position, index, positions.length));
 }
 function moveTarget(position, direction) {
-  const delta = { NORTH: [0, -1], EAST: [1, 0], SOUTH: [0, 1], WEST: [-1, 0] }[direction];
+  const delta = { north: [0, -1], east: [1, 0], south: [0, 1], west: [-1, 0] }[direction];
   if (!delta) return null;
   const target = [position[0] + delta[0], position[1] + delta[1]];
   return target[0] < 0 || target[1] < 0 || target[0] >= GRID_SIZE || target[1] >= GRID_SIZE ? null : target;
