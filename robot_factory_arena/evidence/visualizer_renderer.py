@@ -156,8 +156,11 @@ const ROBOT_SECTION_Y = 304;
 const VERIFIER_SECTION_Y = 410;
 const NOMINAL_FRAME_MS = 500;
 const PATH_TRAIL_LENGTH = 6;
+const TARGET_CUE_SIZE = 38;
+const TARGET_CUE_ARM = 8;
 const PALETTE = {
   background: "#101820", floor: "#203040", floorAlt: "#243746",
+  floorSeam: "#2f4a55", metal: "#70858b", metalDark: "#3b5158", hazard: "#ffca3a",
   lane: "#6f7d72", laneEdge: "#40554f", grid: "#2d4059", shelf: "#8f5b34",
   shelfDark: "#5e432f", shelfHighlight: "#ba7a46", item: "#f2c14e", crateDark: "#8d6825",
   robot: "#4cc9f0", robotDark: "#166078", carried: "#f72585", depot: "#7aa2a8",
@@ -197,16 +200,45 @@ function drawText(text, x, y, color) { context.fillStyle = color || PALETTE.pend
 function cellOrigin(position) {
   return { x: ORIGIN_X + position[0] * CELL_SIZE, y: ORIGIN_Y + position[1] * CELL_SIZE };
 }
+function drawIndustrialTile(column, row) {
+  const x = ORIGIN_X + column * CELL_SIZE;
+  const y = ORIGIN_Y + row * CELL_SIZE;
+  const alternate = (row + column) % 2 === 0;
+  context.fillStyle = alternate ? PALETTE.floor : PALETTE.floorAlt;
+  context.fillRect(x + 1, y + 1, CELL_SIZE - 2, CELL_SIZE - 2);
+  context.fillStyle = alternate ? PALETTE.floorSeam : PALETTE.metalDark;
+  context.fillRect(x + 3, y + 3, CELL_SIZE - 6, 2);
+  context.fillStyle = PALETTE.metal;
+  context.fillRect(x + 5, y + CELL_SIZE - 5, CELL_SIZE - 10, 1);
+  context.fillStyle = PALETTE.metalDark;
+  context.fillRect(x + 5, y + 7, 2, 2);
+  context.fillRect(x + CELL_SIZE - 7, y + 7, 2, 2);
+  if ((row * GRID_SIZE + column) % 5 === 0) {
+    context.fillStyle = PALETTE.metal;
+    context.fillRect(x + 16, y + 16, 12, 2);
+    context.fillRect(x + 21, y + 11, 2, 12);
+  }
+}
+function drawHazardStripe(x, y, width, height) {
+  context.fillStyle = PALETTE.hazard;
+  context.fillRect(x, y, width, height);
+  context.fillStyle = PALETTE.metalDark;
+  for (let stripe = -height; stripe < width; stripe += 10) {
+    context.beginPath();
+    context.moveTo(x + stripe, y + height);
+    context.lineTo(x + stripe + height, y);
+    context.lineTo(x + stripe + height - 3, y);
+    context.lineTo(x + stripe - 3, y + height);
+    context.fill();
+  }
+}
 function drawFloor() {
   context.fillStyle = PALETTE.background;
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.fillStyle = PALETTE.floor;
   context.fillRect(ORIGIN_X, ORIGIN_Y, GRID_SIZE * CELL_SIZE, GRID_SIZE * CELL_SIZE);
   for (let row = 0; row < GRID_SIZE; row += 1) {
-    for (let column = 0; column < GRID_SIZE; column += 1) {
-      context.fillStyle = (row + column) % 2 === 0 ? PALETTE.floor : PALETTE.floorAlt;
-      context.fillRect(ORIGIN_X + column * CELL_SIZE + 1, ORIGIN_Y + row * CELL_SIZE + 1, CELL_SIZE - 2, CELL_SIZE - 2);
-    }
+    for (let column = 0; column < GRID_SIZE; column += 1) drawIndustrialTile(column, row);
   }
   context.fillStyle = PALETTE.laneEdge;
   for (let row = 2; row < GRID_SIZE; row += 3) {
@@ -218,6 +250,7 @@ function drawFloor() {
     }
     context.fillStyle = PALETTE.laneEdge;
   }
+  drawHazardStripe(ORIGIN_X + 2, ORIGIN_Y + GRID_SIZE * CELL_SIZE - 7, GRID_SIZE * CELL_SIZE - 4, 5);
   context.strokeStyle = PALETTE.grid;
   context.lineWidth = 1;
   for (let line = 0; line <= GRID_SIZE; line += 1) {
@@ -231,36 +264,50 @@ function drawFloor() {
   }
 }
 function drawCrateSprite(x, y, color, label) {
-  context.fillStyle = "rgba(0, 0, 0, .28)";
+  context.fillStyle = "rgba(0, 0, 0, .34)";
   context.fillRect(x + 3, y + 4, 21, 20);
   context.fillStyle = PALETTE.crateDark;
   context.fillRect(x + 2, y + 2, 21, 20);
   context.fillStyle = color;
   context.fillRect(x + 4, y + 4, 17, 16);
+  context.fillStyle = "rgba(255, 255, 255, .2)";
+  context.fillRect(x + 5, y + 5, 15, 2);
+  context.fillRect(x + 5, y + 17, 15, 2);
   context.strokeStyle = PALETTE.crateDark;
   context.strokeRect(x + 4.5, y + 4.5, 16, 15);
   context.beginPath(); context.moveTo(x + 5, y + 5); context.lineTo(x + 20, y + 19); context.stroke();
   context.beginPath(); context.moveTo(x + 20, y + 5); context.lineTo(x + 5, y + 19); context.stroke();
+  context.fillStyle = PALETTE.pending;
+  context.fillRect(x + 2, y + 9, 2, 5);
+  context.fillRect(x + 23, y + 9, 2, 5);
   if (label) {
     context.font = "bold 7px ui-monospace, monospace";
     drawText(label, x + 7, y + 15, PALETTE.pending);
   }
 }
-function drawDepotSprite(position) {
+function drawHazardDepotSprite(position) {
   const origin = cellOrigin(position);
-  context.fillStyle = "rgba(0, 0, 0, .28)";
+  context.fillStyle = "rgba(0, 0, 0, .34)";
   context.fillRect(origin.x + 5, origin.y + 7, CELL_SIZE - 9, CELL_SIZE - 8);
   context.fillStyle = PALETTE.depotDark;
-  context.fillRect(origin.x + 4, origin.y + 4, CELL_SIZE - 8, CELL_SIZE - 8);
+  context.fillRect(origin.x + 3, origin.y + 3, CELL_SIZE - 6, CELL_SIZE - 6);
   context.fillStyle = PALETTE.depot;
-  context.fillRect(origin.x + 8, origin.y + 8, CELL_SIZE - 16, CELL_SIZE - 16);
+  context.fillRect(origin.x + 7, origin.y + 7, CELL_SIZE - 14, CELL_SIZE - 14);
+  drawHazardStripe(origin.x + 8, origin.y + 9, CELL_SIZE - 16, 5);
   context.fillStyle = PALETTE.depotDark;
-  context.fillRect(origin.x + 12, origin.y + 13, CELL_SIZE - 24, 3);
-  context.fillRect(origin.x + 12, origin.y + 22, CELL_SIZE - 24, 3);
+  context.fillRect(origin.x + 11, origin.y + 18, CELL_SIZE - 22, 3);
+  context.fillRect(origin.x + 11, origin.y + 27, CELL_SIZE - 22, 3);
+  context.fillStyle = PALETTE.hazard;
+  context.fillRect(origin.x + 10, origin.y + 34, 4, 3);
+  context.fillRect(origin.x + 30, origin.y + 34, 4, 3);
   context.strokeStyle = PALETTE.pending;
-  context.strokeRect(origin.x + 7.5, origin.y + 7.5, CELL_SIZE - 15, CELL_SIZE - 15);
-  context.font = "bold 8px ui-monospace, monospace";
-  drawText("D", origin.x + 18, origin.y + 35, PALETTE.pending);
+  context.lineWidth = 2;
+  context.strokeRect(origin.x + 6.5, origin.y + 6.5, CELL_SIZE - 13, CELL_SIZE - 13);
+  context.font = "bold 7px ui-monospace, monospace";
+  drawText("DEPOT", origin.x + 9, origin.y + 26, PALETTE.pending);
+}
+function drawDepotSprite(position) {
+  drawHazardDepotSprite(position);
 }
 function drawShelfSprite(shelf) {
   const origin = cellOrigin(shelf.position);
@@ -275,6 +322,14 @@ function drawShelfSprite(shelf) {
   context.fillStyle = PALETTE.shelfDark;
   context.fillRect(origin.x + 8, origin.y + 18, CELL_SIZE - 16, 3);
   context.fillRect(origin.x + 8, origin.y + 29, CELL_SIZE - 16, 3);
+  context.fillStyle = PALETTE.shelfHighlight;
+  context.fillRect(origin.x + 7, origin.y + 7, 3, CELL_SIZE - 14);
+  context.fillRect(origin.x + CELL_SIZE - 10, origin.y + 7, 3, CELL_SIZE - 14);
+  context.fillStyle = PALETTE.pending;
+  context.fillRect(origin.x + 8, origin.y + 9, 2, 2);
+  context.fillRect(origin.x + CELL_SIZE - 10, origin.y + 9, 2, 2);
+  context.fillRect(origin.x + 8, origin.y + 31, 2, 2);
+  context.fillRect(origin.x + CELL_SIZE - 10, origin.y + 31, 2, 2);
   context.strokeStyle = "rgba(255, 255, 255, .2)";
   context.strokeRect(origin.x + 4.5, origin.y + 4.5, CELL_SIZE - 9, CELL_SIZE - 9);
   context.font = "9px ui-monospace, monospace";
@@ -291,6 +346,10 @@ function drawRobotSprite(robot) {
   context.fillRect(origin.x + 11, origin.y + 11, 22, 22);
   context.fillStyle = PALETTE.robotDark;
   context.fillRect(origin.x + 14, origin.y + 5, 16, 6);
+  context.fillRect(origin.x + 21, origin.y + 1, 2, 5);
+  context.fillStyle = PALETTE.hazard;
+  context.fillRect(origin.x + 20, origin.y, 4, 3);
+  context.fillStyle = PALETTE.robotDark;
   context.fillRect(origin.x + 9, origin.y + 34, 7, 4);
   context.fillRect(origin.x + 29, origin.y + 34, 7, 4);
   context.fillStyle = PALETTE.background;
@@ -298,40 +357,86 @@ function drawRobotSprite(robot) {
   context.fillRect(origin.x + 24, origin.y + 17, 5, 5);
   context.fillStyle = PALETTE.pending;
   context.fillRect(origin.x + 18, origin.y + 27, 9, 3);
+  context.fillStyle = PALETTE.robotDark;
+  context.fillRect(origin.x + 14, origin.y + 24, 16, 2);
+  context.fillStyle = PALETTE.hazard;
+  context.fillRect(origin.x + 16, origin.y + 25, 3, 1);
+  context.fillRect(origin.x + 25, origin.y + 25, 3, 1);
   context.strokeStyle = PALETTE.pending;
   context.strokeRect(origin.x + 10.5, origin.y + 10.5, 23, 23);
   if (robot.inventory_item_id !== null) drawCrateSprite(origin.x + 12, origin.y - 1, PALETTE.carried, robot.inventory_item_id.slice(-2));
 }
+function drawMovementPip(position, index, count) {
+  const point = cellOrigin(position);
+  context.save();
+  context.globalAlpha = .2 + (index + 1) / (count * 7);
+  context.fillStyle = PALETTE.trail;
+  context.fillRect(point.x + 14, point.y + 14, 16, 16);
+  context.fillStyle = PALETTE.pending;
+  context.fillRect(point.x + 20, point.y + 20, 4, 4);
+  context.restore();
+}
 function drawPathTrail(world, frame) {
   if (frame === null) return;
   const positions = [];
-  const seenPositions = new Set();
+  let lastPositionKey = null;
   for (let index = selectedFrame; index >= 0 && positions.length < PATH_TRAIL_LENGTH; index -= 1) {
     const position = projection.frames[index].state_after.robot.position;
     const positionKey = position.join(",");
-    if (seenPositions.has(positionKey)) continue;
-    seenPositions.add(positionKey);
+    if (positionKey === lastPositionKey) continue;
+    lastPositionKey = positionKey;
     positions.unshift(position);
   }
   if (positions.length === 0) return;
+  positions.forEach((position, index) => drawMovementPip(position, index, positions.length));
+}
+function moveTarget(position, direction) {
+  const delta = { north: [0, -1], east: [1, 0], south: [0, 1], west: [-1, 0] }[direction];
+  if (!delta) return null;
+  const target = [position[0] + delta[0], position[1] + delta[1]];
+  return target[0] < 0 || target[1] < 0 || target[0] >= GRID_SIZE || target[1] >= GRID_SIZE ? null : target;
+}
+function safeTargetForFrame(frame, world) {
+  const call = frame === null ? null : frame.tool_call;
+  if (call === null || call.tool === null || call.arguments === null) return null;
+  if (call.tool === "move") {
+    const position = moveTarget(frame.state_before.robot.position, call.arguments.direction);
+    return position === null ? null : { position: position, label: "MOVE", color: PALETTE.trail };
+  }
+  if (call.tool === "pick") {
+    const shelf = world.shelves.find((candidate) => candidate.shelf_id === call.arguments.shelf_id);
+    return shelf === undefined ? null : { position: shelf.position, label: "PICK", color: PALETTE.item };
+  }
+  if (call.tool === "place") {
+    return { position: world.robot.base_position, label: "PLACE", color: PALETTE.completed };
+  }
+  return null;
+}
+function drawTargetCue(target) {
+  if (target === null) return;
+  const point = cellOrigin(target.position);
+  const inset = (CELL_SIZE - TARGET_CUE_SIZE) / 2;
+  const left = point.x + inset;
+  const top = point.y + inset;
+  const right = left + TARGET_CUE_SIZE;
+  const bottom = top + TARGET_CUE_SIZE;
   context.save();
-  context.strokeStyle = PALETTE.trail;
-  context.fillStyle = PALETTE.trail;
-  context.lineWidth = 3;
-  context.globalAlpha = .24;
+  context.strokeStyle = target.color;
+  context.lineWidth = 2;
   context.beginPath();
-  positions.forEach((position, index) => {
-    const point = cellOrigin(position);
-    const x = point.x + CELL_SIZE / 2;
-    const y = point.y + CELL_SIZE / 2;
-    if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
-  });
+  context.moveTo(left, top + TARGET_CUE_ARM);
+  context.lineTo(left, top);
+  context.lineTo(left + TARGET_CUE_ARM, top);
+  context.moveTo(right - TARGET_CUE_ARM, top);
+  context.lineTo(right, top);
+  context.lineTo(right, top + TARGET_CUE_ARM);
+  context.moveTo(right, bottom - TARGET_CUE_ARM);
+  context.lineTo(right, bottom);
+  context.lineTo(right - TARGET_CUE_ARM, bottom);
+  context.moveTo(left + TARGET_CUE_ARM, bottom);
+  context.lineTo(left, bottom);
+  context.lineTo(left, bottom - TARGET_CUE_ARM);
   context.stroke();
-  positions.forEach((position, index) => {
-    const point = cellOrigin(position);
-    context.globalAlpha = .1 + index / (positions.length * 9);
-    context.fillRect(point.x + 17, point.y + 17, 10, 10);
-  });
   context.restore();
 }
 const CLASSIFICATION_STATUS = Object.freeze({
@@ -347,10 +452,40 @@ function classificationStatus(frame) {
   if (frame === null) return { label: "INITIAL", color: PALETTE.muted };
   return CLASSIFICATION_STATUS[frame.classification] || { label: "UNKNOWN", color: PALETTE.muted };
 }
-function normalizedActionText(frame) {
-  if (frame === null) return "none";
+function compactActionId(value, prefix) {
+  const text = valueText(value, "?");
+  const marker = prefix + "-";
+  return text.startsWith(marker) ? prefix.charAt(0).toUpperCase() + text.slice(marker.length) : text;
+}
+function actionArgumentText(frame) {
+  if (frame === null || frame.tool_call === null) return "none";
   const call = frame.tool_call;
-  return valueText(call.tool, "none") + " " + argumentsText(call.arguments);
+  if (call.tool === null || call.arguments === null) return valueText(call.tool, "none");
+  switch (call.tool) {
+    case "move":
+      return "MOVE " + valueText(call.arguments.direction, "?").toUpperCase();
+    case "pick":
+      return "PICK " + compactActionId(call.arguments.shelf_id, "shelf") + " / " + compactActionId(call.arguments.item_id, "item");
+    case "place":
+      return "PLACE " + compactActionId(call.arguments.order_id, "order");
+    default:
+      return valueText(call.tool, "none");
+  }
+}
+function normalizedActionText(frame) { return actionArgumentText(frame); }
+function subeventStatus(frame) {
+  if (frame === null) return [];
+  return frame.subevents.map((event) => ({
+    label: event.kind === "fault_injected" ? "FAULT" : event.kind === "internal_retry" ? "RETRY" : "SUBEVENT",
+    color: event.kind === "fault_injected" ? PALETTE.fault : PALETTE.retry
+  }));
+}
+function drawHudSubevents(frame) {
+  subeventStatus(frame).slice(0, 2).forEach((event, index) => {
+    const x = HUD_X + 82 + index * 30;
+    if (event.label === "FAULT") drawText("FAULT", x, 124, event.color);
+    else drawText("RETRY", x, 124, event.color);
+  });
 }
 function drawWorld(world, frame) {
   drawFloor();
@@ -358,12 +493,12 @@ function drawWorld(world, frame) {
   drawDepotSprite(world.robot.base_position);
   for (const shelf of world.shelves) drawShelfSprite(shelf);
   drawRobotSprite(world.robot);
+  drawTargetCue(safeTargetForFrame(frame, world));
 }
 function drawHud(world, frame) {
   const result = projection.terminal_result;
   const completed = world.completed_orders.length;
   const total = world.orders.length;
-  const action = frame === null ? { tool: null, arguments: null } : frame.tool_call;
   const status = classificationStatus(frame);
   context.fillStyle = PALETTE.hud;
   context.fillRect(HUD_X, 0, canvas.width - HUD_X, canvas.height);
@@ -382,9 +517,10 @@ function drawHud(world, frame) {
   context.font = "bold 7px ui-monospace, monospace";
   drawText("ACTION", HUD_X + 12, 100, PALETTE.warm);
   drawText("STATUS", HUD_X + 82, 100, status.color);
-  context.font = "7px ui-monospace, monospace";
-  drawText(valueText(action.tool, "none"), HUD_X + 12, 112, PALETTE.pending);
+  context.font = "6px ui-monospace, monospace";
+  drawText(actionArgumentText(frame), HUD_X + 12, 112, PALETTE.pending);
   drawText(status.label, HUD_X + 82, 112, status.color);
+  drawHudSubevents(frame);
   drawText("ORDER QUEUE", HUD_X + 12, 124, PALETTE.warm);
   context.font = "8px ui-monospace, monospace";
   for (let index = 0; index < ORDER_SLOT_COUNT; index += 1) {
