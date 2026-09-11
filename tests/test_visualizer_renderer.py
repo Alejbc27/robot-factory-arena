@@ -76,6 +76,33 @@ class VisualizerRendererTests(unittest.TestCase):
             with self.subTest(marker=marker):
                     self.assertIn(marker, html)
 
+    def test_renderer_uses_procedural_warehouse_art_and_safe_frame_feedback(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        html = render_visualizer(self.projection).decode("utf-8")
+        for marker in (
+            "function drawFloor",
+            "function drawDepotSprite",
+            "function drawShelfSprite",
+            "function drawCrateSprite",
+            "function drawRobotSprite",
+            "function drawPathTrail",
+            "const PATH_TRAIL_LENGTH = 6;",
+            "function drawFrameFeedback",
+            'feedback.label = "COMMITTED"',
+            'feedback.label = "REJECTED"',
+            'feedback.label = "FAULT"',
+            'feedback.label = "RETRY"',
+            "projection.frames.slice",
+            "state_after.robot.position",
+            "frame.classification",
+            "frame.subevents",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, html)
+        self.assertIn("drawPathTrail(world, frame)", html)
+        self.assertIn("drawFrameFeedback(frame)", html)
+
     def test_renderer_uses_fixed_ten_order_grid_before_fixed_sections(self):
         from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
 

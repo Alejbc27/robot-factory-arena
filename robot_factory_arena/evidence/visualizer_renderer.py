@@ -50,7 +50,9 @@ canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; 
 .legend-swatch { width: 9px; height: 9px; border: 1px solid rgba(255,255,255,.32); }
 .legend-robot { background: var(--accent); }
 .legend-shelf { background: #8f5b34; }
+.legend-depot { background: #7aa2a8; }
 .legend-cargo { background: #f72585; }
+.legend-trail { background: #4cc9f0; }
 .controls, .status-panel, .terminal-panel, .details-panel {
   border: 1px solid var(--line);
   background: rgba(22, 35, 43, .92);
@@ -106,7 +108,9 @@ button:hover, button:focus-visible, select:focus-visible { border-color: var(--a
 <div class="scene-legend" aria-label="Arena legend">
 <span class="legend-key"><i class="legend-swatch legend-robot"></i>robot</span>
 <span class="legend-key"><i class="legend-swatch legend-shelf"></i>shelf</span>
+<span class="legend-key"><i class="legend-swatch legend-depot"></i>depot</span>
 <span class="legend-key"><i class="legend-swatch legend-cargo"></i>inventory</span>
+<span class="legend-key"><i class="legend-swatch legend-trail"></i>path trail</span>
 </div>
 </section>
 <div class="controls" aria-label="Timeline controls">
@@ -151,11 +155,15 @@ const ORDER_SLOT_GAP = 4;
 const ROBOT_SECTION_Y = 304;
 const VERIFIER_SECTION_Y = 410;
 const NOMINAL_FRAME_MS = 500;
+const PATH_TRAIL_LENGTH = 6;
 const PALETTE = {
-  background: "#101820", floor: "#203040", grid: "#2d4059", shelf: "#8f5b34",
-  emptyShelf: "#5e432f", item: "#f2c14e", robot: "#4cc9f0", carried: "#f72585",
-  pending: "#f6f7eb", completed: "#80ed99", rejection: "#ffca3a", fault: "#ff595e",
-  warm: "#f2c14e", hud: "#101a20", hudLine: "#38515f", muted: "#91a4ad"
+  background: "#101820", floor: "#203040", floorAlt: "#243746",
+  lane: "#6f7d72", laneEdge: "#40554f", grid: "#2d4059", shelf: "#8f5b34",
+  shelfDark: "#5e432f", shelfHighlight: "#ba7a46", item: "#f2c14e", crateDark: "#8d6825",
+  robot: "#4cc9f0", robotDark: "#166078", carried: "#f72585", depot: "#7aa2a8",
+  depotDark: "#35535c", pending: "#f6f7eb", completed: "#80ed99", rejection: "#ffca3a",
+  fault: "#ff595e", retry: "#f2c14e", trail: "#4cc9f0", warm: "#f2c14e",
+  hud: "#101a20", hudLine: "#38515f", muted: "#91a4ad"
 };
 const hex = document.getElementById("visualizer-projection-hex").textContent;
 const bytes = new Uint8Array(hex.length / 2);
@@ -186,11 +194,30 @@ function subeventText(event) {
 }
 function worldForFrame() { return projection.frames.length ? projection.frames[selectedFrame].state_after : projection.initial_world; }
 function drawText(text, x, y, color) { context.fillStyle = color || PALETTE.pending; context.fillText(String(text), x, y); }
-function drawWorld(world) {
+function cellOrigin(position) {
+  return { x: ORIGIN_X + position[0] * CELL_SIZE, y: ORIGIN_Y + position[1] * CELL_SIZE };
+}
+function drawFloor() {
   context.fillStyle = PALETTE.background;
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.fillStyle = PALETTE.floor;
   context.fillRect(ORIGIN_X, ORIGIN_Y, GRID_SIZE * CELL_SIZE, GRID_SIZE * CELL_SIZE);
+  for (let row = 0; row < GRID_SIZE; row += 1) {
+    for (let column = 0; column < GRID_SIZE; column += 1) {
+      context.fillStyle = (row + column) % 2 === 0 ? PALETTE.floor : PALETTE.floorAlt;
+      context.fillRect(ORIGIN_X + column * CELL_SIZE + 1, ORIGIN_Y + row * CELL_SIZE + 1, CELL_SIZE - 2, CELL_SIZE - 2);
+    }
+  }
+  context.fillStyle = PALETTE.laneEdge;
+  for (let row = 2; row < GRID_SIZE; row += 3) {
+    const laneY = ORIGIN_Y + row * CELL_SIZE + Math.floor(CELL_SIZE / 2) - 1;
+    context.fillRect(ORIGIN_X + 4, laneY, GRID_SIZE * CELL_SIZE - 8, 3);
+    context.fillStyle = PALETTE.lane;
+    for (let segment = 0; segment < GRID_SIZE; segment += 2) {
+      context.fillRect(ORIGIN_X + segment * CELL_SIZE + 9, laneY, CELL_SIZE - 18, 1);
+    }
+    context.fillStyle = PALETTE.laneEdge;
+  }
   context.strokeStyle = PALETTE.grid;
   context.lineWidth = 1;
   for (let line = 0; line <= GRID_SIZE; line += 1) {
@@ -202,41 +229,141 @@ function drawWorld(world) {
     drawText(String(index), ORIGIN_X + index * CELL_SIZE + 4, ORIGIN_Y - 6, PALETTE.muted);
     drawText(String(index), ORIGIN_X - 12, ORIGIN_Y + index * CELL_SIZE + 13, PALETTE.muted);
   }
-  for (const shelf of world.shelves) {
-    const x = ORIGIN_X + shelf.position[0] * CELL_SIZE;
-    const y = ORIGIN_Y + shelf.position[1] * CELL_SIZE;
-    context.fillStyle = "rgba(0, 0, 0, .25)";
-    context.fillRect(x + 6, y + 7, CELL_SIZE - 10, CELL_SIZE - 8);
-    context.fillStyle = shelf.item_id === null ? PALETTE.emptyShelf : PALETTE.shelf;
-    context.fillRect(x + 4, y + 4, CELL_SIZE - 8, CELL_SIZE - 8);
-    context.strokeStyle = "rgba(255, 255, 255, .16)";
-    context.strokeRect(x + 4.5, y + 4.5, CELL_SIZE - 9, CELL_SIZE - 9);
-    context.font = "9px ui-monospace, monospace";
-    drawText(shelf.shelf_id.slice(-2), x + 7, y + CELL_SIZE - 8, PALETTE.pending);
-    if (shelf.item_id !== null) {
-      context.fillStyle = PALETTE.item;
-      context.fillRect(x + 15, y + 13, 14, 14);
-      context.fillStyle = "rgba(255, 255, 255, .42)";
-      context.fillRect(x + 17, y + 15, 4, 4);
-    }
+}
+function drawCrateSprite(x, y, color, label) {
+  context.fillStyle = "rgba(0, 0, 0, .28)";
+  context.fillRect(x + 3, y + 4, 21, 20);
+  context.fillStyle = PALETTE.crateDark;
+  context.fillRect(x + 2, y + 2, 21, 20);
+  context.fillStyle = color;
+  context.fillRect(x + 4, y + 4, 17, 16);
+  context.strokeStyle = PALETTE.crateDark;
+  context.strokeRect(x + 4.5, y + 4.5, 16, 15);
+  context.beginPath(); context.moveTo(x + 5, y + 5); context.lineTo(x + 20, y + 19); context.stroke();
+  context.beginPath(); context.moveTo(x + 20, y + 5); context.lineTo(x + 5, y + 19); context.stroke();
+  if (label) {
+    context.font = "bold 7px ui-monospace, monospace";
+    drawText(label, x + 7, y + 15, PALETTE.pending);
   }
-  const robot = world.robot;
-  const robotX = ORIGIN_X + robot.position[0] * CELL_SIZE;
-  const robotY = ORIGIN_Y + robot.position[1] * CELL_SIZE;
-  context.fillStyle = "rgba(76, 201, 240, .18)";
-  context.fillRect(robotX + 5, robotY + 5, CELL_SIZE - 10, CELL_SIZE - 10);
+}
+function drawDepotSprite(position) {
+  const origin = cellOrigin(position);
+  context.fillStyle = "rgba(0, 0, 0, .28)";
+  context.fillRect(origin.x + 5, origin.y + 7, CELL_SIZE - 9, CELL_SIZE - 8);
+  context.fillStyle = PALETTE.depotDark;
+  context.fillRect(origin.x + 4, origin.y + 4, CELL_SIZE - 8, CELL_SIZE - 8);
+  context.fillStyle = PALETTE.depot;
+  context.fillRect(origin.x + 8, origin.y + 8, CELL_SIZE - 16, CELL_SIZE - 16);
+  context.fillStyle = PALETTE.depotDark;
+  context.fillRect(origin.x + 12, origin.y + 13, CELL_SIZE - 24, 3);
+  context.fillRect(origin.x + 12, origin.y + 22, CELL_SIZE - 24, 3);
+  context.strokeStyle = PALETTE.pending;
+  context.strokeRect(origin.x + 7.5, origin.y + 7.5, CELL_SIZE - 15, CELL_SIZE - 15);
+  context.font = "bold 8px ui-monospace, monospace";
+  drawText("D", origin.x + 18, origin.y + 35, PALETTE.pending);
+}
+function drawShelfSprite(shelf) {
+  const origin = cellOrigin(shelf.position);
+  context.fillStyle = "rgba(0, 0, 0, .3)";
+  context.fillRect(origin.x + 6, origin.y + 8, CELL_SIZE - 10, CELL_SIZE - 8);
+  context.fillStyle = PALETTE.shelfDark;
+  context.fillRect(origin.x + 4, origin.y + 4, CELL_SIZE - 8, CELL_SIZE - 8);
+  context.fillStyle = shelf.item_id === null ? PALETTE.shelfDark : PALETTE.shelf;
+  context.fillRect(origin.x + 7, origin.y + 7, CELL_SIZE - 14, CELL_SIZE - 14);
+  context.fillStyle = PALETTE.shelfHighlight;
+  context.fillRect(origin.x + 8, origin.y + 8, CELL_SIZE - 16, 3);
+  context.fillStyle = PALETTE.shelfDark;
+  context.fillRect(origin.x + 8, origin.y + 18, CELL_SIZE - 16, 3);
+  context.fillRect(origin.x + 8, origin.y + 29, CELL_SIZE - 16, 3);
+  context.strokeStyle = "rgba(255, 255, 255, .2)";
+  context.strokeRect(origin.x + 4.5, origin.y + 4.5, CELL_SIZE - 9, CELL_SIZE - 9);
+  context.font = "9px ui-monospace, monospace";
+  drawText(shelf.shelf_id.slice(-2), origin.x + 7, origin.y + CELL_SIZE - 5, PALETTE.pending);
+  if (shelf.item_id !== null) drawCrateSprite(origin.x + 11, origin.y + 10, PALETTE.item, shelf.item_id.slice(-2));
+}
+function drawRobotSprite(robot) {
+  const origin = cellOrigin(robot.position);
+  context.fillStyle = "rgba(0, 0, 0, .3)";
+  context.fillRect(origin.x + 6, origin.y + 8, CELL_SIZE - 10, CELL_SIZE - 8);
+  context.fillStyle = PALETTE.robotDark;
+  context.fillRect(origin.x + 8, origin.y + 9, 28, 28);
   context.fillStyle = PALETTE.robot;
-  context.fillRect(robotX + 9, robotY + 9, 26, 26);
-  context.fillStyle = "#0d252d";
-  context.fillRect(robotX + 15, robotY + 16, 5, 5);
-  context.fillRect(robotX + 24, robotY + 16, 5, 5);
-  context.fillRect(robotX + 18, robotY + 27, 9, 3);
-  if (robot.inventory_item_id !== null) {
-    context.fillStyle = PALETTE.carried;
-    context.fillRect(robotX + 15, robotY + 2, 14, 9);
-    context.strokeStyle = PALETTE.pending;
-    context.strokeRect(robotX + 15.5, robotY + 2.5, 13, 8);
+  context.fillRect(origin.x + 11, origin.y + 11, 22, 22);
+  context.fillStyle = PALETTE.robotDark;
+  context.fillRect(origin.x + 14, origin.y + 5, 16, 6);
+  context.fillRect(origin.x + 9, origin.y + 34, 7, 4);
+  context.fillRect(origin.x + 29, origin.y + 34, 7, 4);
+  context.fillStyle = PALETTE.background;
+  context.fillRect(origin.x + 15, origin.y + 17, 5, 5);
+  context.fillRect(origin.x + 24, origin.y + 17, 5, 5);
+  context.fillStyle = PALETTE.pending;
+  context.fillRect(origin.x + 18, origin.y + 27, 9, 3);
+  context.strokeStyle = PALETTE.pending;
+  context.strokeRect(origin.x + 10.5, origin.y + 10.5, 23, 23);
+  if (robot.inventory_item_id !== null) drawCrateSprite(origin.x + 12, origin.y - 1, PALETTE.carried, robot.inventory_item_id.slice(-2));
+}
+function drawPathTrail(world, frame) {
+  if (frame === null) return;
+  const trailFrames = projection.frames.slice(Math.max(0, selectedFrame - PATH_TRAIL_LENGTH + 1), selectedFrame + 1);
+  const positions = trailFrames.map((safeFrame) => safeFrame.state_after.robot.position);
+  if (positions.length === 0) return;
+  context.save();
+  context.strokeStyle = PALETTE.trail;
+  context.fillStyle = PALETTE.trail;
+  context.lineWidth = 3;
+  context.globalAlpha = .24;
+  context.beginPath();
+  positions.forEach((position, index) => {
+    const point = cellOrigin(position);
+    const x = point.x + CELL_SIZE / 2;
+    const y = point.y + CELL_SIZE / 2;
+    if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+  });
+  context.stroke();
+  positions.forEach((position, index) => {
+    const point = cellOrigin(position);
+    context.globalAlpha = .1 + index / (positions.length * 9);
+    context.fillRect(point.x + 17, point.y + 17, 10, 10);
+  });
+  context.restore();
+}
+function frameFeedback(frame) {
+  const feedback = { label: "FRAME", color: PALETTE.muted };
+  if (frame === null) return feedback;
+  const hasFault = frame.subevents.some((event) => event.kind === "fault_injected" || event.fault_id !== null);
+  const hasRetry = frame.subevents.some((event) => event.kind === "internal_retry" || event.status === "idempotent_replay");
+  if (hasFault) {
+    feedback.label = "FAULT";
+    feedback.color = PALETTE.fault;
+  } else if (hasRetry) {
+    feedback.label = "RETRY";
+    feedback.color = PALETTE.retry;
+  } else if (frame.classification === "committed") {
+    feedback.label = "COMMITTED";
+    feedback.color = PALETTE.completed;
+  } else if (frame.classification === "rejected" || frame.classification === "malformed") {
+    feedback.label = "REJECTED";
+    feedback.color = PALETTE.rejection;
   }
+  return feedback;
+}
+function drawFrameFeedback(frame) {
+  const feedback = frameFeedback(frame);
+  const x = ORIGIN_X + 8;
+  const y = ORIGIN_Y + 8;
+  context.fillStyle = "rgba(13, 21, 26, .9)";
+  context.fillRect(x, y, 124, 24);
+  context.strokeStyle = feedback.color;
+  context.strokeRect(x + .5, y + .5, 123, 23);
+  context.font = "bold 9px ui-monospace, monospace";
+  drawText("FRAME " + feedback.label, x + 8, y + 15, feedback.color);
+}
+function drawWorld(world, frame) {
+  drawFloor();
+  drawPathTrail(world, frame);
+  drawDepotSprite(world.robot.base_position);
+  for (const shelf of world.shelves) drawShelfSprite(shelf);
+  drawRobotSprite(world.robot);
 }
 function drawHud(world) {
   const result = projection.terminal_result;
@@ -314,10 +441,12 @@ function detailLines(frame, world) {
 function render() {
   const frame = projection.frames.length ? projection.frames[selectedFrame] : null;
   const world = worldForFrame();
-  drawWorld(world);
+  drawWorld(world, frame);
+  drawFrameFeedback(frame);
   drawHud(world);
   const result = projection.terminal_result;
-  statusText.textContent = "frame " + (frame ? frame.policy_step : "initial") + " · " + valueText(frame && frame.classification, "initial");
+  const feedback = frameFeedback(frame);
+  statusText.textContent = "frame " + (frame ? frame.policy_step : "initial") + " · " + valueText(frame && frame.classification, "initial") + " · visual cue " + feedback.label;
   missionProgress.textContent = world.completed_orders.length + " / " + world.orders.length + " orders";
   robotStatus.textContent = "(" + world.robot.position.join(", ") + ")";
   inventoryStatus.textContent = valueText(world.robot.inventory_item_id, "empty");
