@@ -203,6 +203,47 @@ class VisualizerRendererTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, html[html.index("function safeTargetForFrame"):html.index("function drawTargetCue")])
 
+    def test_renderer_draws_corner_target_cues_after_world_sprites(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        html = render_visualizer(self.projection).decode("utf-8")
+        world_body = html[html.index("function drawWorld"):html.index("function drawHud(world, frame)")]
+        target_call = "drawTargetCue(safeTargetForFrame(frame, world));"
+        target_index = world_body.index(target_call)
+        for sprite in ("drawDepotSprite", "drawShelfSprite", "drawRobotSprite"):
+            with self.subTest(sprite=sprite):
+                self.assertLess(world_body.index(sprite), target_index)
+
+        cue = html[html.index("function drawTargetCue"):html.index("const CLASSIFICATION_STATUS")]
+        for marker in (
+            "context.beginPath();",
+            "context.moveTo",
+            "context.lineTo",
+            "context.stroke();",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, cue)
+        self.assertIn("const TARGET_CUE_ARM = 8;", html)
+        for forbidden in ("strokeRect", "fillRect", "setLineDash", "drawText(target.label"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, cue)
+
+    def test_renderer_compacts_action_labels_for_hud_width(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        html = render_visualizer(self.projection).decode("utf-8")
+        for marker in (
+            "function compactActionId(value, prefix)",
+            "const marker = prefix + \"-\";",
+            "prefix.charAt(0).toUpperCase()",
+            'return "MOVE " + valueText(call.arguments.direction, "?").toUpperCase();',
+            'return "PICK " + compactActionId(call.arguments.shelf_id, "shelf") + " / " + compactActionId(call.arguments.item_id, "item");',
+            'return "PLACE " + compactActionId(call.arguments.order_id, "order");',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, html)
+        self.assertNotIn('valueText(call.arguments.shelf_id, "?") + "/"', html)
+
     def test_renderer_uses_fixed_ten_order_grid_before_fixed_sections(self):
         from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
 

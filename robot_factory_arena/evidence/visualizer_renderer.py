@@ -156,7 +156,8 @@ const ROBOT_SECTION_Y = 304;
 const VERIFIER_SECTION_Y = 410;
 const NOMINAL_FRAME_MS = 500;
 const PATH_TRAIL_LENGTH = 6;
-const TARGET_CUE_SIZE = 32;
+const TARGET_CUE_SIZE = 38;
+const TARGET_CUE_ARM = 8;
 const PALETTE = {
   background: "#101820", floor: "#203040", floorAlt: "#243746",
   floorSeam: "#2f4a55", metal: "#70858b", metalDark: "#3b5158", hazard: "#ffca3a",
@@ -415,15 +416,27 @@ function drawTargetCue(target) {
   if (target === null) return;
   const point = cellOrigin(target.position);
   const inset = (CELL_SIZE - TARGET_CUE_SIZE) / 2;
+  const left = point.x + inset;
+  const top = point.y + inset;
+  const right = left + TARGET_CUE_SIZE;
+  const bottom = top + TARGET_CUE_SIZE;
   context.save();
   context.strokeStyle = target.color;
-  context.fillStyle = target.color;
   context.lineWidth = 2;
-  context.setLineDash([4, 3]);
-  context.strokeRect(point.x + inset, point.y + inset, TARGET_CUE_SIZE, TARGET_CUE_SIZE);
-  context.setLineDash([]);
-  context.font = "bold 7px ui-monospace, monospace";
-  drawText(target.label, point.x + 8, point.y + 7, target.color);
+  context.beginPath();
+  context.moveTo(left, top + TARGET_CUE_ARM);
+  context.lineTo(left, top);
+  context.lineTo(left + TARGET_CUE_ARM, top);
+  context.moveTo(right - TARGET_CUE_ARM, top);
+  context.lineTo(right, top);
+  context.lineTo(right, top + TARGET_CUE_ARM);
+  context.moveTo(right, bottom - TARGET_CUE_ARM);
+  context.lineTo(right, bottom);
+  context.lineTo(right - TARGET_CUE_ARM, bottom);
+  context.moveTo(left + TARGET_CUE_ARM, bottom);
+  context.lineTo(left, bottom);
+  context.lineTo(left, bottom - TARGET_CUE_ARM);
+  context.stroke();
   context.restore();
 }
 const CLASSIFICATION_STATUS = Object.freeze({
@@ -439,17 +452,22 @@ function classificationStatus(frame) {
   if (frame === null) return { label: "INITIAL", color: PALETTE.muted };
   return CLASSIFICATION_STATUS[frame.classification] || { label: "UNKNOWN", color: PALETTE.muted };
 }
+function compactActionId(value, prefix) {
+  const text = valueText(value, "?");
+  const marker = prefix + "-";
+  return text.startsWith(marker) ? prefix.charAt(0).toUpperCase() + text.slice(marker.length) : text;
+}
 function actionArgumentText(frame) {
   if (frame === null || frame.tool_call === null) return "none";
   const call = frame.tool_call;
   if (call.tool === null || call.arguments === null) return valueText(call.tool, "none");
   switch (call.tool) {
     case "move":
-      return "MOVE " + valueText(call.arguments.direction, "?");
+      return "MOVE " + valueText(call.arguments.direction, "?").toUpperCase();
     case "pick":
-      return "PICK " + valueText(call.arguments.shelf_id, "?") + "/" + valueText(call.arguments.item_id, "?");
+      return "PICK " + compactActionId(call.arguments.shelf_id, "shelf") + " / " + compactActionId(call.arguments.item_id, "item");
     case "place":
-      return "PLACE " + valueText(call.arguments.order_id, "?");
+      return "PLACE " + compactActionId(call.arguments.order_id, "order");
     default:
       return valueText(call.tool, "none");
   }
@@ -472,10 +490,10 @@ function drawHudSubevents(frame) {
 function drawWorld(world, frame) {
   drawFloor();
   drawPathTrail(world, frame);
-  drawTargetCue(safeTargetForFrame(frame, world));
   drawDepotSprite(world.robot.base_position);
   for (const shelf of world.shelves) drawShelfSprite(shelf);
   drawRobotSprite(world.robot);
+  drawTargetCue(safeTargetForFrame(frame, world));
 }
 function drawHud(world, frame) {
   const result = projection.terminal_result;
