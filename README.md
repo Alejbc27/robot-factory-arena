@@ -48,6 +48,10 @@ Independent Verifier
 
 The core can run without an LLM or external service using the reference policies `greedy-v0` and `bounded-v0`. Provider-backed runs are optional integrations, not a reason to weaken the deterministic boundary.
 
+## v0 implementation boundary
+
+The v0 implementation is intentionally narrow: one seeded warehouse task, programmatic reference policies, a bounded local core, and evidence that can be replayed without a provider. It makes **no exactly-once** claim, no scientific REFUGIO reproduction claim, and no production-security claim. The detailed limitations are part of the design, not a footnote.
+
 ## Try the core
 
 Requirements: Python 3.14+ (the current test gate is exercised with Python 3.14.5). The core has no runtime dependencies.
