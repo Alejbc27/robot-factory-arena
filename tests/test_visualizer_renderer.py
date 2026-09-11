@@ -76,7 +76,7 @@ class VisualizerRendererTests(unittest.TestCase):
             with self.subTest(marker=marker):
                     self.assertIn(marker, html)
 
-    def test_renderer_uses_procedural_warehouse_art_and_safe_frame_feedback(self):
+    def test_renderer_uses_procedural_warehouse_art_and_hud_feedback(self):
         from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
 
         html = render_visualizer(self.projection).decode("utf-8")
@@ -88,12 +88,11 @@ class VisualizerRendererTests(unittest.TestCase):
             "function drawRobotSprite",
             "function drawPathTrail",
             "const PATH_TRAIL_LENGTH = 6;",
-            "function drawFrameFeedback",
-            'feedback.label = "COMMITTED"',
-            'feedback.label = "REJECTED"',
-            'feedback.label = "FAULT"',
-            'feedback.label = "RETRY"',
-            "projection.frames.slice",
+            "function classificationStatus",
+            "const CLASSIFICATION_STATUS = Object.freeze({",
+            "function normalizedActionText",
+            "function drawHud(world, frame)",
+            "projection.frames[index]",
             "state_after.robot.position",
             "frame.classification",
             "frame.subevents",
@@ -101,7 +100,45 @@ class VisualizerRendererTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, html)
         self.assertIn("drawPathTrail(world, frame)", html)
-        self.assertIn("drawFrameFeedback(frame)", html)
+        self.assertIn("drawHud(world, frame)", html)
+        self.assertNotIn("drawFrameFeedback(frame)", html)
+
+    def test_renderer_moves_feedback_from_arena_badge_to_hud_action_and_status(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        html = render_visualizer(self.projection).decode("utf-8")
+        self.assertNotIn("function drawFrameFeedback", html)
+        self.assertNotIn("drawFrameFeedback(frame)", html)
+        self.assertIn("function drawHud(world, frame)", html)
+        self.assertIn('drawText("ACTION"', html)
+        self.assertIn('drawText("STATUS"', html)
+        self.assertIn("normalizedActionText(frame)", html)
+        self.assertIn("classificationStatus(frame)", html)
+        for classification in (
+            "committed",
+            "rejected",
+            "malformed",
+            "unsupported",
+            "invalid",
+            "unauthorized",
+            "idempotent_replay",
+        ):
+            with self.subTest(classification=classification):
+                self.assertIn(classification + ":", html)
+
+    def test_renderer_preserves_six_distinct_positions_across_repeated_steps(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        html = render_visualizer(self.projection).decode("utf-8")
+        self.assertIn("const seenPositions = new Set();", html)
+        self.assertIn(
+            "for (let index = selectedFrame; index >= 0 && positions.length < PATH_TRAIL_LENGTH; index -= 1)",
+            html,
+        )
+        self.assertIn("seenPositions.has(positionKey)", html)
+        self.assertIn("seenPositions.add(positionKey)", html)
+        self.assertIn("positions.unshift(position)", html)
+        self.assertNotIn("projection.frames.slice(Math.max", html)
 
     def test_renderer_uses_fixed_ten_order_grid_before_fixed_sections(self):
         from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
