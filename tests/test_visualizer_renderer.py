@@ -35,11 +35,11 @@ class VisualizerRendererTests(unittest.TestCase):
 
         html = render_visualizer(self.projection).decode("utf-8")
         for marker in (
-            '<canvas id="visualizer-canvas" width="640" height="480">',
+            '<canvas id="visualizer-canvas" width="640" height="480" aria-label="2D mission replay arena">',
             "const GRID_SIZE = 10;",
-            "const CELL_SIZE = 40;",
-            "const ORIGIN_X = 16;",
-            "const ORIGIN_Y = 16;",
+            "const CELL_SIZE = 44;",
+            "const ORIGIN_X = 20;",
+            "const ORIGIN_Y = 20;",
             "#101820",
             "#203040",
             "#2d4059",
@@ -74,7 +74,80 @@ class VisualizerRendererTests(unittest.TestCase):
             "policy budget",
         ):
             with self.subTest(marker=marker):
+                    self.assertIn(marker, html)
+
+    def test_renderer_uses_fixed_ten_order_grid_before_fixed_sections(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        html = render_visualizer(self.projection).decode("utf-8")
+        for marker in (
+            "const ORDER_SLOT_COUNT = 10;",
+            "const ORDER_GRID_COLUMNS = 2;",
+            "const ORDER_GRID_ROWS = 5;",
+            "const ORDER_GRID_Y = 128;",
+            "const ORDER_SLOT_WIDTH = 64;",
+            "const ORDER_SLOT_HEIGHT = 28;",
+            "const ORDER_SLOT_GAP = 4;",
+            "const ROBOT_SECTION_Y = 304;",
+            "const VERIFIER_SECTION_Y = 410;",
+            "for (let index = 0; index < ORDER_SLOT_COUNT; index += 1)",
+            "const column = index % ORDER_GRID_COLUMNS;",
+            "const row = Math.floor(index / ORDER_GRID_COLUMNS);",
+            "const slotY = ORDER_GRID_Y + row * (ORDER_SLOT_HEIGHT + ORDER_SLOT_GAP);",
+            "context.fillRect(slotX, slotY, ORDER_SLOT_WIDTH, ORDER_SLOT_HEIGHT);",
+            "world.orders[index] || null",
+        ):
+            with self.subTest(marker=marker):
                 self.assertIn(marker, html)
+        self.assertNotIn("let orderY = 135", html)
+        self.assertNotIn("orderY += 36", html)
+
+        def constant(name):
+            match = re.search(rf"const {name} = (\d+);", html)
+            self.assertIsNotNone(match, name)
+            return int(match.group(1))
+
+        slot_count = constant("ORDER_SLOT_COUNT")
+        columns = constant("ORDER_GRID_COLUMNS")
+        rows = constant("ORDER_GRID_ROWS")
+        grid_y = constant("ORDER_GRID_Y")
+        slot_height = constant("ORDER_SLOT_HEIGHT")
+        slot_gap = constant("ORDER_SLOT_GAP")
+        robot_section_y = constant("ROBOT_SECTION_Y")
+        verifier_section_y = constant("VERIFIER_SECTION_Y")
+        grid_bottom = grid_y + rows * slot_height + (rows - 1) * slot_gap
+        self.assertEqual(slot_count, columns * rows)
+        self.assertEqual(slot_count, 10)
+        self.assertEqual(grid_bottom, 284)
+        self.assertLess(grid_bottom, robot_section_y)
+        self.assertLess(robot_section_y, verifier_section_y)
+
+    def test_renderer_makes_arena_primary_and_details_collapsible(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        html = render_visualizer(self.projection).decode("utf-8")
+        for marker in (
+            'class="visualizer-shell"',
+            'aria-label="2D mission replay arena"',
+            'id="mission-progress"',
+            '<details id="frame-details-panel" class="details-panel">',
+            '<summary>Frame evidence',
+            '<pre id="frame-details"',
+            'frameDetails.textContent = detailLines(frame, world).join("\\n")',
+            'detailsSummary.textContent',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, html)
+        self.assertNotIn("drawText(lines[index]", html)
+
+    def test_renderer_keeps_verifier_owned_result_in_the_visible_overview(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        html = render_visualizer(self.projection).decode("utf-8")
+        self.assertIn('class="terminal-panel overview-panel"', html)
+        self.assertIn('terminalText.textContent =', html)
+        self.assertIn("Verifier-owned score", html)
+        self.assertIn("Verifier-owned outcome", html)
 
     def test_renderer_is_projection_only_and_has_no_external_or_raw_evidence_access(
         self,
