@@ -52,6 +52,12 @@ python3 -m robot_factory_arena.cli replay artifacts/runs/<logical_run_id>/<execu
 
 Replay reads only the run directory's `replay-input.json` and `receipt.json`; it never imports or calls a policy or provider, and it reports whether the final-state digest, verified score, and outcome match the receipt. Exit codes: 0 success/match, 1 evidence disagreement (rerun bytes differ, replay mismatch, invalid verification), 2 usage or artifact errors.
 
+### Verified offline visualizer
+
+A successfully verified run may also release `visualizer.html` beside `report.html`. Open that sibling file directly in a browser (including with a `file:` URL): it is self-contained, uses no network, server, external asset, provider, or file picker. Its controls are **Play**, **Pause**, **Step forward**, and the fixed `0.5x`/`1x`/`2x`/`4x` speeds. One timeline frame represents one consumed policy step; response-loss retries remain ordered subevents of that frame rather than extra frames.
+
+The visualizer is a deterministic-byte projection of verified logical inputs, not a semantic artifact or evidence authority. Equal logical runs produce equal HTML bytes, but this guarantee does not cover browser-specific pixels or playback state. It displays verifier-owned score/outcome claims and cannot verify, replay, score, or reclassify a run. A visualizer-generation failure is explicitly non-authoritative: the receipt, report, replay result, core digests, score, and outcome stay unchanged. Rerun reports visualizer agreement separately from core agreement — an unavailable optional file is reported as such and never fails core deterministic agreement — and replay remains valid if the optional file is deleted. v1 intentionally provides **no diagnostic visualizer** for invalid or unresolved evidence.
+
 The response-loss demonstrator can be declared on `run`/`rerun` with `--fault-step 8 --fault-intent place-order-00`; both constants are predeclared — no policy is ever consulted to resolve a fault target.
 
 Each run directory contains `config.json`, `task.json`, `fault_tape.json` (or the explicit canonical `null` artifact), `trace.jsonl`, `final_state.json`, `operation-log.json`, `replay-input.json`, the verified `receipt.json`, `replay-result.json`, the static `report.html`, and the `boundaries/` commit-proof files. The `boundaries/` files are part of the run evidence, not optional: removing them flips verification to `unresolved_outcome`. Copy a run directory wholesale when moving it offline.
@@ -96,6 +102,10 @@ What the harness guarantees, and what it does not:
 - **Honest logs** — binding precision note: "Checkpoint/logs give SEQUENCE/CONTINUITY validation and replay revalidation — NOT general tamper-evidence/authenticity: a valid-to-valid external substitution of content is not cryptographically bound."
 - **Internal identity consistency** — binding precision note: "First-bind-wins for prompt_digest/tool_schema_digest is INTERNAL consistency after the first run — not a pre-frozen tournament expectation recorded before the tournament."
 - **No composite score** and no scientific/security/exactly-once claims; replay never calls an LLM.
+
+## Observability (optional — self-hosted Langfuse)
+
+`observability/` is a downstream-only tracing projection: a pinned Langfuse v3.114.0 Compose stack (only the UI port 3000 published, all credentials environment-only) plus a stdlib-only one-shot exporter that submits sealed run evidence deterministically. Sealed artifacts remain the only authority — removing the stack cannot alter source evidence. Exact pins, official provenance (researched 2026-09-08), environment variable names, start/teardown, and the optional gated smoke live in `docs/observability.md`.
 
 ## Roadmap
 
