@@ -1048,6 +1048,32 @@ class VisualizerProjectionRemediationTests(unittest.TestCase):
                 ):
                     validate_projection(rebind(value))
 
+    def test_llm_digest_aliases_must_agree(self):
+        for name in (
+            "strategy_context_digest",
+            "tool_schema_digest",
+            "prompt_digest",
+        ):
+            with self.subTest(digest=name):
+                value = projection()
+                value["logical_run"][name] = "sha256:" + "a" * 64
+                with self.assertRaisesRegex(ValueError, name + " digest aliases disagree"):
+                    validate_projection(rebind(value))
+
+    def test_source_bound_digests_are_grammar_only_until_build(self):
+        # These claims are bound to verified source artifacts by
+        # build_projection, not by the source-opaque standalone validator.
+        for name in (
+            "config_digest",
+            "task_digest",
+            "trace_digest",
+            "fault_tape_digest",
+        ):
+            with self.subTest(digest=name):
+                value = projection()
+                value["semantic_digests"][name] = "sha256:" + "f" * 64
+                validate_projection(rebind(value))
+
     def test_consistent_world_mutation_with_recomputed_state_digests_stays_valid(
         self,
     ):
