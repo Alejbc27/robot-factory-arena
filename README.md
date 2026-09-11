@@ -1,141 +1,184 @@
 # Robot Factory & Arena
 
-A deterministic, reproducible agent-evaluation system: a **factory** that assembles bounded agent workers (authorized tools, QC, budgets, release gate) and an **arena** that measures how different control strategies — human-directed, autonomous, swarm — attack the same optimization task. Inspired by REFUGIO Madrid (2026), where autonomous frontier agents on that task tended to plateau while human+AI teams advanced through shared discoveries; later models recovered some of the same exploits independently. This project tests that hypothesis with its own instrumentation — measured, not asserted.
+## Deterministic evidence for comparing agent strategies
 
-**Status: v0 implemented.** The deterministic evidence-chain core (SDD batches B1–B6) is complete and green under the one-command gate below; no live providers yet. The charter sections of this document are unchanged.
+Robot Factory & Arena runs bounded agent strategies against the **same seeded task**, then produces evidence that can be replayed and independently verified. It separates what an agent proposes from what the deterministic system executes—and separates both from the score a verifier is allowed to report.
+
+> **In one line:** explore fairly, execute deterministically, seal the evidence, verify independently.
+
+**Current state:** the v0 deterministic evidence-chain core is implemented and stdlib-only. Optional provider adapters, the R1/R2/R3 tournament harness, and self-hosted Langfuse projection are documented separately. This page is the portfolio map; implementation/spec documents and tests define the detailed contracts.
 
 ![Robot Factory and Arena system overview](docs/architecture/system-overview.svg)
 
 See the [human semantic architecture reference](docs/architecture/system-overview.md) for layer boundaries, authority, and connector semantics. The diagram is documentation, not a new runtime source of truth.
 
-## What I want to achieve
+## Why this exists
 
-| Goal | Statement |
-|------|-----------|
-| **Production claim** | A small but complete agent production loop — assembly, authorized tools, QC/anti-cheat, cost budget, release gate — that is observable and measured end-to-end. |
-| **Experiment claim** | A controlled local experiment on the REFUGIO question: does shared memory of discoveries close the local-optima gap for autonomous agents? Reported with separate, honest signals. |
-| **Engineering claim** | Deterministic, replayable, cheap, explainable. Every run leaves a trace, a receipt, and a report that can be re-verified from a seed. |
+Agent evaluations become difficult to trust when the task changes between runs, context leaks across conditions, agents report their own success, or observability is mistaken for authority. This project makes those boundaries explicit:
 
-## MVP scope (v0 — deterministic core, stdlib-first)
+- **Same challenge:** a seed creates the task and initial world state.
+- **Same execution contract:** budgets, grants, tools, and transition rules are fixed by the core.
+- **Honest result:** sealed artifacts feed an independent verifier; policy output and stdout do not set the official score.
+- **Useful comparison:** R1 human-directed, R2 autonomous, and R3 shared-discovery experiments can search under a frozen `StrategyContext` before each run.
 
-The critical path is **deterministic and local**. No framework or live provider is required to run v0.
+The project is inspired by the REFUGIO Madrid question about shared discoveries and local optima. It instruments that question; it does **not** claim to reproduce the paper scientifically.
 
-| Component | Boundary |
-|-----------|----------|
-| Seeded task | One small warehouse/scheduling optimization task, generated from a seed. |
-| World state | Fully serializable; no hidden mutable state. |
-| Tool bay | 2–3 narrow sandbox tools; explicit grants, least privilege, idempotency keys. |
-| Policies | Greedy human reference baseline + one bounded agent policy. |
-| Budgets | Hard cost/step ceilings; breach aborts the run mid-flight, reproducibly. |
-| Verifier | Independent, deterministic, anti-cheat: rejects self-reported success and reward hacking. |
-| Fault injection | Deterministic fault tapes (response loss, duplicate delivery, restart) with safe-abort/unresolved outcomes. |
-| Evidence | JSONL trace + receipt per run; replay reproduces trace and score; static `report.html`. |
-
-## v0 implementation (deterministic evidence-chain)
-
-The v0 core is a stdlib-only Python 3.14.5 package (`robot_factory_arena/`): seeded warehouse tasks from the frozen REQ-01 formulas, pure `greedy-v0`/`bounded-v0` reference policies, a runner-owned hard 100-step `policy_steps` budget, an authorized ToolBay with an idempotency ledger, exactly one declarative fault tape (`response_lost_after_commit`), an append-only hash-chained trace, canonical artifacts under `artifacts/runs/<logical_run_id>/<execution_id>/`, an independent artifact-only verifier that owns the official integer score, and a static offline `report.html` per run.
-
-One-command test gate (stdlib `unittest` only, Python 3.14.5):
+## How it works
 
 ```text
-python3 -m unittest discover -s tests -v
+Experiment / Search (R1 / R2 / R3)
+  -> freeze StrategyContext
+LLMPolicy / ProviderAdapter
+  -> normalize a proposal to ToolCall
+Deterministic core
+  -> enforce budget, grants, tools, and WorldState transitions
+Sealed evidence
+  -> trace, operation log, replay input, receipt, and report
+Independent Verifier
+  -> Verified Score and outcome
 ```
 
-CLI — run, rerun, and replay are distinct operations:
+| Stage | What it does | Boundary that matters |
+|---|---|---|
+| **Experiment / Search** | R1 accepts human guidance, R2 runs autonomously, and R3 shares sealed discoveries at round barriers. | `StrategyContext` is frozen per run and remains advisory context—not world state or score authority. |
+| **LLMPolicy / ProviderAdapter** | An optional provider proposes the next action; the policy normalizes it into a `ToolCall`. | Provider output cannot execute directly or bypass the core. |
+| **Deterministic core** | `Runner`, `Budget`, `Grants`, `ToolBay`, `apply()`, and serializable `WorldState` enforce the execution contract. | The core owns authorization, committed operations, and state transitions. |
+| **Sealed evidence** | The run records canonical artifacts, append-only trace data, receipt bindings, and replay inputs. | Evidence is the input to review; a self-reported success is not evidence authority. |
+| **Independent Verifier / Verified Score** | The artifact-only verifier checks invariants and derives the official integer task score and outcome. | Verification is independent of policy/provider execution and observation views. |
+
+The core can run without an LLM or external service using the reference policies `greedy-v0` and `bounded-v0`. Provider-backed runs are optional integrations, not a reason to weaken the deterministic boundary.
+
+## Try the core
+
+Requirements: Python 3.14+ (the current test gate is exercised with Python 3.14.5). The core has no runtime dependencies.
 
 ```text
-# execute one evidenced run and release its verified receipt
+# full stdlib unittest gate
+python3 -m unittest discover -s tests -v
+
+# execute one evidenced run; the command prints its run directory
 python3 -m robot_factory_arena.cli run --seed 17 --policy greedy-v0
 
-# same logical identity, fresh physical execution, deterministic artifacts compared
-python3 -m robot_factory_arena.cli rerun --seed 17 --policy bounded-v0
+# execute a fresh physical run under the same logical identity and compare it
+# with prior executions (keep seed and policy the same)
+python3 -m robot_factory_arena.cli rerun --seed 17 --policy greedy-v0
 
-# offline replay of one recorded run
+# replay the exact run directory printed by run or rerun
 python3 -m robot_factory_arena.cli replay artifacts/runs/<logical_run_id>/<execution_id>
 ```
 
-Replay reads only the run directory's `replay-input.json` and `receipt.json`; it never imports or calls a policy or provider, and it reports whether the final-state digest, verified score, and outcome match the receipt. Exit codes: 0 success/match, 1 evidence disagreement (rerun bytes differ, replay mismatch, invalid verification), 2 usage or artifact errors.
+`run` releases a verified receipt and a static `report.html`. `rerun` invokes the policy again and compares deterministic artifacts; it is not replay. `replay` reads only `replay-input.json` and `receipt.json`, never imports or calls a policy/provider, and reports whether the final-state digest and outcome match the receipt while displaying the verifier-owned score recorded there.
 
-### Verified offline visualizer
+Exit codes are intentionally meaningful: `0` is success or agreement, `1` is an evidence disagreement or invalid verification, and `2` is a usage or artifact error.
 
-A successfully verified run may also release `visualizer.html` beside `report.html`. Open that sibling file directly in a browser (including with a `file:` URL): it is self-contained, uses no network, server, external asset, provider, or file picker. Its controls are **Play**, **Pause**, **Step forward**, and the fixed `0.5x`/`1x`/`2x`/`4x` speeds. One timeline frame represents one consumed policy step; response-loss retries remain ordered subevents of that frame rather than extra frames.
+### Optional visualizer
 
-The visualizer is a deterministic-byte projection of verified logical inputs, not a semantic artifact or evidence authority. Equal logical runs produce equal HTML bytes, but this guarantee does not cover browser-specific pixels or playback state. It displays verifier-owned score/outcome claims and cannot verify, replay, score, or reclassify a run. A visualizer-generation failure is explicitly non-authoritative: the receipt, report, replay result, core digests, score, and outcome stay unchanged. Rerun reports visualizer agreement separately from core agreement — an unavailable optional file is reported as such and never fails core deterministic agreement — and replay remains valid if the optional file is deleted. v1 intentionally provides **no diagnostic visualizer** for invalid or unresolved evidence.
-
-The response-loss demonstrator can be declared on `run`/`rerun` with `--fault-step 8 --fault-intent place-order-00`; both constants are predeclared — no policy is ever consulted to resolve a fault target.
-
-Each run directory contains `config.json`, `task.json`, `fault_tape.json` (or the explicit canonical `null` artifact), `trace.jsonl`, `final_state.json`, `operation-log.json`, `replay-input.json`, the verified `receipt.json`, `replay-result.json`, the static `report.html`, and the `boundaries/` commit-proof files. The `boundaries/` files are part of the run evidence, not optional: removing them flips verification to `unresolved_outcome`. Copy a run directory wholesale when moving it offline.
-
-Golden evidence (committed fixtures): public seed 17 (`greedy-v0`, no tape) ends `safe_abort` at the 100-step budget with 5 of 10 orders delivered, verified score 50; evaluation seed 29 (`bounded-v0`, plumbing-only) ends `safe_abort` with 6 of 10, score 60; the completion demonstrator seed 18 (AMEND-01) declares the response-loss tape at step 8 and completes all 5 orders in 92 policy steps with one internal retry, verified score 100.
-
-### v0 honesty boundary
-
-- The trace hash chain and the digest bindings are **tamper evidence, not authentication**: edits are detected, but artifact provenance is not proven.
-- There is **no exactly-once guarantee**: the persistence boundary is a durability and audit proof, not a transaction.
-- There is **no hostile-Python sandbox**: policy outputs are semantically untrusted, but policy source is not treated as hostile malware; no hostile arbitrary-Python isolation is claimed.
-- Evaluation seed 29 is **plumbing-only**: it exercises the plumbing and carries no tuning or experimental claim.
-- **No scientific REFUGIO claim**: the project is paper-inspired; v0 makes no scientific reproduction, leaderboard, R1/R2/R3 arena, or production-security claim.
-- The four report signals are reported separately and are never collapsed into one number; no composite score is computed.
-
-## Score model
-
-Four signals per run, each 0–100, **reported separately — never collapsed into one number**:
-
-1. **Task quality** — deterministic verifier score.
-2. **Efficiency** — actions, tokens/cost, wall time.
-3. **Robustness** — behavior under injected faults.
-4. **Contract hygiene** — permission violations, idempotency breaches, audit completeness.
-
-## Tournament harness (optional — Phase 6)
-
-An optional LangGraph orchestration layer (`harness/`, installed via `pip install -e ".[harness]"`) runs R1/R2/R3 **tournaments** over the frozen core: one immutable config per tournament, every core launch a registered subprocess with a frozen StrategyContext snapshot, fail-closed evidence binding, and exactly one authoritative leaderboard row per `(condition, seed)`. The core itself stays stdlib-only and is never imported by the harness — the only interface is the CLI subprocess plus sealed JSON artifacts.
+A successful verified run may also release a self-contained `visualizer.html` beside `report.html`. There is no separate visualizer command: open the sibling file from the `run_directory` printed by the CLI.
 
 ```text
-# zero-cost deterministic acceptance: full R1+R2+R3 over seeds 18/24/30
+# macOS
+open <run_directory>/visualizer.html
+
+# Linux
+xdg-open <run_directory>/visualizer.html
+```
+
+It works from a local `file:` URL, needs no server or network, and provides Play, Pause, Step forward, and fixed `0.5x`/`1x`/`2x`/`4x` speeds. One frame is one consumed policy step; a response-loss retry remains an ordered subevent of that frame. The visualizer is a deterministic projection of verified inputs, not a verifier, scorer, replay engine, or evidence authority. If generation fails or the optional file is deleted, the core receipt, report, replay, score, and outcome remain valid.
+
+For a deterministic response-loss demonstration, the fault target is declared rather than discovered by a policy:
+
+```text
+python3 -m robot_factory_arena.cli run --seed 18 --policy greedy-v0 \
+    --fault-step 8 --fault-intent place-order-00
+```
+
+The committed seed-18 fixture exercises one response loss after commit, an internal retry, and a verifier-owned score of 100 within the locked 100-step budget. Seed 17 (`greedy-v0`) and seed 29 (`bounded-v0`) remain the public and plumbing-only evidence fixtures respectively; fixture details belong to the tests and evidence contracts.
+
+## Why the engineering is interesting
+
+| Choice | Evidence-led value |
+|---|---|
+| **Deterministic execution** | Seeded tasks, serializable state, canonical artifacts, and byte-comparable reruns make a behavior explainable instead of anecdotal. |
+| **Bounded tools and budgets** | `ToolBay` exposes narrow operations, explicit `move`/`pick`/`place` grants, idempotency keys, and a hard 100-policy-step budget. |
+| **Independent verification** | The verifier reads the recorded artifacts, rejects invalid or self-reported success, and owns the official score/outcome. |
+| **Replayability** | Offline replay rechecks a recorded run without importing policy code or contacting a provider; rerun separately tests deterministic re-execution. |
+| **Observability separation** | Langfuse and the offline visualizer are downstream projections. They can be unavailable without authorizing, scoring, verifying, or reclassifying a run. |
+
+## Signals, not a composite score
+
+Each run reports four separate signals, each on a 0–100 scale:
+
+1. **Task quality** — deterministic verifier score.
+2. **Efficiency** — actions, tokens/cost, and wall time.
+3. **Robustness** — behavior under injected faults.
+4. **Contract hygiene** — permission violations, idempotency breaches, and audit completeness.
+
+They are intentionally never collapsed into one composite score.
+
+## Exactly-once, stated precisely
+
+The system does **not** claim exactly-once effects. Idempotency keys and the operation/audit ledger support duplicate detection; replay and rerun support comparison and reconciliation. But the persistence boundary is not a distributed transaction. If a response is lost after a commit, the caller can be uncertain whether the effect was applied. The deterministic fault tape exercises that ambiguity, and the system classifies the result safely from recorded evidence rather than upgrading it to an exactly-once guarantee.
+
+The core trace hash chain and receipt/digest bindings provide tamper evidence for those recorded core artifacts, not authentication or proof of external provenance. Harness checkpoints and discovery/decision logs provide sequence and continuity validation with replay revalidation; they are not general cryptographic tamper evidence.
+
+## What this project proves—and does not prove
+
+### It demonstrates
+
+- A bounded, seeded execution path whose artifacts can be replayed and compared.
+- A separation between proposal, authorization, committed state transition, evidence, and verification.
+- Independent score/outcome derivation from sealed artifacts rather than agent claims.
+- Fault-aware handling of duplicate delivery and response loss, including safe-abort or unresolved classifications.
+- A deterministic fake acceptance path for R1/R2/R3 harness behavior, with no network cost.
+
+### It does not claim
+
+- A scientific reproduction of REFUGIO, a frontier benchmark, or a meaningful leaderboard from the current fixtures.
+- Production readiness, a hostile-Python sandbox, or a general security boundary for arbitrary policy code.
+- Exactly-once guarantees, transactional sandbox effects, or authenticated artifact provenance.
+- Hosted deployment, real users, or real-world integrations such as payments, email, or production APIs.
+- Model training or fine-tuning; providers are inference integrations only.
+- A wide task library: v0 focuses on one task, with 2–4 deeply designed tasks as the later ceiling.
+- AGI-adjacent claims or a live-provider performance result for v0. Provider adapters and documented live-acceptance procedures are integration paths, not experimental conclusions.
+- A composite score: task quality, efficiency, robustness, and contract hygiene remain separate signals.
+
+## Optional tournament harness
+
+The optional `harness/` package runs R1/R2/R3 tournaments over the frozen core. It freezes one provider/model per tournament, snapshots `StrategyContext`, launches the core through registered subprocesses, binds evidence fail-closed, and writes one authoritative leaderboard row per `(condition, seed)`. The core remains stdlib-only; the harness is an outer orchestration layer.
+
+```text
 python3 -m pip install -e ".[harness]"
 python3 -m harness --config tests/fixtures/harness/unit6-acceptance-config.json \
     --runner fake --non-interactive --root /tmp/harness-demo
 ```
 
-Exit codes: 0 complete, 1 fail-closed (evidence paths printed), 2 usage/config. Configs are fail-closed pinned to the executable execution profile (budget 100, core tool grants, K=3, closed per-provider/model `generation` contract) — declared-but-unexecuted conditions are rejected before any artifact exists. Re-running the same tournament id resumes under the recovery contracts and never reruns receipt-bound work. R1 approvals are injectable: `--non-interactive` (auto-decline), `--answers FILE` (scripted), or the default stdin terminal. Full operator contract — execution-profile table, Luna live-acceptance procedure, artifact layout, R1/R2/R3 semantics, recovery windows — lives in `docs/sdd/phase6-langgraph-harness.md`.
+The fake acceptance is deterministic and zero-cost. See the [harness operator contract](docs/sdd/phase6-langgraph-harness.md) for the execution-profile table, R1/R2/R3 semantics, artifact layout, recovery windows, and the deliberately narrow guarantees.
 
-What the harness guarantees, and what it does not:
+## Optional observability
 
-- **Deterministic tournaments**: identical runs produce byte-identical leaderboards; one tournament freezes one provider/model — no cross-provider mixing and no fallback.
-- **Receipt authority**: scores come only from sealed `receipt.json`, tokens only from digest-bound provider evidence; stdout claims are never official and fail-closed rows carry explicit nulls, never zeros.
-- **Honest logs** — binding precision note: "Checkpoint/logs give SEQUENCE/CONTINUITY validation and replay revalidation — NOT general tamper-evidence/authenticity: a valid-to-valid external substitution of content is not cryptographically bound."
-- **Internal identity consistency** — binding precision note: "First-bind-wins for prompt_digest/tool_schema_digest is INTERNAL consistency after the first run — not a pre-frozen tournament expectation recorded before the tournament."
-- **No composite score** and no scientific/security/exactly-once claims; replay never calls an LLM.
-
-## Observability (optional — self-hosted Langfuse)
-
-`observability/` is a downstream-only tracing projection: a pinned Langfuse v3.114.0 Compose stack (only the UI port 3000 published, all credentials environment-only) plus a stdlib-only one-shot exporter that submits sealed run evidence deterministically. Sealed artifacts remain the only authority — removing the stack cannot alter source evidence. Exact pins, official provenance (researched 2026-09-08), environment variable names, start/teardown, and the optional gated smoke live in `docs/observability.md`.
+`observability/` provides a downstream-only, self-hosted [Langfuse](https://langfuse.com/docs) v3.114.0 projection and a stdlib-only exporter for sealed run evidence. The source artifacts remain authoritative; removing the stack cannot alter them. Start-up, environment-variable names, pins, export behavior, and the optional smoke are documented in [observability.md](docs/observability.md). The UI port is `3000`; credentials stay in the environment and are never part of the repository or evidence artifacts.
 
 ## Roadmap
 
-| Phase | Deliverable | Exit criteria |
-|-------|-------------|---------------|
-| **0. Charter** (this doc) | Goals, scope, roadmap committed. | Repo on GitHub; SDD exploration captured. |
-| **1. MVP core** | Seeded task, world, tool bay, baseline, budgets, verifier, trace/replay, report. | Deterministic reruns; verifier rejects a plausible cheat; budget breach kills a run; replay reproduces trace + score. |
-| **2. Robustness** | Fault tapes, safe-abort classification, recovery. | Fault outcomes classified (safe-abort / unresolved); recovery replay-equivalent. |
-| **3. Arena conditions** | R1 human-in-the-loop, R2 autonomous, R3 swarm with shared memory; seeded leaderboard. | Same tasks/seeds/budgets across conditions; multi-signal comparison report. |
-| **4. Real providers & observability** | LangGraph outer harness (coordinates attempts, not robot moves), self-hosted Langfuse tracing, one pinned provider+model per run (no silent fallback), real cost ledger. | Live runs traced; hard € ceilings enforced; provider keys never in traces; replay reproduces from recorded calls without any API access. |
-| **5. Analysis & defense** | Final report, receipts, write-up of results and limitations. | Claims match evidence; limitations stated; results reproducible from seeds. |
+| Phase | Status | Evidence or next step |
+|---|---|---|
+| **0. Charter** | Complete | Scope, constraints, and the evidence-first architecture are documented. |
+| **1. MVP core** | Implemented | Seeded task, world, ToolBay, policies, budgets, verifier, trace/replay, receipt, and report. |
+| **2. Robustness** | Implemented | Fault tapes, duplicate detection, safe-abort/unresolved classification, and replay-equivalent recovery paths. |
+| **3. Arena conditions** | Harness implemented | R1/R2/R3 orchestration and deterministic fake acceptance are available; scientific comparison remains future work. |
+| **4. Providers and observability** | Optional paths | Provider adapters and downstream Langfuse projection are documented and gated; v0 makes no live-provider performance claim. |
+| **5. Analysis and defense** | Next | Run controlled experiments, compare separate signals, publish receipts and limitations, and keep claims tied to evidence. |
 
-Phases run through SDD (proposal → spec → design → tasks → apply → verify), one slice at a time.
+## Technical references
 
-## Non-goals (honesty constraints)
-
-- Not a scientific reproduction of REFUGIO — **paper-inspired**, labeled as such.
-- No exactly-once effect claims; sandbox effects are audited and replayable, not transactional.
-- No hosted service, no real users, no real-world integrations (payments, email, production APIs).
-- No model training/fine-tuning; providers via inference only.
-- 2–4 deeply designed tasks maximum — never a wide shallow set.
-- No AGI-adjacent claims, no production-readiness claims.
-
-## References
-
-- REFUGIO Madrid 2026 — "Speedrunning as a model of progress" (refugiomadrid.com/paper.html)
-- Terminal-Bench 2.x + "What Makes a Good Terminal-Agent Benchmark Task" (arXiv 2604.28093) — adversarial deterministic verification
-- ARC-AGI-3 — action efficiency as a first-class metric
-- GAIA (arXiv 2311.12983) — documented human–agent performance gap
+- [Semantic architecture reference](docs/architecture/system-overview.md) and [architecture SVG](docs/architecture/system-overview.svg)
+- [Core CLI](robot_factory_arena/cli.py), [core implementation](robot_factory_arena/), and [test suite](tests/)
+- [Deterministic core specification](docs/sdd/spec.md), [design](docs/sdd/design.md), [tasks](docs/sdd/tasks.md), and [verification report](docs/sdd/verify-report.md)
+- [Tournament harness contract](docs/sdd/phase6-langgraph-harness.md)
+- [Visualizer contract](docs/sdd/robot-run-visualizer.md)
+- [Langfuse observability contract](docs/observability.md)
+- [Focused CLI and replay tests](tests/test_cli.py), [rerun/replay tests](tests/test_rerun_replay.py), [harness acceptance](tests/test_harness_acceptance.py), and [visualizer release tests](tests/test_visualizer_release.py)
+- REFUGIO Madrid 2026 — [“Speedrunning as a model of progress”](https://refugiomadrid.com/paper.html), the inspiration for the shared-discovery question
+- Terminal-Bench 2.x and [“What Makes a Good Terminal-Agent Benchmark Task”](https://arxiv.org/abs/2604.28093), for adversarial deterministic verification context
+- ARC-AGI-3, for treating action efficiency as a first-class metric; and GAIA ([arXiv:2311.12983](https://arxiv.org/abs/2311.12983)), for the documented human–agent performance gap
+- [Roadmap](#roadmap)
