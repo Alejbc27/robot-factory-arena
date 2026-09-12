@@ -46,6 +46,7 @@ h1 { margin: 0; color: var(--ink); font-size: clamp(24px, 6vw, 34px); letter-spa
 }
 canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; image-rendering: crisp-edges; }
 .scene-legend { display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.visualizer-unavailable { padding: 56px 24px; color: var(--warm); font-size: 13px; text-align: center; }
 .legend-key { display: inline-flex; align-items: center; gap: 6px; }
 .legend-swatch { width: 9px; height: 9px; border: 1px solid rgba(255,255,255,.32); }
 .legend-robot { background: var(--accent); }
@@ -105,7 +106,8 @@ button:hover, button:focus-visible, select:focus-visible { border-color: var(--a
 </header>
 <section class="scene-frame" aria-label="Arena replay">
 <canvas id="visualizer-canvas" width="640" height="480" aria-label="2D mission replay arena">Canvas 2D is required.</canvas>
-<div class="scene-legend" aria-label="Arena legend">
+<div id="visualizer-unavailable" class="visualizer-unavailable" role="status" hidden>Presentation unavailable. Embedded projection input is invalid or could not be initialized; no replay data was rendered. This visualizer is non-authoritative.</div>
+<div id="scene-legend" class="scene-legend" aria-label="Arena legend">
 <span class="legend-key"><i class="legend-swatch legend-robot"></i>robot</span>
 <span class="legend-key"><i class="legend-swatch legend-shelf"></i>shelf</span>
 <span class="legend-key"><i class="legend-swatch legend-depot"></i>depot</span>
@@ -129,7 +131,7 @@ button:hover, button:focus-visible, select:focus-visible { border-color: var(--a
 <section class="terminal-panel overview-panel" aria-label="Verifier result">
 <div class="panel-heading"><strong>Verifier result</strong><span class="ownership">VERIFIER-OWNED</span></div>
 <span id="terminal-text"></span>
-<p class="terminal-note">Score and outcome are displayed exactly as claimed by the independent verifier. This visualizer does not author them.</p>
+<p id="terminal-note" class="terminal-note">Score and outcome are displayed exactly as claimed by the independent verifier. This visualizer does not author them.</p>
 </section>
 <details id="frame-details-panel" class="details-panel">
 <summary>Frame evidence <span id="details-summary"></span></summary>
@@ -168,22 +170,49 @@ const PALETTE = {
   fault: "#ff595e", retry: "#f2c14e", trail: "#4cc9f0", warm: "#f2c14e",
   hud: "#101a20", hudLine: "#38515f", muted: "#91a4ad"
 };
-const hex = document.getElementById("visualizer-projection-hex").textContent;
-const bytes = new Uint8Array(hex.length / 2);
-for (let i = 0; i < hex.length; i += 2) bytes[i / 2] = Number.parseInt(hex.slice(i, i + 2), 16);
-const projection = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-const canvas = document.getElementById("visualizer-canvas");
-const context = canvas.getContext("2d");
-const statusText = document.getElementById("status-text");
-const missionProgress = document.getElementById("mission-progress");
-const robotStatus = document.getElementById("robot-status");
-const inventoryStatus = document.getElementById("inventory-status");
-const terminalText = document.getElementById("terminal-text");
-const frameDetails = document.getElementById("frame-details");
-const detailsSummary = document.getElementById("details-summary");
-const speed = document.getElementById("speed");
+let projection = null;
+let canvas = null;
+let context = null;
+let statusText = null;
+let missionProgress = null;
+let robotStatus = null;
+let inventoryStatus = null;
+let terminalText = null;
+let terminalNote = null;
+let frameDetails = null;
+let detailsSummary = null;
+let speed = null;
 let selectedFrame = 0;
 let timer = null;
+
+function setPresentationText(element, text) {
+  if (element !== null) element.textContent = text;
+}
+function showUnavailableState() {
+  pause();
+  if (canvas !== null) {
+    canvas.hidden = true;
+    if (context !== null) context.clearRect(0, 0, canvas.width, canvas.height);
+  }
+  const unavailable = document.getElementById("visualizer-unavailable");
+  if (unavailable !== null) unavailable.hidden = false;
+  const sceneLegend = document.getElementById("scene-legend");
+  if (sceneLegend !== null) sceneLegend.hidden = true;
+  [
+    document.getElementById("play"),
+    document.getElementById("pause"),
+    document.getElementById("step-forward"),
+    document.getElementById("speed")
+  ].forEach((control) => { if (control !== null) control.disabled = true; });
+  setPresentationText(statusText, "presentation unavailable · embedded projection is invalid or unavailable");
+  setPresentationText(missionProgress, "Unavailable");
+  setPresentationText(robotStatus, "Unavailable");
+  setPresentationText(inventoryStatus, "Unavailable");
+  setPresentationText(terminalText, "Verifier-owned result unavailable; visualizer is non-authoritative.");
+  setPresentationText(terminalNote, "No verifier-owned score or outcome is available from the unavailable embedded projection.");
+  setPresentationText(frameDetails, "No frame evidence is available because the embedded presentation could not be initialized.");
+  setPresentationText(detailsSummary, " · unavailable");
+}
 
 function valueText(value, fallback) { return value === null || value === "" ? fallback : String(value); }
 function argumentsText(callArguments) { return callArguments === null ? "n/a" : JSON.stringify(callArguments); }
@@ -594,11 +623,41 @@ function render() {
 function pause() { if (timer !== null) { clearInterval(timer); timer = null; } }
 function stepForward() { if (projection.frames.length) selectedFrame = (selectedFrame + 1) % projection.frames.length; render(); }
 function play() { pause(); timer = setInterval(stepForward, NOMINAL_FRAME_MS / Number(speed.value)); }
-document.getElementById("play").addEventListener("click", play);
-document.getElementById("pause").addEventListener("click", pause);
-document.getElementById("step-forward").addEventListener("click", stepForward);
-speed.addEventListener("change", function () { if (timer !== null) play(); });
-render();
+function initializePresentation() {
+  try {
+    canvas = document.getElementById("visualizer-canvas");
+    statusText = document.getElementById("status-text");
+    missionProgress = document.getElementById("mission-progress");
+    robotStatus = document.getElementById("robot-status");
+    inventoryStatus = document.getElementById("inventory-status");
+    terminalText = document.getElementById("terminal-text");
+    terminalNote = document.getElementById("terminal-note");
+    frameDetails = document.getElementById("frame-details");
+    detailsSummary = document.getElementById("details-summary");
+    speed = document.getElementById("speed");
+    if (canvas === null || typeof canvas.getContext !== "function") return showUnavailableState();
+    context = canvas.getContext("2d");
+    if (context === null) return showUnavailableState();
+
+    const embeddedProjection = document.getElementById("visualizer-projection-hex");
+    if (embeddedProjection === null || typeof embeddedProjection.textContent !== "string") return showUnavailableState();
+    const hex = embeddedProjection.textContent;
+    if (hex.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(hex)) return showUnavailableState();
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < hex.length; i += 2) bytes[i / 2] = Number.parseInt(hex.slice(i, i + 2), 16);
+    projection = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (projection === null || typeof projection !== "object") return showUnavailableState();
+
+    document.getElementById("play").addEventListener("click", play);
+    document.getElementById("pause").addEventListener("click", pause);
+    document.getElementById("step-forward").addEventListener("click", stepForward);
+    speed.addEventListener("change", function () { if (timer !== null) play(); });
+    render();
+  } catch (_error) {
+    showUnavailableState();
+  }
+}
+initializePresentation();
 </script>
 </body>
 </html>
