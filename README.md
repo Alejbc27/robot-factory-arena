@@ -27,6 +27,12 @@ The repository publishes a small, bounded set of observed provider outcomes. It 
 
 There are three seeds, one bounded task, and nine rows per tournament. See the [exact condition/seed rows and artifact sources](docs/live-tournament-results.md) before drawing any conclusion beyond the recorded evidence.
 
+## Architecture at a glance
+
+![Robot Factory and Arena semantic architecture](docs/architecture/system-overview.svg)
+
+The diagram shows the authority flow from experiment context and provider proposals through deterministic execution, sealed evidence, independent verification, replay, and downstream observability. See the [human semantic architecture reference](docs/architecture/system-overview.md) for layer boundaries and connector semantics.
+
 ## Why it matters
 
 Agent evaluations become difficult to trust when tasks change between runs, context leaks across conditions, agents report their own success, or observability is mistaken for authority. This project keeps those boundaries explicit:
