@@ -1,6 +1,9 @@
 """Contract tests for the projection-only offline visualizer renderer."""
 
+import json
 import re
+import shutil
+import subprocess
 import unittest
 
 from robot_factory_arena.evidence.visualizer_projection import (
@@ -8,6 +11,60 @@ from robot_factory_arena.evidence.visualizer_projection import (
     validate_projection,
 )
 from tests.test_visualizer_projection import committed_projection, projection
+
+
+def execute_renderer_script(html, projection_hex):
+    scripts = re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>", html, flags=re.DOTALL)
+    script = scripts[-1]
+    harness = """
+const elements = new Map();
+function makeElement(textContent = "") {
+  return { textContent, hidden: false, disabled: false, addEventListener() {} };
+}
+const context = new Proxy({ clearRect() {} }, {
+  get(target, property) {
+    if (!(property in target)) target[property] = () => {};
+    return target[property];
+  }
+});
+const canvas = makeElement();
+canvas.width = 640;
+canvas.height = 480;
+canvas.getContext = () => context;
+for (const id of [
+  "status-text", "mission-progress", "robot-status", "inventory-status",
+  "terminal-text", "terminal-note", "frame-details", "details-summary", "speed",
+  "visualizer-unavailable", "scene-legend", "play", "pause", "step-forward"
+]) elements.set(id, makeElement());
+elements.set("visualizer-canvas", canvas);
+elements.get("visualizer-unavailable").hidden = true;
+elements.set("visualizer-projection-hex", makeElement(PROJECTION_HEX));
+elements.get("speed").value = "1";
+globalThis.document = { getElementById(id) { return elements.get(id) || null; } };
+const rendererScript = RENDERER_SCRIPT;
+eval(rendererScript);
+process.stdout.write(JSON.stringify({
+  unavailable: elements.get("visualizer-unavailable").hidden === false,
+  status: elements.get("status-text").textContent,
+  mission: elements.get("mission-progress").textContent,
+  robot: elements.get("robot-status").textContent,
+  inventory: elements.get("inventory-status").textContent,
+  terminal: elements.get("terminal-text").textContent,
+  controlsDisabled: elements.get("play").disabled && elements.get("pause").disabled && elements.get("step-forward").disabled && elements.get("speed").disabled
+}));
+""".replace("PROJECTION_HEX", json.dumps(projection_hex)).replace(
+        "RENDERER_SCRIPT", json.dumps(script)
+    )
+    completed = subprocess.run(
+        ["node", "-e", harness],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr or completed.stdout)
+    return json.loads(completed.stdout)
 
 
 class VisualizerRendererTests(unittest.TestCase):
@@ -29,6 +86,42 @@ class VisualizerRendererTests(unittest.TestCase):
             canonical_projection_bytes(self.projection),
         )
         self.assertEqual(render_visualizer(self.projection), html)
+
+    def test_renderer_fails_open_for_invalid_embedded_projection_input(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        if shutil.which("node") is None:
+            self.skipTest("node is required to execute the embedded renderer")
+        html = render_visualizer(self.projection).decode("utf-8")
+        invalid_inputs = (
+            "0",  # odd-length hex
+            "gg",  # non-hex input
+            "ff",  # invalid UTF-8 with fatal decoding
+            b"{".hex(),  # invalid JSON
+            b"{}".hex(),  # parsed JSON that fails renderer initialization
+        )
+        for invalid_input in invalid_inputs:
+            with self.subTest(invalid_input=invalid_input):
+                state = execute_renderer_script(html, invalid_input)
+                self.assertTrue(state["unavailable"])
+                self.assertEqual(state["mission"], "Unavailable")
+                self.assertEqual(state["robot"], "Unavailable")
+                self.assertEqual(state["inventory"], "Unavailable")
+                self.assertIn("non-authoritative", state["terminal"])
+                self.assertTrue(state["controlsDisabled"])
+
+    def test_renderer_valid_projection_initializes_deterministically(self):
+        from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
+
+        if shutil.which("node") is None:
+            self.skipTest("node is required to execute the embedded renderer")
+        html = render_visualizer(self.projection).decode("utf-8")
+        state = execute_renderer_script(
+            html, canonical_projection_bytes(self.projection).hex()
+        )
+        self.assertFalse(state["unavailable"])
+        self.assertIn("Verifier-owned score", state["terminal"])
+        self.assertNotEqual(state["mission"], "Unavailable")
 
     def test_renderer_has_fixed_offline_canvas_ui_contract(self):
         from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
