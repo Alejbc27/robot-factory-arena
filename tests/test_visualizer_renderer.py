@@ -88,7 +88,8 @@ process.stdout.write(JSON.stringify({
         "RENDERER_SCRIPT", json.dumps(script)
     )
     completed = subprocess.run(
-        ["node", "-e", harness],
+        ["node"],
+        input=harness,
         check=False,
         capture_output=True,
         text=True,
