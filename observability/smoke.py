@@ -51,7 +51,7 @@ SERVICE_IMAGES = {
     "postgres": "docker.io/postgres:17.5",
     "clickhouse": "docker.io/clickhouse/clickhouse-server:24.3.18.7",
     "redis": "docker.io/redis:7.2.4",
-    "minio": "docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z",
+    "minio": "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z",
 }
 COMPOSE_SERVICE_OF = {
     "web": "langfuse-web",
@@ -114,6 +114,7 @@ ALLOWED_ENV_KEYS = frozenset(
 )
 _HEADER_PATTERN = re.compile(r"(?i)(authorization|proxy-authorization)\s*:")
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+\S+")
+_COMMAND_FAILURE_DETAIL_TAIL_CHARS = 2_000
 
 
 class SmokeFailure(Exception):
@@ -241,6 +242,18 @@ class LeakGuard:
                 "credential value or header pattern detected",
                 redacted_output=self.redact(text),
             )
+
+
+def command_failure_detail(guard, result):
+    """Return a bounded, redacted command-output tail or its exit status."""
+    output = "\n".join(
+        f"{name}:\n{text}"
+        for name, text in (("stdout", result.stdout), ("stderr", result.stderr))
+        if text
+    )
+    if not output.strip():
+        return f"exit {result.returncode}"
+    return guard.redact(output)[-_COMMAND_FAILURE_DETAIL_TAIL_CHARS:]
 
 
 def default_sink(source_env):
@@ -986,7 +999,9 @@ class ReportAuthority:
         self.run = {}
 
     def primary(self, failure: SmokeFailure):
-        detail = self.guard.redact(str(failure.detail or ""))[:200]
+        detail = self.guard.redact(str(failure.detail or ""))[
+            -_COMMAND_FAILURE_DETAIL_TAIL_CHARS:
+        ]
         if self.primary_failure is None:
             self.primary_failure = {
                 "phase": failure.phase,
@@ -1301,7 +1316,9 @@ class SmokeOrchestrator:
         )
         if result.returncode:
             raise SmokeFailure(
-                "dependencies", "compose_up_failed", f"exit {result.returncode}"
+                "dependencies",
+                "compose_up_failed",
+                command_failure_detail(self.deps.guard, result),
             )
         self.report.phases["dependencies"] = {"status": "PASS"}
 
@@ -1313,7 +1330,11 @@ class SmokeOrchestrator:
             timeout=self._remaining(self.bounds.web_s),
         )
         if result.returncode:
-            raise SmokeFailure("web", "web_start_failed", f"exit {result.returncode}")
+                raise SmokeFailure(
+                    "web",
+                    "web_start_failed",
+                    command_failure_detail(self.deps.guard, result),
+                )
         interval = max(1, self.bounds.poll_interval_s)
         max_attempts = min(
             self.bounds.poll_max_attempts, max(1, self.bounds.web_s // interval)
@@ -1347,7 +1368,9 @@ class SmokeOrchestrator:
         )
         if result.returncode:
             raise SmokeFailure(
-                "worker", "worker_start_failed", f"exit {result.returncode}"
+                "worker",
+                "worker_start_failed",
+                command_failure_detail(self.deps.guard, result),
             )
         proof = worker_proof(
             self.deps.runner,

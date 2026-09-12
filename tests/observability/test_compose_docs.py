@@ -35,7 +35,7 @@ EXPECTED_IMAGES = frozenset(
         "docker.io/langfuse/langfuse:3.114.0",
         "docker.io/langfuse/langfuse-worker:3.114.0",
         "docker.io/clickhouse/clickhouse-server:24.3.18.7",
-        "docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z",
+        "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z",
         "docker.io/redis:7.2.4",
         "docker.io/postgres:17.5",
     }
