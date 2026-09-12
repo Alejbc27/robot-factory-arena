@@ -83,7 +83,7 @@ python3 -m robot_factory_arena.cli run --seed 18 --policy greedy-v0 \
     --fault-step 8 --fault-intent place-order-00
 ```
 
-The committed seed-18 fixture exercises one response loss after commit, an internal retry, and a verifier-owned score of 100 within the locked 100-step budget.
+The committed seed-18 fixture exercises one response loss after commit, an internal retry, and a verifier-owned score of 100 within the locked 100-step budget. Seed 17 (`greedy-v0`) remains the public fixture, while seed 29 (`bounded-v0`) remains plumbing-only evidence.
 
 ## What the system proves
 
@@ -104,7 +104,7 @@ They are intentionally never collapsed into one composite score.
 
 ## Claims boundary
 
-The v0 implementation is intentionally narrow: one seeded warehouse task, programmatic reference policies, a bounded local core, and evidence that can be replayed without a provider. It makes no exactly-once claim, no scientific REFUGIO reproduction claim, and no production-security claim.
+The v0 implementation is intentionally narrow: one seeded warehouse task, programmatic reference policies, a bounded local core, and evidence that can be replayed without a provider. It makes no exactly-once or production-security claim, and it does not claim to reproduce REFUGIO scientifically.
 
 More precisely:
 
