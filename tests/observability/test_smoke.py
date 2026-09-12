@@ -953,6 +953,31 @@ class OrchestratorFailureMatrixTest(unittest.TestCase):
                 if name in {"deps", "worker", "baseline", "exposure"}:
                     self.assertEqual(report["exporter_invocations"], 0)
 
+    def test_compose_up_failure_retains_bounded_redacted_output_and_cleans_up(self):
+        runner = FakeRunner()
+        cleanup = FakeCleanup()
+        tail_marker = "actionable tail marker"
+
+        def run(argv, **kwargs):
+            if "up" in [str(part) for part in argv]:
+                return smoke.RunResult(
+                    17,
+                    "stale stdout\n" + ("x" * 2_100) + tail_marker,
+                    "stderr contains sk-lf-secret",
+                )
+            return FakeRunner.run(runner, argv, **kwargs)
+
+        runner.run = run
+        report = _run_orchestrator(runner, cleanup=cleanup)
+        detail = report["primary_failure"]["detail"]
+        self.assertEqual(report["overall"], "FAIL")
+        self.assertEqual(report["reason"], "compose_up_failed")
+        self.assertTrue(cleanup.executed)
+        self.assertIn(tail_marker, detail)
+        self.assertIn("[REDACTED]", detail)
+        self.assertNotIn("sk-lf-secret", detail)
+        self.assertLessEqual(len(detail), 2_000)
+
     def test_diagnostics_failure_does_not_suppress_cleanup_or_pass(self):
         runner = FakeRunner()
 

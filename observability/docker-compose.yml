@@ -95,7 +95,7 @@ services:
   minio:
     # The official v3.114.0 deployment needs no separate init container: this
     # entrypoint creates the `langfuse` bucket before serving (see docs).
-    image: docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     restart: always
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
