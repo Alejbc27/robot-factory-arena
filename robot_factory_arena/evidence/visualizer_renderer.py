@@ -15,84 +15,249 @@ _TEMPLATE = """<!doctype html>
 <style>
 :root {
   color-scheme: dark;
-  --ink: #f6f7eb;
-  --muted: #91a4ad;
-  --line: #2d4059;
-  --panel: #16232b;
-  --panel-raised: #203040;
-  --accent: #4cc9f0;
-  --warm: #f2c14e;
-  --success: #80ed99;
+  --page: #06111e;
+  --surface: #081724;
+  --surface-raised: #0c1d2c;
+  --frame: #245d83;
+  --frame-bright: #367ca6;
+  --frame-dark: #0a2b45;
+  --ink: #f3f0dc;
+  --muted: #89a4b6;
+  --cyan: #48d9ff;
+  --green: #5bf29b;
+  --amber: #f6c84c;
+  --magenta: #ff4f9f;
+  --danger: #ff6262;
 }
 * { box-sizing: border-box; }
 body {
   margin: 0;
   min-height: 100vh;
-  background: radial-gradient(circle at 50% -10%, #263b43 0, #101820 48%, #0b1115 100%);
+  background: var(--page);
   color: var(--ink);
   font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
-main { width: min(640px, calc(100vw - 24px)); margin: 24px auto 40px; }
-.visualizer-shell { display: grid; gap: 10px; }
-.masthead { padding: 4px 2px 8px; }
-.kicker { margin: 0 0 8px; color: var(--accent); font-size: 11px; letter-spacing: .16em; }
-h1 { margin: 0; color: var(--ink); font-size: clamp(24px, 6vw, 34px); letter-spacing: -.05em; line-height: 1; }
-.subtitle { margin: 10px 0 0; max-width: 56ch; color: var(--muted); }
-.scene-frame {
+main { width: min(1400px, calc(100vw - 24px)); margin: 24px auto 40px; }
+.visualizer-shell {
   overflow: hidden;
-  border: 1px solid #466071;
-  background: #0d151a;
-  box-shadow: 0 18px 40px rgba(0, 0, 0, .32), 0 0 0 4px rgba(76, 201, 240, .04);
+  border: 2px solid var(--frame);
+  background: var(--surface);
+  box-shadow: inset 0 0 0 2px var(--frame-dark), 0 10px 0 var(--frame-dark);
 }
-canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; image-rendering: crisp-edges; }
-.scene-legend { display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
-.visualizer-unavailable { padding: 56px 24px; color: var(--warm); font-size: 13px; text-align: center; }
-.legend-key { display: inline-flex; align-items: center; gap: 6px; }
-.legend-swatch { width: 9px; height: 9px; border: 1px solid rgba(255,255,255,.32); }
-.legend-robot { background: var(--accent); }
+.masthead {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: end;
+  padding: 22px 24px 20px;
+  border-bottom: 2px solid var(--frame);
+  background: var(--surface-raised);
+  box-shadow: inset 0 -2px 0 var(--frame-dark);
+}
+.kicker {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--cyan);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .2em;
+}
+h1 {
+  margin: 0;
+  color: var(--ink);
+  font-size: clamp(28px, 4vw, 48px);
+  letter-spacing: -.07em;
+  line-height: 1;
+  text-shadow: 2px 2px 0 var(--frame-dark);
+}
+.subtitle { max-width: 54ch; margin: 0; color: var(--muted); text-align: right; }
+.replay-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  min-width: 0;
+}
+.arena-column { min-width: 0; border-right: 2px solid var(--frame); background: var(--page); }
+.scene-frame { overflow: hidden; background: var(--page); }
+canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+.visualizer-unavailable {
+  padding: 56px 24px;
+  color: var(--amber);
+  font-size: 13px;
+  text-align: center;
+}
+.scene-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 11px 16px;
+  border-top: 2px solid var(--frame);
+  background: var(--surface-raised);
+  color: var(--muted);
+  font-size: 11px;
+}
+.legend-key { display: inline-flex; align-items: center; gap: 7px; }
+.legend-swatch { width: 10px; height: 10px; border: 2px solid var(--frame-bright); }
+.legend-robot { background: var(--cyan); }
 .legend-shelf { background: #8f5b34; }
 .legend-depot { background: #7aa2a8; }
-.legend-cargo { background: #f72585; }
-.legend-trail { background: #4cc9f0; }
-.controls, .status-panel, .terminal-panel, .details-panel {
-  border: 1px solid var(--line);
-  background: rgba(22, 35, 43, .92);
+.legend-cargo { background: var(--magenta); }
+.legend-trail { background: var(--cyan); }
+.mission-hud {
+  min-width: 0;
+  padding: 16px;
+  background: var(--surface);
+  box-shadow: inset 2px 0 0 var(--frame-dark);
 }
-.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px; }
+.hud-section {
+  padding: 14px 0;
+  border-bottom: 2px solid var(--frame-dark);
+}
+.hud-section:first-child { padding-top: 0; }
+.hud-section:last-child { border-bottom: 0; padding-bottom: 0; }
+.hud-heading {
+  margin: 0 0 10px;
+  color: var(--cyan);
+  font-size: 11px;
+  letter-spacing: .16em;
+}
+.hud-completed {
+  color: var(--green);
+  font-size: clamp(30px, 4vw, 42px);
+  font-weight: 700;
+  letter-spacing: -.08em;
+  line-height: 1;
+  text-shadow: 2px 2px 0 var(--frame-dark);
+}
+.progress-track {
+  height: 12px;
+  margin-top: 12px;
+  border: 2px solid var(--frame);
+  background: var(--frame-dark);
+  box-shadow: inset 0 0 0 2px var(--page);
+}
+#hud-progress-bar { width: 0; height: 100%; background: var(--green); }
+.action-status-strip { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 10px; align-items: center; }
+.action-status-strip .hud-heading { grid-column: 1 / -1; margin-bottom: 3px; }
+.hud-label { color: var(--amber); font-size: 10px; font-weight: 700; letter-spacing: .12em; }
+.hud-value { min-width: 0; overflow: hidden; color: var(--ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+#hud-action { color: var(--ink); }
+#hud-status { font-weight: 700; }
+.status-initial, .status-unknown { color: var(--muted); }
+.status-committed { color: var(--green); }
+.status-rejected, .status-malformed, .status-unsupported, .status-invalid, .status-unauthorized { color: var(--danger); }
+.status-idempotent_replay { color: var(--amber); }
+.subevent-slots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.subevent-slot {
+  min-height: 34px;
+  padding: 8px;
+  border: 2px solid var(--frame);
+  background: var(--surface-raised);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .1em;
+}
+.subevent-fault { border-color: var(--danger); color: var(--danger); }
+.subevent-retry { border-color: var(--amber); color: var(--amber); }
+.order-queue { display: grid; gap: 8px; }
+.order-list { display: grid; gap: 6px; }
+.order-slot {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 2px solid var(--frame-dark);
+  background: var(--page);
+  box-shadow: inset 0 0 0 1px var(--frame);
+  font-size: 10px;
+}
+.order-state { color: var(--amber); font-weight: 700; }
+.order-id { overflow: hidden; color: var(--ink); text-overflow: ellipsis; white-space: nowrap; }
+.order-item { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.order-slot.is-complete { border-color: var(--green); }
+.order-slot.is-complete .order-state { color: var(--green); }
+.order-slot.is-empty { opacity: .55; }
+.robot-readout { display: grid; gap: 8px; }
+.readout-line { display: flex; justify-content: space-between; gap: 12px; }
+.readout-label { color: var(--muted); font-size: 10px; letter-spacing: .12em; }
+.readout-value { overflow: hidden; color: var(--ink); text-overflow: ellipsis; white-space: nowrap; }
+#hud-robot-load:not(.is-empty) { color: var(--magenta); }
+.verifier-readout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.verifier-card { padding: 9px; border: 2px solid var(--frame); background: var(--surface-raised); }
+.verifier-card .readout-label { display: block; }
+#hud-score, #hud-outcome { display: block; margin-top: 5px; color: var(--ink); font-size: 12px; font-weight: 700; }
+.controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr)) minmax(150px, auto);
+  gap: 10px;
+  padding: 14px 16px;
+  border-top: 2px solid var(--frame);
+  background: var(--surface-raised);
+  box-shadow: inset 0 2px 0 var(--frame-dark);
+}
 button, select {
-  border: 1px solid #466071;
-  border-radius: 2px;
-  background: #203040;
+  min-height: 56px;
+  border: 2px solid var(--frame);
+  border-radius: 0;
+  background: var(--surface);
   color: var(--ink);
   font: inherit;
-  padding: 6px 9px;
+  padding: 8px 12px;
+  box-shadow: inset 0 0 0 2px var(--frame-dark);
 }
 button { cursor: pointer; }
-button:hover, button:focus-visible, select:focus-visible { border-color: var(--accent); outline: 2px solid rgba(76, 201, 240, .22); outline-offset: 1px; }
-.speed-control { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; color: var(--muted); }
-.status-panel, .terminal-panel { padding: 12px; }
-.panel-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.panel-heading strong { color: var(--ink); letter-spacing: .04em; }
-#status-text, #details-summary { color: var(--muted); font-size: 12px; }
-.overview-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
-.overview-card { min-width: 0; padding: 9px; border: 1px solid #2a3b45; background: #101a20; }
-.eyebrow { display: block; color: var(--muted); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
-.overview-value { display: block; overflow: hidden; margin-top: 4px; color: var(--ink); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-#mission-progress { color: var(--success); }
-.signal-row { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 12px 0 0; color: var(--muted); font-size: 11px; }
-.signal-row span::before { content: "•"; margin-right: 5px; color: var(--success); }
-.ownership { color: var(--warm); font-size: 10px; letter-spacing: .1em; }
-#terminal-text { display: block; margin-top: 8px; color: var(--ink); }
-.terminal-note { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
-.details-panel { background: rgba(13, 21, 26, .78); }
-.details-panel summary { padding: 11px 12px; color: var(--muted); cursor: pointer; list-style-position: inside; }
-.details-panel summary:hover, .details-panel summary:focus-visible { color: var(--ink); outline: 1px solid var(--accent); outline-offset: -1px; }
-.details-panel[open] summary { border-bottom: 1px solid var(--line); color: var(--ink); }
-#frame-details { overflow-x: auto; margin: 0; padding: 12px; color: #bdcbd0; font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; }
-@media (max-width: 480px) {
-  main { width: min(640px, calc(100vw - 16px)); margin-top: 14px; }
-  .overview-grid { grid-template-columns: 1fr; }
-  .speed-control { margin-left: 0; }
+button:hover, button:focus-visible, select:focus-visible { border-color: var(--cyan); outline: 2px solid var(--cyan); outline-offset: 2px; }
+#play { border-color: var(--green); color: var(--green); }
+.speed-control { display: grid; align-content: center; gap: 5px; color: var(--muted); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; }
+.speed-control select { width: 100%; min-height: 42px; padding: 6px 9px; }
+.details-panel {
+  border-top: 2px solid var(--frame);
+  background: var(--page);
+  box-shadow: inset 0 2px 0 var(--frame-dark);
+}
+.details-panel summary {
+  padding: 14px 16px;
+  color: var(--muted);
+  cursor: pointer;
+  list-style-position: inside;
+}
+.details-panel summary:hover, .details-panel summary:focus-visible { color: var(--ink); outline: 2px solid var(--cyan); outline-offset: -2px; }
+.details-panel[open] summary { border-bottom: 2px solid var(--frame); color: var(--ink); }
+.details-body { display: grid; gap: 12px; padding: 14px 16px 18px; }
+.details-label { color: var(--amber); font-size: 10px; font-weight: 700; letter-spacing: .14em; }
+#status-text, #terminal-text { display: block; color: var(--muted); font-size: 12px; }
+#terminal-text { color: var(--ink); }
+#frame-details {
+  overflow-x: auto;
+  margin: 0;
+  padding: 12px;
+  border: 2px solid var(--frame-dark);
+  background: var(--surface);
+  color: var(--muted);
+  font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+}
+@media (max-width: 900px) {
+  main { width: min(720px, calc(100vw - 16px)); margin-top: 14px; }
+  .masthead { grid-template-columns: 1fr; align-items: start; }
+  .subtitle { text-align: left; }
+  .replay-stage { grid-template-columns: 1fr; }
+  .arena-column { border-right: 0; border-bottom: 2px solid var(--frame); }
+  .mission-hud { box-shadow: inset 0 2px 0 var(--frame-dark); }
+}
+@media (max-width: 560px) {
+  .controls { grid-template-columns: 1fr 1fr; }
+  .speed-control { grid-column: 1 / -1; }
+  .order-slot { grid-template-columns: 54px minmax(0, 1fr); }
+  .order-item { grid-column: 2; }
 }
 </style>
 </head>
@@ -104,10 +269,13 @@ button:hover, button:focus-visible, select:focus-visible { border-color: var(--a
 <h1>Mission replay</h1>
 <p class="subtitle">Watch the robot work through a deterministic warehouse run. The arena is the primary view; evidence stays available without competing for attention.</p>
 </header>
-<section class="scene-frame" aria-label="Arena replay">
-<canvas id="visualizer-canvas" width="640" height="480" aria-label="2D mission replay arena">Canvas 2D is required.</canvas>
+<div class="replay-stage">
+<section class="arena-column" aria-label="Arena replay">
+<div class="scene-frame">
+<canvas id="visualizer-canvas" width="484" height="480" aria-label="2D mission replay arena">Canvas 2D is required.</canvas>
 <div id="visualizer-unavailable" class="visualizer-unavailable" role="status" hidden>Presentation unavailable. Embedded projection input is invalid or could not be initialized; no replay data was rendered. This visualizer is non-authoritative.</div>
-<div id="scene-legend" class="scene-legend" aria-label="Arena legend">
+</div>
+<div class="scene-legend" aria-label="Arena legend">
 <span class="legend-key"><i class="legend-swatch legend-robot"></i>robot</span>
 <span class="legend-key"><i class="legend-swatch legend-shelf"></i>shelf</span>
 <span class="legend-key"><i class="legend-swatch legend-depot"></i>depot</span>
@@ -115,27 +283,66 @@ button:hover, button:focus-visible, select:focus-visible { border-color: var(--a
 <span class="legend-key"><i class="legend-swatch legend-trail"></i>path trail</span>
 </div>
 </section>
+<aside class="mission-hud" aria-label="Mission telemetry">
+<section class="hud-section mission-summary">
+<h2 class="hud-heading">MISSION</h2>
+<strong id="hud-completed" class="hud-completed"></strong>
+<div class="progress-track" aria-label="Mission progress"><div id="hud-progress-bar"></div></div>
+</section>
+<section class="hud-section action-status-strip">
+<h2 class="hud-heading">ACTION / STATUS</h2>
+<span class="hud-label">ACTION</span><strong id="hud-action" class="hud-value"></strong>
+<span class="hud-label">STATUS</span><strong id="hud-status" class="hud-value"></strong>
+</section>
+<section class="hud-section">
+<h2 class="hud-heading">FAULT / RETRY</h2>
+<div id="hud-subevents" class="subevent-slots" aria-live="polite">
+<span id="hud-event-0" class="subevent-slot">—</span>
+<span id="hud-event-1" class="subevent-slot">—</span>
+</div>
+</section>
+<section class="hud-section order-queue">
+<h2 class="hud-heading">ORDER QUEUE</h2>
+<div class="order-list">
+<div class="order-slot" data-order-index="0"><span class="order-state">—</span><span class="order-id">—</span><span class="order-item">—</span></div>
+<div class="order-slot" data-order-index="1"><span class="order-state">—</span><span class="order-id">—</span><span class="order-item">—</span></div>
+<div class="order-slot" data-order-index="2"><span class="order-state">—</span><span class="order-id">—</span><span class="order-item">—</span></div>
+<div class="order-slot" data-order-index="3"><span class="order-state">—</span><span class="order-id">—</span><span class="order-item">—</span></div>
+<div class="order-slot" data-order-index="4"><span class="order-state">—</span><span class="order-id">—</span><span class="order-item">—</span></div>
+<div class="order-slot" data-order-index="5"><span class="order-state">—</span><span class="order-id">—</span><span class="order-item">—</span></div>
+<div class="order-slot" data-order-index="6"><span class="order-state">—</span><span class="order-id">—</span><span class="order-item">—</span></div>
+<div class="order-slot" data-order-index="7"><span class="order-state">—</span><span class="order-id">—</span><span class="order-item">—</span></div>
+<div class="order-slot" data-order-index="8"><span class="order-state">—</span><span class="order-id">—</span><span class="order-item">—</span></div>
+<div class="order-slot" data-order-index="9"><span class="order-state">—</span><span class="order-id">—</span><span class="order-item">—</span></div>
+</div>
+</section>
+<section class="hud-section">
+<h2 class="hud-heading">ROBOT</h2>
+<div class="robot-readout">
+<div class="readout-line"><span class="readout-label">POS</span><strong id="hud-robot-position" class="readout-value"></strong></div>
+<div class="readout-line"><span class="readout-label">LOAD</span><strong id="hud-robot-load" class="readout-value"></strong></div>
+</div>
+</section>
+<section class="hud-section">
+<h2 class="hud-heading">VERIFIER-OWNED</h2>
+<div class="verifier-readout">
+<div class="verifier-card"><span class="readout-label">SCORE</span><strong id="hud-score"></strong></div>
+<div class="verifier-card"><span class="readout-label">OUTCOME</span><strong id="hud-outcome"></strong></div>
+</div>
+</section>
+</aside>
+</div>
 <div class="controls" aria-label="Timeline controls">
-<button id="play" type="button">Play</button><button id="pause" type="button">Pause</button><button id="step-forward" type="button">Step forward</button>
+<button id="play" class="control-play" type="button">Play</button><button id="pause" type="button">Pause</button><button id="step-forward" type="button">Step forward</button>
 <label class="speed-control">Speed <select id="speed"><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option></select></label>
 </div>
-<section class="status-panel overview-panel" aria-label="Replay overview">
-<div class="panel-heading"><strong>Replay overview</strong><span id="status-text"></span></div>
-<div class="overview-grid">
-<div class="overview-card"><span class="eyebrow">Mission progress</span><strong id="mission-progress" class="overview-value"></strong></div>
-<div class="overview-card"><span class="eyebrow">Robot position</span><strong id="robot-status" class="overview-value"></strong></div>
-<div class="overview-card"><span class="eyebrow">Inventory</span><strong id="inventory-status" class="overview-value"></strong></div>
-</div>
-<div class="signal-row"><span>report signal: verification validity</span><span>report signal: replay agreement</span><span>report signal: receipt binding</span><span>report signal: visualizer is non-authoritative</span></div>
-</section>
-<section class="terminal-panel overview-panel" aria-label="Verifier result">
-<div class="panel-heading"><strong>Verifier result</strong><span class="ownership">VERIFIER-OWNED</span></div>
-<span id="terminal-text"></span>
-<p id="terminal-note" class="terminal-note">Score and outcome are displayed exactly as claimed by the independent verifier. This visualizer does not author them.</p>
-</section>
 <details id="frame-details-panel" class="details-panel">
-<summary>Frame evidence <span id="details-summary"></span></summary>
-<pre id="frame-details" aria-live="polite"></pre>
+<summary>Evidence / technical replay details <span id="details-summary"></span></summary>
+<div class="details-body">
+<div><span class="details-label">REPLAY STATUS</span><span id="status-text"></span></div>
+<div><span class="details-label">VERIFIER RESULT</span><span id="terminal-text"></span></div>
+<div><span class="details-label">FRAME DETAILS</span><pre id="frame-details" aria-live="polite"></pre></div>
+</div>
 </details>
 </div>
 </main>
@@ -146,16 +353,7 @@ const GRID_SIZE = 10;
 const CELL_SIZE = 44;
 const ORIGIN_X = 20;
 const ORIGIN_Y = 20;
-const HUD_X = 484;
 const ORDER_SLOT_COUNT = 10;
-const ORDER_GRID_COLUMNS = 2;
-const ORDER_GRID_ROWS = 5;
-const ORDER_GRID_Y = 128;
-const ORDER_SLOT_WIDTH = 64;
-const ORDER_SLOT_HEIGHT = 28;
-const ORDER_SLOT_GAP = 4;
-const ROBOT_SECTION_Y = 304;
-const VERIFIER_SECTION_Y = 410;
 const NOMINAL_FRAME_MS = 500;
 const PATH_TRAIL_LENGTH = 6;
 const TARGET_CUE_SIZE = 38;
@@ -174,17 +372,22 @@ let projection = null;
 let canvas = null;
 let context = null;
 let statusText = null;
-let missionProgress = null;
-let robotStatus = null;
-let inventoryStatus = null;
 let terminalText = null;
-let terminalNote = null;
 let frameDetails = null;
 let detailsSummary = null;
+let hudCompleted = null;
+let hudProgressBar = null;
+let hudAction = null;
+let hudStatus = null;
+let hudRobotPosition = null;
+let hudRobotLoad = null;
+let hudScore = null;
+let hudOutcome = null;
 let speed = null;
-let selectedFrame = 0;
 let timer = null;
+let selectedFrame = 0;
 
+function query(selector) { return document.querySelector(selector); }
 function setPresentationText(element, text) {
   if (element !== null) element.textContent = text;
 }
@@ -194,22 +397,26 @@ function showUnavailableState() {
     canvas.hidden = true;
     if (context !== null) context.clearRect(0, 0, canvas.width, canvas.height);
   }
-  const unavailable = document.getElementById("visualizer-unavailable");
+  const unavailable = query("#visualizer-unavailable");
   if (unavailable !== null) unavailable.hidden = false;
-  const sceneLegend = document.getElementById("scene-legend");
+  const sceneLegend = query(".scene-legend");
   if (sceneLegend !== null) sceneLegend.hidden = true;
-  [
-    document.getElementById("play"),
-    document.getElementById("pause"),
-    document.getElementById("step-forward"),
-    document.getElementById("speed")
-  ].forEach((control) => { if (control !== null) control.disabled = true; });
+  ["#play", "#pause", "#step-forward", "#speed"].forEach((selector) => {
+    const control = query(selector);
+    if (control !== null) {
+      control.disabled = true;
+      if (control.classList) control.classList.add("is-disabled");
+    }
+  });
   setPresentationText(statusText, "presentation unavailable · embedded projection is invalid or unavailable");
-  setPresentationText(missionProgress, "Unavailable");
-  setPresentationText(robotStatus, "Unavailable");
-  setPresentationText(inventoryStatus, "Unavailable");
   setPresentationText(terminalText, "Verifier-owned result unavailable; visualizer is non-authoritative.");
-  setPresentationText(terminalNote, "No verifier-owned score or outcome is available from the unavailable embedded projection.");
+  setPresentationText(hudCompleted, "Unavailable");
+  setPresentationText(hudRobotPosition, "Unavailable");
+  setPresentationText(hudRobotLoad, "Unavailable");
+  setPresentationText(hudScore, "Unavailable");
+  setPresentationText(hudOutcome, "Unavailable");
+  setPresentationText(hudAction, "Unavailable");
+  setPresentationText(hudStatus, "UNAVAILABLE");
   setPresentationText(frameDetails, "No frame evidence is available because the embedded presentation could not be initialized.");
   setPresentationText(detailsSummary, " · unavailable");
 }
@@ -509,79 +716,63 @@ function subeventStatus(frame) {
     color: event.kind === "fault_injected" ? PALETTE.fault : PALETTE.retry
   }));
 }
-function drawHudSubevents(frame) {
-  subeventStatus(frame).slice(0, 2).forEach((event, index) => {
-    const x = HUD_X + 82 + index * 30;
-    if (event.label === "FAULT") drawText("FAULT", x, 124, event.color);
-    else drawText("RETRY", x, 124, event.color);
-  });
+function renderStatusClass(frame) {
+  const classification = frame === null ? "initial" : CLASSIFICATION_STATUS[frame.classification] ? frame.classification : "unknown";
+  ["initial", "unknown", "committed", "rejected", "malformed", "unsupported", "invalid", "unauthorized", "idempotent_replay"].forEach((name) => hudStatus.classList.remove("status-" + name));
+  hudStatus.classList.add("status-" + classification);
 }
-function drawWorld(world, frame) {
-  drawFloor();
-  drawPathTrail(world, frame);
-  drawDepotSprite(world.robot.base_position);
-  for (const shelf of world.shelves) drawShelfSprite(shelf);
-  drawRobotSprite(world.robot);
-  drawTargetCue(safeTargetForFrame(frame, world));
-}
-function drawHud(world, frame) {
-  const result = projection.terminal_result;
+function renderMissionHud(world, frame) {
   const completed = world.completed_orders.length;
   const total = world.orders.length;
   const status = classificationStatus(frame);
-  context.fillStyle = PALETTE.hud;
-  context.fillRect(HUD_X, 0, canvas.width - HUD_X, canvas.height);
-  context.strokeStyle = PALETTE.hudLine;
-  context.beginPath(); context.moveTo(HUD_X, 0); context.lineTo(HUD_X, canvas.height); context.stroke();
-  context.font = "bold 11px ui-monospace, monospace";
-  drawText("MISSION", HUD_X + 12, 28, PALETTE.robot);
-  context.font = "bold 24px ui-monospace, monospace";
-  drawText(completed + "/" + total, HUD_X + 12, 59, PALETTE.completed);
-  context.font = "10px ui-monospace, monospace";
-  drawText("ORDERS COMPLETE", HUD_X + 14, 76, PALETTE.muted);
-  context.fillStyle = PALETTE.hudLine;
-  context.fillRect(HUD_X + 12, 86, 132, 4);
-  context.fillStyle = PALETTE.completed;
-  context.fillRect(HUD_X + 12, 86, total ? 132 * completed / total : 0, 4);
-  context.font = "bold 7px ui-monospace, monospace";
-  drawText("ACTION", HUD_X + 12, 100, PALETTE.warm);
-  drawText("STATUS", HUD_X + 82, 100, status.color);
-  context.font = "6px ui-monospace, monospace";
-  drawText(actionArgumentText(frame), HUD_X + 12, 112, PALETTE.pending);
-  drawText(status.label, HUD_X + 82, 112, status.color);
-  drawHudSubevents(frame);
-  drawText("ORDER QUEUE", HUD_X + 12, 124, PALETTE.warm);
-  context.font = "8px ui-monospace, monospace";
+  hudCompleted.textContent = completed + "/" + total;
+  hudProgressBar.style.width = (total ? (completed / total) * 100 : 0) + "%";
+  hudAction.textContent = actionArgumentText(frame);
+  hudStatus.textContent = status.label;
+  renderStatusClass(frame);
+  const events = subeventStatus(frame).slice(0, 2);
+  [0, 1].forEach((index) => {
+    const slot = query("#hud-event-" + index);
+    if (slot === null) return;
+    slot.classList.remove("subevent-fault", "subevent-retry", "subevent-empty");
+    const event = events[index] || null;
+    slot.textContent = event === null ? "—" : event.label;
+    slot.classList.add(event === null ? "subevent-empty" : event.label === "FAULT" ? "subevent-fault" : "subevent-retry");
+  });
+}
+function renderOrderQueue(world) {
   for (let index = 0; index < ORDER_SLOT_COUNT; index += 1) {
-    const column = index % ORDER_GRID_COLUMNS;
-    const row = Math.floor(index / ORDER_GRID_COLUMNS);
-    const slotX = HUD_X + 12 + column * (ORDER_SLOT_WIDTH + ORDER_SLOT_GAP);
-    const slotY = ORDER_GRID_Y + row * (ORDER_SLOT_HEIGHT + ORDER_SLOT_GAP);
+    const slot = query('.order-slot[data-order-index="' + index + '"]');
+    if (slot === null) continue;
+    const state = slot.querySelector(".order-state");
+    const orderId = slot.querySelector(".order-id");
+    const orderItem = slot.querySelector(".order-item");
     const order = world.orders[index] || null;
-    context.fillStyle = PALETTE.background;
-    context.fillRect(slotX, slotY, ORDER_SLOT_WIDTH, ORDER_SLOT_HEIGHT);
-    context.strokeStyle = PALETTE.hudLine;
-    context.strokeRect(slotX + 0.5, slotY + 0.5, ORDER_SLOT_WIDTH - 1, ORDER_SLOT_HEIGHT - 1);
+    slot.classList.remove("is-complete", "is-pending", "is-empty");
     if (order === null) {
-      drawText("—", slotX + 8, slotY + 18, PALETTE.muted);
+      setPresentationText(state, "—");
+      setPresentationText(orderId, "—");
+      setPresentationText(orderItem, "—");
+      slot.classList.add("is-empty");
       continue;
     }
     const done = world.completed_orders.includes(order.order_id);
-    context.fillStyle = done ? PALETTE.completed : PALETTE.item;
-    context.fillRect(slotX + 5, slotY + 7, 6, 6);
-    drawText(order.order_id, slotX + 15, slotY + 12, done ? PALETTE.completed : PALETTE.pending);
-    drawText(order.item_id + " x" + order.quantity, slotX + 15, slotY + 23, PALETTE.muted);
+    setPresentationText(state, done ? "DONE" : "PENDING");
+    setPresentationText(orderId, order.order_id);
+    setPresentationText(orderItem, order.item_id + " x" + order.quantity);
+    slot.classList.add(done ? "is-complete" : "is-pending");
   }
-  context.strokeStyle = PALETTE.hudLine;
-  context.beginPath(); context.moveTo(HUD_X + 12, ROBOT_SECTION_Y); context.lineTo(canvas.width - 12, ROBOT_SECTION_Y); context.stroke();
-  const robot = world.robot;
-  context.font = "10px ui-monospace, monospace";
-  drawText("ROBOT", HUD_X + 12, ROBOT_SECTION_Y + 23, PALETTE.robot);
-  drawText("POS  " + robot.position.join(", "), HUD_X + 12, ROBOT_SECTION_Y + 42, PALETTE.pending);
-  drawText("LOAD " + valueText(robot.inventory_item_id, "empty"), HUD_X + 12, ROBOT_SECTION_Y + 61, robot.inventory_item_id === null ? PALETTE.muted : PALETTE.carried);
-  drawText("VERIFIER-OWNED", HUD_X + 12, VERIFIER_SECTION_Y, PALETTE.warm);
-  drawText("score " + result.verified_score, HUD_X + 12, VERIFIER_SECTION_Y + 19, PALETTE.pending);
-  drawText("outcome " + result.outcome, HUD_X + 12, VERIFIER_SECTION_Y + 38, PALETTE.pending);
+}
+function renderRobotHud(world) {
+  hudRobotPosition.textContent = "(" + world.robot.position.join(", ") + ")";
+  hudRobotLoad.textContent = valueText(world.robot.inventory_item_id, "empty");
+  hudRobotLoad.classList.remove("is-empty", "is-loaded");
+  hudRobotLoad.classList.add(world.robot.inventory_item_id === null ? "is-empty" : "is-loaded");
+}
+function renderVerifierHud() {
+  const result = projection.terminal_result;
+  hudScore.textContent = String(result.verified_score);
+  hudOutcome.textContent = result.outcome;
 }
 function detailLines(frame, world) {
   const counters = frame ? frame.counters.after : projection.counters;
@@ -605,41 +796,56 @@ function detailLines(frame, world) {
     "fault/retry subevents " + (frame ? frame.subevents.map(subeventText).join(" | ") || "none" : "none")
   ];
 }
+function renderReplayMetadata(frame, world) {
+  const result = projection.terminal_result;
+  const status = classificationStatus(frame);
+  statusText.textContent = "frame " + (frame ? frame.policy_step : "initial") + " · action " + normalizedActionText(frame) + " · status " + status.label;
+  terminalText.textContent = "Verifier-owned score: " + result.verified_score + "; Verifier-owned outcome: " + result.outcome + "; authority: " + result.outcome_authority + "; verifier version " + result.verifier_version + " status " + result.verifier_status + "; completed " + result.completed_count + "/" + result.total_count + ".";
+  frameDetails.textContent = detailLines(frame, world).join("\\n");
+  detailsSummary.textContent = " · " + (frame ? "frame " + frame.policy_step + " / " + projection.frames.length : "initial world");
+}
+function drawWorld(world, frame) {
+  drawFloor();
+  drawPathTrail(world, frame);
+  drawDepotSprite(world.robot.base_position);
+  for (const shelf of world.shelves) drawShelfSprite(shelf);
+  drawRobotSprite(world.robot);
+  drawTargetCue(safeTargetForFrame(frame, world));
+}
 function render() {
   const frame = projection.frames.length ? projection.frames[selectedFrame] : null;
   const world = worldForFrame();
   drawWorld(world, frame);
-  drawHud(world, frame);
-  const result = projection.terminal_result;
-  const status = classificationStatus(frame);
-  statusText.textContent = "frame " + (frame ? frame.policy_step : "initial") + " · action " + normalizedActionText(frame) + " · status " + status.label;
-  missionProgress.textContent = world.completed_orders.length + " / " + world.orders.length + " orders";
-  robotStatus.textContent = "(" + world.robot.position.join(", ") + ")";
-  inventoryStatus.textContent = valueText(world.robot.inventory_item_id, "empty");
-  terminalText.textContent = "Verifier-owned score: " + result.verified_score + "; Verifier-owned outcome: " + result.outcome + "; authority: " + result.outcome_authority + "; verifier version " + result.verifier_version + " status " + result.verifier_status + "; completed " + result.completed_count + "/" + result.total_count + ".";
-  frameDetails.textContent = detailLines(frame, world).join("\\n");
-  detailsSummary.textContent = " · " + (frame ? "frame " + frame.policy_step + " / " + projection.frames.length : "initial world");
+  renderMissionHud(world, frame);
+  renderOrderQueue(world);
+  renderRobotHud(world);
+  renderVerifierHud();
+  renderReplayMetadata(frame, world);
 }
 function pause() { if (timer !== null) { clearInterval(timer); timer = null; } }
 function stepForward() { if (projection.frames.length) selectedFrame = (selectedFrame + 1) % projection.frames.length; render(); }
 function play() { pause(); timer = setInterval(stepForward, NOMINAL_FRAME_MS / Number(speed.value)); }
 function initializePresentation() {
   try {
-    canvas = document.getElementById("visualizer-canvas");
-    statusText = document.getElementById("status-text");
-    missionProgress = document.getElementById("mission-progress");
-    robotStatus = document.getElementById("robot-status");
-    inventoryStatus = document.getElementById("inventory-status");
-    terminalText = document.getElementById("terminal-text");
-    terminalNote = document.getElementById("terminal-note");
-    frameDetails = document.getElementById("frame-details");
-    detailsSummary = document.getElementById("details-summary");
-    speed = document.getElementById("speed");
+    canvas = query("#visualizer-canvas");
+    statusText = query("#status-text");
+    terminalText = query("#terminal-text");
+    frameDetails = query("#frame-details");
+    detailsSummary = query("#details-summary");
+    hudCompleted = query("#hud-completed");
+    hudProgressBar = query("#hud-progress-bar");
+    hudAction = query("#hud-action");
+    hudStatus = query("#hud-status");
+    hudRobotPosition = query("#hud-robot-position");
+    hudRobotLoad = query("#hud-robot-load");
+    hudScore = query("#hud-score");
+    hudOutcome = query("#hud-outcome");
+    speed = query("#speed");
     if (canvas === null || typeof canvas.getContext !== "function") return showUnavailableState();
     context = canvas.getContext("2d");
     if (context === null) return showUnavailableState();
 
-    const embeddedProjection = document.getElementById("visualizer-projection-hex");
+    const embeddedProjection = query("#visualizer-projection-hex");
     if (embeddedProjection === null || typeof embeddedProjection.textContent !== "string") return showUnavailableState();
     const hex = embeddedProjection.textContent;
     if (hex.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(hex)) return showUnavailableState();
@@ -648,9 +854,9 @@ function initializePresentation() {
     projection = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     if (projection === null || typeof projection !== "object") return showUnavailableState();
 
-    document.getElementById("play").addEventListener("click", play);
-    document.getElementById("pause").addEventListener("click", pause);
-    document.getElementById("step-forward").addEventListener("click", stepForward);
+    query("#play").addEventListener("click", play);
+    query("#pause").addEventListener("click", pause);
+    query("#step-forward").addEventListener("click", stepForward);
     speed.addEventListener("change", function () { if (timer !== null) play(); });
     render();
   } catch (_error) {
