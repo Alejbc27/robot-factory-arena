@@ -6,13 +6,13 @@ Robot Factory & Arena is an implemented v0 system for running bounded agent stra
 
 **The boundary is simple:** the provider proposes, the deterministic core authorizes and executes, and the verifier owns the score and outcome. The core and its evidence can run without an LLM or network service.
 
-[Open the live tournament evidence](docs/live-tournament-results.md) · [Read the architecture](docs/architecture/system-overview.md) · [Inspect the visualizer contract](docs/sdd/robot-run-visualizer.md)
+[Open the live tournament results](docs/live-tournament-results.md) · [Read the architecture](docs/architecture/system-overview.md) · [Inspect the visualizer contract](docs/sdd/robot-run-visualizer.md)
 
 ## See the implemented outcome
 
 ![Final tactical replay showing the verifier-owned result](docs/assets/visualizer-overview.png)
 
-*Final seed-18 replay: all 5 orders completed, verifier-owned score 100, and completed outcome. The visualizer is an offline, downstream projection of verified inputs—not a verifier, scorer, replay engine, or evidence authority.*
+*Final GLM R1 seed-18 replay: all 5 orders completed, verifier-owned score 100, and completed outcome. The visualizer is an offline, downstream projection of verified inputs—not a verifier, scorer, replay engine, or evidence authority.*
 
 The released visualizer is self-contained: open it locally, step through the tactical run, and inspect the evidence details without a server or network call.
 
@@ -142,7 +142,7 @@ The fake acceptance is deterministic and separate from provider-backed results. 
 | **2. Robustness** | **Complete** | Fault tapes, duplicate detection, safe-abort/unresolved classification, and replay-equivalent recovery paths are implemented. |
 | **3. Arena conditions** | **Complete** | R1/R2/R3 orchestration, deterministic fake acceptance, and real tournament artifacts are complete; scientific comparison remains out of scope. |
 | **4. Providers and observability** | **Complete** | The provider and downstream observability path is implemented and validated; neither path becomes authority. |
-| **5. Analysis and evidence publication** | **Complete for current v0** | Current v0 results, receipts, limitations, and non-benchmark claims are published. |
+| **5. Analysis and evidence publication** | **Complete for current v0** | Current v0 result summaries, committed golden receipts, limitations, and non-benchmark claims are published. |
 | **6. Wider expansion** | **Optional** | Additional tasks, providers, or experiments are future work only if they preserve the evidence and authority boundaries. |
 
 ## Technical references

@@ -8,7 +8,7 @@ The read-only tournament artifacts record these verifier outcomes:
 - **OpenAI (`gpt-5.6-luna`), first run:** all nine rows have outcome `safe_abort`, with verified scores from **40 to 80**.
 - **OpenAI (`gpt-5.6-luna`), replication:** all nine rows have outcome `safe_abort`, with verified scores from **40 to 80**.
 
-`status` is the harness row status; `outcome` and `verified_score` are the recorded result fields. Both OpenAI tournaments completed 900 successful provider requests without recorded provider errors, then exhausted the frozen 100-step budget in every row; that operational evidence distinguishes policy inefficiency under this profile from provider availability failure.
+`status` is the harness row status; `outcome` and `verified_score` are the recorded result fields. Each OpenAI tournament's nine bound reports contain 900 successful provider requests (100 per report), with zero recorded provider request errors. Every bound run then exhausted the frozen 100-step budget; that operational evidence distinguishes policy inefficiency under this profile from provider availability failure. These counts describe the bound reports, not additional physical attempts such as the unresolved first attempt documented below.
 
 ## Exact condition/seed rows
 
@@ -58,6 +58,23 @@ The first OpenAI tournament's `R2 / 18` row is `evidence_invalid`, outcome `safe
 - First attempt registration: `artifacts/live-tournaments/openai-luna/tournament-openai-luna-20260911-1852/attempts/r2-agent-01-seed-18-attempt-01/launch.json`.
 - Unresolved event and retry evidence: `artifacts/live-tournaments/openai-luna/tournament-openai-luna-20260911-1852/attempt-log.jsonl` and `artifacts/live-tournaments/openai-luna/tournament-openai-luna-20260911-1852/decision-log.jsonl`.
 - Bound retry receipt: `artifacts/live-tournaments/openai-luna/tournament-openai-luna-20260911-1852/core/runs/lr_7c5b310cd570bd383fd35651cdf447a0cedf81d4361a0ea79f895652d66e15e3/execution-d3b6bb9b40f245deb2ee688d1db2bdd6/receipt.json`.
+
+## README replay screenshot provenance
+
+The README screenshot is derived from the terminal frame of this exact validated projection:
+
+| Field | Value |
+|---|---|
+| Source tournament | `tournament-glm-5-3-flash-live-20260911-2053` |
+| Condition / seed | R1 / 18 |
+| Logical run | `lr_bb8a537de98cfea03fae440d04797dc89fb9b176bb1c16fd9035b474ec348d84` |
+| Execution | `execution-1ebab7a469c8439e979992ea35254b53` |
+| Source | verified `visualizer.html`, terminal frame 92 / 92 |
+| Receipt file SHA-256 | `sha256:bee8684c2679e929f91e3afd5743add6d71740e2ab9a365b747df85abb086318` |
+| Embedded projection SHA-256 | `sha256:0a25b4b828d7cd08e7ba8d3c55722d4a4a4204ca2120b4a7584a68c7048bcf2d` |
+| Output | `docs/assets/visualizer-overview.png` |
+
+The source tournament artifacts remain intentionally untracked; the identifiers and digests provide a stable provenance record without publishing those generated artifacts.
 
 ## Artifact source
 
