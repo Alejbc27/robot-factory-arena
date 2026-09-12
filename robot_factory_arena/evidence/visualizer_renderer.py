@@ -1,5 +1,8 @@
 """Deterministic, projection-only offline Canvas visualizer renderer."""
 
+import base64
+from importlib import resources
+
 from robot_factory_arena.evidence.visualizer_projection import (
     VisualizerProjection,
     canonical_projection_bytes,
@@ -37,7 +40,8 @@ body {
   color: var(--ink);
   font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
-main { width: min(1400px, calc(100vw - 24px)); margin: 24px auto 40px; }
+/* The 484×480 backing canvas keeps the 10×10 world at 44px cells plus 20px margins. */
+main { width: min(1120px, calc(100vw - 24px)); margin: 24px auto 40px; }
 .visualizer-shell {
   overflow: hidden;
   border: 2px solid var(--frame);
@@ -73,7 +77,7 @@ h1 {
 .subtitle { max-width: 54ch; margin: 0; color: var(--muted); text-align: right; }
 .replay-stage {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 330px;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 340px);
   min-width: 0;
 }
 .arena-column { min-width: 0; border-right: 2px solid var(--frame); background: var(--page); }
@@ -142,8 +146,9 @@ canvas {
   box-shadow: inset 0 0 0 2px var(--page);
 }
 #hud-progress-bar { width: 0; height: 100%; background: var(--green); }
-.action-status-strip { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 10px; align-items: center; }
+.action-status-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; align-items: center; }
 .action-status-strip .hud-heading { grid-column: 1 / -1; margin-bottom: 3px; }
+.action-status-pair { min-width: 0; }
 .hud-label { color: var(--amber); font-size: 10px; font-weight: 700; letter-spacing: .12em; }
 .hud-value { min-width: 0; overflow: hidden; color: var(--ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 #hud-action { color: var(--ink); }
@@ -166,7 +171,7 @@ canvas {
 .subevent-fault { border-color: var(--danger); color: var(--danger); }
 .subevent-retry { border-color: var(--amber); color: var(--amber); }
 .order-queue { display: grid; gap: 8px; }
-.order-list { display: grid; gap: 6px; }
+.order-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
 .order-slot {
   display: grid;
   grid-template-columns: 58px minmax(0, 1fr) minmax(0, 1fr);
@@ -291,8 +296,8 @@ button:hover, button:focus-visible, select:focus-visible { border-color: var(--c
 </section>
 <section class="hud-section action-status-strip">
 <h2 class="hud-heading">ACTION / STATUS</h2>
-<span class="hud-label">ACTION</span><strong id="hud-action" class="hud-value"></strong>
-<span class="hud-label">STATUS</span><strong id="hud-status" class="hud-value"></strong>
+<div class="action-status-pair"><span class="hud-label">ACTION</span><strong id="hud-action" class="hud-value"></strong></div>
+<div class="action-status-pair"><span class="hud-label">STATUS</span><strong id="hud-status" class="hud-value"></strong></div>
 </section>
 <section class="hud-section">
 <h2 class="hud-heading">FAULT / RETRY</h2>
@@ -349,10 +354,20 @@ button:hover, button:focus-visible, select:focus-visible { border-color: var(--c
 <script id="visualizer-projection-hex" type="application/octet-stream">__PROJECTION_HEX__</script>
 <script>
 "use strict";
+const ATLAS_DATA_URI = "__ATLAS_DATA_URI__";
+const ATLAS_RECTS = Object.freeze({
+  robot_front: [0, 0, 112, 123], robot_east: [112, 0, 112, 108],
+  robot_north: [224, 0, 112, 108], robot_west: [337, 0, 113, 108],
+  depot: [450, 0, 169, 157],
+  rack_0: [0, 157, 154, 150], rack_1: [154, 157, 153, 150], rack_2: [307, 157, 154, 150],
+  crate_0: [461, 157, 97, 97], crate_1: [558, 157, 97, 97], crate_2: [655, 157, 97, 97], crate_3: [461, 255, 97, 97],
+  floor_0: [0, 337, 139, 135], floor_1: [139, 337, 139, 135], floor_2: [277, 337, 139, 135]
+});
 const GRID_SIZE = 10;
 const CELL_SIZE = 44;
 const ORIGIN_X = 20;
 const ORIGIN_Y = 20;
+const GRID_RECT = Object.freeze({ x: ORIGIN_X, y: ORIGIN_Y, width: GRID_SIZE * CELL_SIZE, height: GRID_SIZE * CELL_SIZE });
 const ORDER_SLOT_COUNT = 10;
 const NOMINAL_FRAME_MS = 500;
 const PATH_TRAIL_LENGTH = 6;
@@ -386,6 +401,8 @@ let hudOutcome = null;
 let speed = null;
 let timer = null;
 let selectedFrame = 0;
+let atlasImage = null;
+let atlasReady = false;
 
 function query(selector) { return document.querySelector(selector); }
 function setPresentationText(element, text) {
@@ -436,9 +453,37 @@ function drawText(text, x, y, color) { context.fillStyle = color || PALETTE.pend
 function cellOrigin(position) {
   return { x: ORIGIN_X + position[0] * CELL_SIZE, y: ORIGIN_Y + position[1] * CELL_SIZE };
 }
+function tileRect(position) {
+  const origin = cellOrigin(position);
+  return { x: origin.x, y: origin.y, width: CELL_SIZE, height: CELL_SIZE };
+}
+function bottomCenteredRect(tile, width, height) {
+  return { x: tile.x + Math.floor((tile.width - width) / 2), y: tile.y + tile.height - height, width: width, height: height };
+}
+function rackDestination(position) { return bottomCenteredRect(tileRect(position), 38, 40); }
+function depotDestination(position) { return bottomCenteredRect(tileRect(position), 40, 40); }
+function robotDestination(position) { return bottomCenteredRect(tileRect(position), 36, 38); }
+function rackCargoDestination(destination) {
+  return { x: destination.x + 7, y: destination.y + 9, width: 24, height: 24 };
+}
+function robotCargoDestination(destination) {
+  return { x: destination.x + 6, y: destination.y + 3, width: 24, height: 24 };
+}
+function stableIndex(value, count) {
+  let total = 0;
+  for (let index = 0; index < value.length; index += 1) total = (total * 31 + value.charCodeAt(index)) >>> 0;
+  return total % count;
+}
+function drawAtlasSprite(name, x, y, width, height) {
+  const rect = ATLAS_RECTS[name];
+  if (!atlasReady || atlasImage === null || rect === undefined) return false;
+  context.drawImage(atlasImage, rect[0], rect[1], rect[2], rect[3], x, y, width, height);
+  return true;
+}
 function drawIndustrialTile(column, row) {
   const x = ORIGIN_X + column * CELL_SIZE;
   const y = ORIGIN_Y + row * CELL_SIZE;
+  if (drawAtlasSprite("floor_" + ((column * 3 + row) % 3), x, y, CELL_SIZE, CELL_SIZE)) return;
   const alternate = (row + column) % 2 === 0;
   context.fillStyle = alternate ? PALETTE.floor : PALETTE.floorAlt;
   context.fillRect(x + 1, y + 1, CELL_SIZE - 2, CELL_SIZE - 2);
@@ -453,19 +498,6 @@ function drawIndustrialTile(column, row) {
     context.fillStyle = PALETTE.metal;
     context.fillRect(x + 16, y + 16, 12, 2);
     context.fillRect(x + 21, y + 11, 2, 12);
-  }
-}
-function drawHazardStripe(x, y, width, height) {
-  context.fillStyle = PALETTE.hazard;
-  context.fillRect(x, y, width, height);
-  context.fillStyle = PALETTE.metalDark;
-  for (let stripe = -height; stripe < width; stripe += 10) {
-    context.beginPath();
-    context.moveTo(x + stripe, y + height);
-    context.lineTo(x + stripe + height, y);
-    context.lineTo(x + stripe + height - 3, y);
-    context.lineTo(x + stripe - 3, y + height);
-    context.fill();
   }
 }
 function drawFloor() {
@@ -486,7 +518,6 @@ function drawFloor() {
     }
     context.fillStyle = PALETTE.laneEdge;
   }
-  drawHazardStripe(ORIGIN_X + 2, ORIGIN_Y + GRID_SIZE * CELL_SIZE - 7, GRID_SIZE * CELL_SIZE - 4, 5);
   context.strokeStyle = PALETTE.grid;
   context.lineWidth = 1;
   for (let line = 0; line <= GRID_SIZE; line += 1) {
@@ -500,6 +531,7 @@ function drawFloor() {
   }
 }
 function drawCrateSprite(x, y, color, label) {
+  if (drawAtlasSprite("crate_" + stableIndex(String(label || "cargo"), 4), x, y, 25, 25)) return;
   context.fillStyle = "rgba(0, 0, 0, .34)";
   context.fillRect(x + 3, y + 4, 21, 20);
   context.fillStyle = PALETTE.crateDark;
@@ -521,86 +553,80 @@ function drawCrateSprite(x, y, color, label) {
     drawText(label, x + 7, y + 15, PALETTE.pending);
   }
 }
-function drawHazardDepotSprite(position) {
-  const origin = cellOrigin(position);
-  context.fillStyle = "rgba(0, 0, 0, .34)";
-  context.fillRect(origin.x + 5, origin.y + 7, CELL_SIZE - 9, CELL_SIZE - 8);
+function drawDepotSprite(position) {
+  const destination = depotDestination(position);
+  if (drawAtlasSprite("depot", destination.x, destination.y, destination.width, destination.height)) return;
   context.fillStyle = PALETTE.depotDark;
-  context.fillRect(origin.x + 3, origin.y + 3, CELL_SIZE - 6, CELL_SIZE - 6);
+  context.fillRect(destination.x, destination.y, destination.width, destination.height);
   context.fillStyle = PALETTE.depot;
-  context.fillRect(origin.x + 7, origin.y + 7, CELL_SIZE - 14, CELL_SIZE - 14);
-  drawHazardStripe(origin.x + 8, origin.y + 9, CELL_SIZE - 16, 5);
-  context.fillStyle = PALETTE.depotDark;
-  context.fillRect(origin.x + 11, origin.y + 18, CELL_SIZE - 22, 3);
-  context.fillRect(origin.x + 11, origin.y + 27, CELL_SIZE - 22, 3);
-  context.fillStyle = PALETTE.hazard;
-  context.fillRect(origin.x + 10, origin.y + 34, 4, 3);
-  context.fillRect(origin.x + 30, origin.y + 34, 4, 3);
+  context.fillRect(destination.x + 4, destination.y + 4, destination.width - 8, destination.height - 8);
   context.strokeStyle = PALETTE.pending;
   context.lineWidth = 2;
-  context.strokeRect(origin.x + 6.5, origin.y + 6.5, CELL_SIZE - 13, CELL_SIZE - 13);
-  context.font = "bold 7px ui-monospace, monospace";
-  drawText("DEPOT", origin.x + 9, origin.y + 26, PALETTE.pending);
+  context.strokeRect(destination.x + 5, destination.y + 5, destination.width - 10, destination.height - 10);
 }
-function drawDepotSprite(position) {
-  drawHazardDepotSprite(position);
+function drawRackShell(destination, shelfId) {
+  const drawn = drawAtlasSprite("rack_" + stableIndex(shelfId, 3), destination.x, destination.y, destination.width, destination.height);
+  // Atlas racks have baked crates. This opaque interior reconstruction makes the shell empty.
+  context.fillStyle = PALETTE.shelfDark;
+  context.fillRect(destination.x + 6, destination.y + 9, destination.width - 12, destination.height - 16);
+  context.fillStyle = PALETTE.shelfHighlight;
+  context.fillRect(destination.x + 3, destination.y + 4, destination.width - 6, 3);
+  context.fillRect(destination.x + 4, destination.y + 18, destination.width - 8, 3);
+  context.fillRect(destination.x + 4, destination.y + 31, destination.width - 8, 3);
+  return drawn;
 }
 function drawShelfSprite(shelf) {
-  const origin = cellOrigin(shelf.position);
-  context.fillStyle = "rgba(0, 0, 0, .3)";
-  context.fillRect(origin.x + 6, origin.y + 8, CELL_SIZE - 10, CELL_SIZE - 8);
-  context.fillStyle = PALETTE.shelfDark;
-  context.fillRect(origin.x + 4, origin.y + 4, CELL_SIZE - 8, CELL_SIZE - 8);
-  context.fillStyle = shelf.item_id === null ? PALETTE.shelfDark : PALETTE.shelf;
-  context.fillRect(origin.x + 7, origin.y + 7, CELL_SIZE - 14, CELL_SIZE - 14);
-  context.fillStyle = PALETTE.shelfHighlight;
-  context.fillRect(origin.x + 8, origin.y + 8, CELL_SIZE - 16, 3);
-  context.fillStyle = PALETTE.shelfDark;
-  context.fillRect(origin.x + 8, origin.y + 18, CELL_SIZE - 16, 3);
-  context.fillRect(origin.x + 8, origin.y + 29, CELL_SIZE - 16, 3);
-  context.fillStyle = PALETTE.shelfHighlight;
-  context.fillRect(origin.x + 7, origin.y + 7, 3, CELL_SIZE - 14);
-  context.fillRect(origin.x + CELL_SIZE - 10, origin.y + 7, 3, CELL_SIZE - 14);
+  const destination = rackDestination(shelf.position);
+  drawRackShell(destination, shelf.shelf_id);
+  if (shelf.item_id !== null) {
+    const cargo = rackCargoDestination(destination);
+    drawCrateSprite(cargo.x, cargo.y, PALETTE.item, shelf.item_id);
+  }
+}
+function robotFacing(frames, frameIndex) {
+  let facing = "robot_front";
+  for (let index = 1; index <= frameIndex; index += 1) {
+    const before = frames[index - 1].state_after.robot.position;
+    const after = frames[index].state_after.robot.position;
+    const deltaX = after[0] - before[0];
+    const deltaY = after[1] - before[1];
+    if (deltaX > 0 && deltaY === 0) facing = "robot_east";
+    else if (deltaX < 0 && deltaY === 0) facing = "robot_west";
+    else if (deltaY > 0 && deltaX === 0) facing = "robot_front";
+    else if (deltaY < 0 && deltaX === 0) facing = "robot_north";
+  }
+  return facing;
+}
+function drawRobotShell(destination, facing) {
+  const drawn = drawAtlasSprite(facing, destination.x, destination.y, destination.width, destination.height);
+  // The source robots include magenta cargo. Opaque roof compositing removes it for empty robots.
+  context.fillStyle = PALETTE.robotDark;
+  context.fillRect(destination.x + 7, destination.y + 1, 22, 15);
+  context.fillStyle = PALETTE.robot;
+  context.fillRect(destination.x + 10, destination.y + 3, 16, 10);
   context.fillStyle = PALETTE.pending;
-  context.fillRect(origin.x + 8, origin.y + 9, 2, 2);
-  context.fillRect(origin.x + CELL_SIZE - 10, origin.y + 9, 2, 2);
-  context.fillRect(origin.x + 8, origin.y + 31, 2, 2);
-  context.fillRect(origin.x + CELL_SIZE - 10, origin.y + 31, 2, 2);
-  context.strokeStyle = "rgba(255, 255, 255, .2)";
-  context.strokeRect(origin.x + 4.5, origin.y + 4.5, CELL_SIZE - 9, CELL_SIZE - 9);
-  context.font = "9px ui-monospace, monospace";
-  drawText(shelf.shelf_id.slice(-2), origin.x + 7, origin.y + CELL_SIZE - 5, PALETTE.pending);
-  if (shelf.item_id !== null) drawCrateSprite(origin.x + 11, origin.y + 10, PALETTE.item, shelf.item_id.slice(-2));
+  context.fillRect(destination.x + 17, destination.y + 3, 2, 10);
+  return drawn;
 }
 function drawRobotSprite(robot) {
-  const origin = cellOrigin(robot.position);
-  context.fillStyle = "rgba(0, 0, 0, .3)";
-  context.fillRect(origin.x + 6, origin.y + 8, CELL_SIZE - 10, CELL_SIZE - 8);
+  const destination = robotDestination(robot.position);
+  if (drawRobotShell(destination, robotFacing(projection.frames, selectedFrame))) {
+    if (robot.inventory_item_id !== null) {
+      const cargo = robotCargoDestination(destination);
+      drawCrateSprite(cargo.x, cargo.y, PALETTE.carried, robot.inventory_item_id);
+    }
+    return;
+  }
   context.fillStyle = PALETTE.robotDark;
-  context.fillRect(origin.x + 8, origin.y + 9, 28, 28);
+  context.fillRect(destination.x, destination.y, destination.width, destination.height);
   context.fillStyle = PALETTE.robot;
-  context.fillRect(origin.x + 11, origin.y + 11, 22, 22);
-  context.fillStyle = PALETTE.robotDark;
-  context.fillRect(origin.x + 14, origin.y + 5, 16, 6);
-  context.fillRect(origin.x + 21, origin.y + 1, 2, 5);
-  context.fillStyle = PALETTE.hazard;
-  context.fillRect(origin.x + 20, origin.y, 4, 3);
-  context.fillStyle = PALETTE.robotDark;
-  context.fillRect(origin.x + 9, origin.y + 34, 7, 4);
-  context.fillRect(origin.x + 29, origin.y + 34, 7, 4);
-  context.fillStyle = PALETTE.background;
-  context.fillRect(origin.x + 15, origin.y + 17, 5, 5);
-  context.fillRect(origin.x + 24, origin.y + 17, 5, 5);
+  context.fillRect(destination.x + 4, destination.y + 7, destination.width - 8, destination.height - 11);
   context.fillStyle = PALETTE.pending;
-  context.fillRect(origin.x + 18, origin.y + 27, 9, 3);
-  context.fillStyle = PALETTE.robotDark;
-  context.fillRect(origin.x + 14, origin.y + 24, 16, 2);
-  context.fillStyle = PALETTE.hazard;
-  context.fillRect(origin.x + 16, origin.y + 25, 3, 1);
-  context.fillRect(origin.x + 25, origin.y + 25, 3, 1);
-  context.strokeStyle = PALETTE.pending;
-  context.strokeRect(origin.x + 10.5, origin.y + 10.5, 23, 23);
-  if (robot.inventory_item_id !== null) drawCrateSprite(origin.x + 12, origin.y - 1, PALETTE.carried, robot.inventory_item_id.slice(-2));
+  context.fillRect(destination.x + 11, destination.y + 16, 14, 3);
+  if (robot.inventory_item_id !== null) {
+    const cargo = robotCargoDestination(destination);
+    drawCrateSprite(cargo.x, cargo.y, PALETTE.carried, robot.inventory_item_id);
+  }
 }
 function drawMovementPip(position, index, count) {
   const point = cellOrigin(position);
@@ -822,6 +848,13 @@ function render() {
   renderVerifierHud();
   renderReplayMetadata(frame, world);
 }
+function loadAtlas() {
+  if (!ATLAS_DATA_URI || typeof Image !== "function") return;
+  const image = new Image();
+  image.onload = function () { atlasImage = image; atlasReady = true; if (projection !== null) render(); };
+  image.onerror = function () { atlasImage = null; atlasReady = false; if (projection !== null) render(); };
+  image.src = ATLAS_DATA_URI;
+}
 function pause() { if (timer !== null) { clearInterval(timer); timer = null; } }
 function stepForward() { if (projection.frames.length) selectedFrame = (selectedFrame + 1) % projection.frames.length; render(); }
 function play() { pause(); timer = setInterval(stepForward, NOMINAL_FRAME_MS / Number(speed.value)); }
@@ -853,6 +886,7 @@ function initializePresentation() {
     for (let i = 0; i < hex.length; i += 2) bytes[i / 2] = Number.parseInt(hex.slice(i, i + 2), 16);
     projection = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     if (projection === null || typeof projection !== "object") return showUnavailableState();
+    loadAtlas();
 
     query("#play").addEventListener("click", play);
     query("#pause").addEventListener("click", pause);
@@ -870,10 +904,23 @@ initializePresentation();
 """
 
 
+def _atlas_data_uri() -> str:
+    """Load the packaged atlas without depending on the caller's working directory."""
+    try:
+        atlas = resources.files("robot_factory_arena.evidence").joinpath(
+            "assets/tactical_reference_atlas.png"
+        ).read_bytes()
+    except OSError:
+        return ""
+    return "data:image/png;base64," + base64.b64encode(atlas).decode("ascii")
+
+
 def render_visualizer(projection: VisualizerProjection) -> bytes:
     """Return deterministic self-contained HTML for one validated projection."""
     if not isinstance(projection, VisualizerProjection):
         raise TypeError("projection must be a VisualizerProjection")
-    return _TEMPLATE.replace(
-        "__PROJECTION_HEX__", canonical_projection_bytes(projection).hex()
-    ).encode("utf-8")
+    return (
+        _TEMPLATE.replace("__PROJECTION_HEX__", canonical_projection_bytes(projection).hex())
+        .replace("__ATLAS_DATA_URI__", _atlas_data_uri())
+        .encode("utf-8")
+    )
