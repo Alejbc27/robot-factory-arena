@@ -8,7 +8,7 @@ The read-only tournament artifacts record these verifier outcomes:
 - **OpenAI (`gpt-5.6-luna`), first run:** all nine rows have outcome `safe_abort`, with verified scores from **40 to 80**.
 - **OpenAI (`gpt-5.6-luna`), replication:** all nine rows have outcome `safe_abort`, with verified scores from **40 to 80**.
 
-`status` is the harness row status; `outcome` and `verified_score` are the recorded result fields.
+`status` is the harness row status; `outcome` and `verified_score` are the recorded result fields. Both OpenAI tournaments completed 900 successful provider requests without recorded provider errors, then exhausted the frozen 100-step budget in every row; that operational evidence distinguishes policy inefficiency under this profile from provider availability failure.
 
 ## Exact condition/seed rows
 
@@ -61,7 +61,7 @@ The first OpenAI tournament's `R2 / 18` row is `evidence_invalid`, outcome `safe
 
 ## Artifact source
 
-All paths above are relative to the read-only source checkout `/Users/alejandrobosch/Documents/GitHub/robot-factory-arena`. The complete result sources are:
+All paths above are repository-relative references to the local, read-only tournament artifacts, which remain intentionally untracked. The complete result sources are:
 
 - GLM leaderboard: `artifacts/live-tournaments/glm-5-3-flash/tournament-glm-5-3-flash-live-20260911-2053/leaderboard.json`.
 - OpenAI first-run leaderboard: `artifacts/live-tournaments/openai-luna/tournament-openai-luna-20260911-1852/leaderboard.json`.
