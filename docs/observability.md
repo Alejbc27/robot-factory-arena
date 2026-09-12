@@ -40,7 +40,7 @@ sources only.
 | `langfuse/langfuse:3.114.0` | Official release `v3.114.0` (published 2025-10-01, verified via GitHub API); tag exists on Docker Hub. |
 | `langfuse/langfuse-worker:3.114.0` | Same release; worker tag exists on Docker Hub. |
 | `clickhouse/clickhouse-server:24.3.18.7` | Official dev compose pins the `24.3` line; `24.3.18.7` is the final 24.3 patch release. |
-| `minio/minio:RELEASE.2025-09-07T16-13-09Z` | No MinIO tag exists in the official Compose path (helm uses a legacy channel); pinned to a release-era upstream tag verified in the registry. |
+| `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z` | No MinIO tag exists in the official Compose path (helm uses a legacy channel); the release-era upstream tag was verified in the official Quay registry. |
 | `redis:7.2.4` | Exact pin from the official dev compose. |
 | `postgres:17.5` | Official compose ships a floating `postgres:17`; pinned to the newest 17.x at release era. |
 
