@@ -6,7 +6,7 @@ Robot Factory & Arena runs bounded agent strategies against the **same seeded ta
 
 > **In one line:** explore fairly, execute deterministically, seal the evidence, verify independently.
 
-**Current state:** the v0 deterministic evidence-chain core is implemented and stdlib-only. Optional provider adapters, the R1/R2/R3 tournament harness, and self-hosted Langfuse projection are documented separately. This page is the portfolio map; implementation/spec documents and tests define the detailed contracts.
+**Current state:** the v0 deterministic evidence-chain core is implemented and stdlib-only. Optional provider adapters, the R1/R2/R3 tournament harness, and self-hosted Langfuse projection are documented separately. Actual provider-backed outcomes are summarized in the [live tournament results](docs/live-tournament-results.md); implementation/spec documents and tests define the detailed contracts.
 
 ![Robot Factory and Arena system overview](docs/architecture/system-overview.svg)
 
@@ -113,7 +113,7 @@ The committed seed-18 fixture exercises one response loss after commit, an inter
 Each run reports four separate signals, each on a 0–100 scale:
 
 1. **Task quality** — deterministic verifier score.
-2. **Efficiency** — actions, tokens/cost, and wall time.
+2. **Efficiency** — actions and wall time.
 3. **Robustness** — behavior under injected faults.
 4. **Contract hygiene** — permission violations, idempotency breaches, and audit completeness.
 
@@ -133,7 +133,7 @@ The core trace hash chain and receipt/digest bindings provide tamper evidence fo
 - A separation between proposal, authorization, committed state transition, evidence, and verification.
 - Independent score/outcome derivation from sealed artifacts rather than agent claims.
 - Fault-aware handling of duplicate delivery and response loss, including safe-abort or unresolved classifications.
-- A deterministic fake acceptance path for R1/R2/R3 harness behavior, with no network cost.
+- A deterministic fake acceptance path for R1/R2/R3 harness behavior, separate from the live-provider runs.
 
 ### It does not claim
 
@@ -143,7 +143,7 @@ The core trace hash chain and receipt/digest bindings provide tamper evidence fo
 - Hosted deployment, real users, or real-world integrations such as payments, email, or production APIs.
 - Model training or fine-tuning; providers are inference integrations only.
 - A wide task library: v0 focuses on one task, with 2–4 deeply designed tasks as the later ceiling.
-- AGI-adjacent claims or a live-provider performance result for v0. Provider adapters and documented live-acceptance procedures are integration paths, not experimental conclusions.
+- A benchmark, leaderboard, or general model-performance claim from the small live-provider fixture set. The observed outcomes are recorded in the [live tournament results](docs/live-tournament-results.md).
 - A composite score: task quality, efficiency, robustness, and contract hygiene remain separate signals.
 
 ## Optional tournament harness
@@ -156,7 +156,7 @@ python3 -m harness --config tests/fixtures/harness/unit6-acceptance-config.json 
     --runner fake --non-interactive --root /tmp/harness-demo
 ```
 
-The fake acceptance is deterministic and zero-cost. See the [harness operator contract](docs/sdd/phase6-langgraph-harness.md) for the execution-profile table, R1/R2/R3 semantics, artifact layout, recovery windows, and the deliberately narrow guarantees.
+The fake acceptance is deterministic and separate from provider-backed results. See the [harness operator contract](docs/sdd/phase6-langgraph-harness.md) for the execution-profile table, R1/R2/R3 semantics, artifact layout, recovery windows, and the deliberately narrow guarantees; see the [live tournament results](docs/live-tournament-results.md) for observed provider outcomes.
 
 ## Optional observability
 
@@ -170,7 +170,7 @@ The fake acceptance is deterministic and zero-cost. See the [harness operator co
 | **1. MVP core** | Implemented | Seeded task, world, ToolBay, policies, budgets, verifier, trace/replay, receipt, and report. |
 | **2. Robustness** | Implemented | Fault tapes, duplicate detection, safe-abort/unresolved classification, and replay-equivalent recovery paths. |
 | **3. Arena conditions** | Harness implemented | R1/R2/R3 orchestration and deterministic fake acceptance are available; scientific comparison remains future work. |
-| **4. Providers and observability** | Optional paths | Provider adapters and downstream Langfuse projection are documented and gated; v0 makes no live-provider performance claim. |
+| **4. Providers and observability** | Optional paths | Provider adapters and downstream Langfuse projection are documented and gated; observed live-provider outcomes are reported separately from benchmark claims. |
 | **5. Analysis and defense** | Next | Run controlled experiments, compare separate signals, publish receipts and limitations, and keep claims tied to evidence. |
 
 ## Technical references
@@ -179,6 +179,7 @@ The fake acceptance is deterministic and zero-cost. See the [harness operator co
 - [Core CLI](robot_factory_arena/cli.py), [core implementation](robot_factory_arena/), and [test suite](tests/)
 - [Deterministic core specification](docs/sdd/spec.md), [design](docs/sdd/design.md), [tasks](docs/sdd/tasks.md), and [verification report](docs/sdd/verify-report.md)
 - [Tournament harness contract](docs/sdd/phase6-langgraph-harness.md)
+- [Live tournament results](docs/live-tournament-results.md)
 - [Visualizer contract](docs/sdd/robot-run-visualizer.md)
 - [Langfuse observability contract](docs/observability.md)
 - [Focused CLI and replay tests](tests/test_cli.py), [rerun/replay tests](tests/test_rerun_replay.py), [harness acceptance](tests/test_harness_acceptance.py), and [visualizer release tests](tests/test_visualizer_release.py)
