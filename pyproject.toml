@@ -15,3 +15,6 @@ harness = ["langgraph==1.2.11"]
 
 [tool.setuptools.packages.find]
 include = ["robot_factory_arena*", "harness*"]
+
+[tool.setuptools.package-data]
+"robot_factory_arena.evidence" = ["assets/tactical_reference_atlas.png"]

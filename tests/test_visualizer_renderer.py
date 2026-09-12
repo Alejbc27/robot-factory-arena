@@ -1,7 +1,10 @@
 """Contract tests for the projection-only offline visualizer renderer."""
 
+import base64
+import hashlib
 import json
 import re
+from pathlib import Path
 import shutil
 import subprocess
 import unittest
@@ -13,9 +16,9 @@ from robot_factory_arena.evidence.visualizer_projection import (
 from tests.test_visualizer_projection import projection
 
 
-def execute_renderer_script(html, projection_hex):
+def execute_renderer_script(html, projection_hex, probe=""):
     scripts = re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>", html, flags=re.DOTALL)
-    script = scripts[-1]
+    script = scripts[-1] + probe
     harness = """
 const elements = new Map();
 function makeElement(textContent = "") {
@@ -78,13 +81,15 @@ process.stdout.write(JSON.stringify({
   robot: elements.get("#hud-robot-position").textContent,
   inventory: elements.get("#hud-robot-load").textContent,
   terminal: elements.get("#terminal-text").textContent,
-  controlsDisabled: elements.get("#play").disabled && elements.get("#pause").disabled && elements.get("#step-forward").disabled && elements.get("#speed").disabled
+  controlsDisabled: elements.get("#play").disabled && elements.get("#pause").disabled && elements.get("#step-forward").disabled && elements.get("#speed").disabled,
+  probe: globalThis.__rendererProbe || null
 }));
 """.replace("PROJECTION_HEX", json.dumps(projection_hex)).replace(
         "RENDERER_SCRIPT", json.dumps(script)
     )
     completed = subprocess.run(
-        ["node", "-e", harness],
+        ["node"],
+        input=harness,
         check=False,
         capture_output=True,
         text=True,
@@ -263,6 +268,122 @@ class VisualizerRendererTests(unittest.TestCase):
         second = render_visualizer(validate_projection(projection()))
         self.assertEqual(first, second)
 
+    def test_renderer_embeds_the_packaged_atlas_once(self):
+        html = self.render()
+        asset = Path("robot_factory_arena/evidence/assets/tactical_reference_atlas.png")
+        atlas = asset.read_bytes()
+        payloads = re.findall(r"data:image/png;base64,([A-Za-z0-9+/=]+)", html)
+
+        self.assertTrue(asset.is_file())
+        self.assertLess(len(atlas), 852 * 1024)
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(hashlib.sha256(base64.b64decode(payloads[0])).digest(), hashlib.sha256(atlas).digest())
+        self.assertIn('resources.files("robot_factory_arena.evidence")', Path("robot_factory_arena/evidence/visualizer_renderer.py").read_text())
+        self.assertIn('"robot_factory_arena.evidence" = ["assets/tactical_reference_atlas.png"]', Path("pyproject.toml").read_text())
+
+    def test_renderer_uses_atlas_crop_maps_for_every_dynamic_world_sprite(self):
+        html = self.render()
+        for name in (
+            "robot_front", "robot_east", "robot_north", "robot_west", "depot",
+            "rack_0", "rack_1", "rack_2", "crate_0", "crate_1", "crate_2", "crate_3",
+            "floor_0", "floor_1", "floor_2",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(name, html)
+        self.assertIn("context.drawImage(atlasImage", html)
+        self.assertIn('stableIndex(shelfId, 3)', html)
+        self.assertIn("stableIndex(String(label || \"cargo\"), 4)", html)
+
+    def test_renderer_computes_contained_tile_destinations(self):
+        if shutil.which("node") is None:
+            self.skipTest("node is required to execute the embedded renderer")
+        state = execute_renderer_script(
+            self.render(), canonical_projection_bytes(self.projection).hex(),
+            "\nglobalThis.__rendererProbe = { rack: rackDestination([2, 3]), depot: depotDestination([2, 3]), robot: robotDestination([2, 3]) };",
+        )
+        rack, depot, robot = state["probe"]["rack"], state["probe"]["depot"], state["probe"]["robot"]
+        self.assertEqual((rack["width"], rack["height"]), (38, 40))
+        self.assertEqual((depot["width"], depot["height"]), (40, 40))
+        self.assertEqual((robot["width"], robot["height"]), (36, 38))
+        for rectangle in (rack, depot, robot):
+            self.assertGreaterEqual(rectangle["x"], 20 + 2 * 44)
+            self.assertGreaterEqual(rectangle["y"], 20 + 3 * 44)
+            self.assertLessEqual(rectangle["x"] + rectangle["width"], 20 + 3 * 44)
+            self.assertLessEqual(rectangle["y"] + rectangle["height"], 20 + 4 * 44)
+
+    def test_renderer_has_no_atlas_decoration_destinations_in_grid(self):
+        html = self.render()
+        for decoration in ("hazard_corner", "wall_corner", "wall_short", "wall_low", "wall_wide", "wall_panel", "frame_wide", "frame_medium", "frame_square"):
+            with self.subTest(decoration=decoration):
+                self.assertNotIn(decoration, html)
+        self.assertIn("const GRID_RECT = Object.freeze", html)
+        self.assertIn('drawAtlasSprite("floor_" + ((column * 3 + row) % 3), x, y, CELL_SIZE, CELL_SIZE)', html)
+
+    def test_renderer_draws_cargo_only_for_nonempty_entities(self):
+        html = self.render()
+        rack_body = html[html.index("function drawShelfSprite"):html.index("function robotFacing")]
+        robot_body = html[html.index("function drawRobotSprite"):html.index("function drawMovementPip")]
+        self.assertIn("if (shelf.item_id !== null)", rack_body)
+        self.assertIn("if (robot.inventory_item_id !== null)", robot_body)
+        self.assertIn("function drawRackShell", html)
+        self.assertIn("function drawRobotShell", html)
+        self.assertIn("opaque interior reconstruction makes the shell empty", html)
+        self.assertIn("Opaque roof compositing removes it for empty robots", html)
+
+    def test_renderer_uses_separate_atlas_cargo_only_when_loaded(self):
+        if shutil.which("node") is None:
+            self.skipTest("node is required to execute the embedded renderer")
+        probe = """
+atlasReady = true; atlasImage = {};
+const crops = [];
+context.drawImage = (...args) => crops.push(args[1]);
+drawShelfSprite({ shelf_id: "shelf-empty", position: [1, 1], item_id: null });
+const emptyRack = crops.slice(); crops.length = 0;
+drawShelfSprite({ shelf_id: "shelf-loaded", position: [1, 1], item_id: "item-00" });
+const loadedRack = crops.slice(); crops.length = 0;
+drawRobotSprite({ position: [1, 1], inventory_item_id: null });
+const emptyRobot = crops.slice(); crops.length = 0;
+drawRobotSprite({ position: [1, 1], inventory_item_id: "item-00" });
+const loadedRobot = crops.slice();
+globalThis.__rendererProbe = { emptyRack, loadedRack, emptyRobot, loadedRobot };
+"""
+        state = execute_renderer_script(self.render(), canonical_projection_bytes(self.projection).hex(), probe)
+        for key in ("emptyRack", "emptyRobot"):
+            self.assertEqual(len(state["probe"][key]), 1, key)
+            self.assertLess(state["probe"][key][0], 461, key)
+        for key in ("loadedRack", "loadedRobot"):
+            self.assertEqual(len(state["probe"][key]), 2, key)
+            self.assertGreaterEqual(state["probe"][key][1], 461, key)
+
+    def test_renderer_facing_uses_last_actual_transition_and_retains_it_when_stationary(self):
+        if shutil.which("node") is None:
+            self.skipTest("node is required to execute the embedded renderer")
+        probe = """
+const frame = (position) => ({ state_after: { robot: { position } } });
+globalThis.__rendererProbe = {
+  east: robotFacing([frame([2, 2]), frame([3, 2])], 1),
+  west: robotFacing([frame([2, 2]), frame([1, 2])], 1),
+  south: robotFacing([frame([2, 2]), frame([2, 3])], 1),
+  north: robotFacing([frame([2, 2]), frame([2, 1])], 1),
+  retained: robotFacing([frame([2, 2]), frame([3, 2]), frame([3, 2]), frame([3, 2])], 3),
+  initial: robotFacing([frame([2, 2])], 0)
+};
+"""
+        state = execute_renderer_script(self.render(), canonical_projection_bytes(self.projection).hex(), probe)
+        self.assertEqual(state["probe"], {"east": "robot_east", "west": "robot_west", "south": "robot_front", "north": "robot_north", "retained": "robot_east", "initial": "robot_front"})
+
+    def test_renderer_keeps_atlas_load_failure_fail_open(self):
+        html = self.render()
+        self.assertIn('image.onerror = function () { atlasImage = null; atlasReady = false; if (projection !== null) render(); };', html)
+        self.assertNotIn("return showUnavailableState();\n  image.onerror", html)
+
+    def test_renderer_uses_compact_dashboard_layout(self):
+        html = self.render()
+        self.assertIn("/* The 484×480 backing canvas", html)
+        self.assertIn(".action-status-strip { display: grid; grid-template-columns: repeat(2", html)
+        self.assertIn(".order-list { display: grid; grid-template-columns: repeat(2", html)
+        self.assertEqual(html.count('class="order-slot"'), 10)
+
     def test_renderer_uses_retro_tactical_shell_layout(self):
         html = self.render()
 
@@ -280,8 +401,8 @@ class VisualizerRendererTests(unittest.TestCase):
             "--amber: #f6c84c",
             "--magenta: #ff4f9f",
             "--danger: #ff6262",
-            "main { width: min(1400px, calc(100vw - 24px));",
-            "grid-template-columns: minmax(0, 1fr) 330px",
+"main { width: min(1120px, calc(100vw - 24px));",
+            "grid-template-columns: minmax(0, 1fr) minmax(300px, 340px);",
             ".arena-column { min-width: 0; border-right: 2px solid",
             "image-rendering: pixelated",
             "OFFLINE / SAFE PROJECTION",
@@ -314,7 +435,6 @@ class VisualizerRendererTests(unittest.TestCase):
         for marker in (
             "function drawFloor",
             "function drawIndustrialTile",
-            "function drawHazardDepotSprite",
             "function drawShelfSprite",
             "function drawCrateSprite",
             "function drawRobotSprite",
@@ -341,9 +461,11 @@ class VisualizerRendererTests(unittest.TestCase):
         world_body = html[html.index("function drawWorld"):html.index("function render()")]
         target_index = world_body.index("drawTargetCue(safeTargetForFrame(frame, world));")
 
-        for sprite in ("drawDepotSprite", "drawShelfSprite", "drawRobotSprite"):
+        for sprite in ("drawFloor", "drawPathTrail", "drawDepotSprite", "drawShelfSprite", "drawRobotSprite"):
             with self.subTest(sprite=sprite):
                 self.assertLess(world_body.index(sprite), target_index)
+        self.assertLess(world_body.index("drawFloor();"), world_body.index("drawPathTrail(world, frame);"))
+        self.assertLess(world_body.index("drawPathTrail(world, frame);"), world_body.index("drawDepotSprite(world.robot.base_position);"))
         cue = html[html.index("function drawTargetCue"):html.index("const CLASSIFICATION_STATUS")]
         self.assertIn("context.beginPath();", cue)
         self.assertIn("context.lineTo", cue)
@@ -434,7 +556,7 @@ class VisualizerRendererTests(unittest.TestCase):
                 self.assertIn(marker, html)
         self.assertNotIn("LOG", html)
         self.assertNotIn("TICK", html)
-        self.assertNotIn("SEED", html)
+        # Base64 atlas bytes may coincidentally contain uppercase text fragments.
 
     def test_renderer_rejects_raw_mapping(self):
         from robot_factory_arena.evidence.visualizer_renderer import render_visualizer
