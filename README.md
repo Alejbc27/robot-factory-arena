@@ -23,7 +23,7 @@ The repository publishes a small, bounded set of observed provider outcomes. It 
 | Observed run | Result | Safe reading |
 |---|---|---|
 | **GLM `glm-5.3-flash`** | **9/9 completed**, with a verifier-owned score of **100** | Every recorded condition/seed row completed under the published tournament setup. |
-| **OpenAI `gpt-5.6-luna`** | Two 9-run tournaments; every run **safe-aborted** under the fixed **100-step** profile, with scores from **40–80** and **no provider request errors** | This is the observed outcome of these bounded runs, not a model-quality ranking. |
+| **OpenAI `gpt-5.6-luna`** | One 9-run tournament; every run **safe-aborted** under the fixed **100-step** profile, with scores from **40–80** and **no provider request errors** | This is the observed outcome of this bounded tournament, not a model-quality ranking. |
 
 There are three seeds, one bounded task, and nine rows per tournament. See the [exact condition/seed rows and artifact sources](docs/live-tournament-results.md) before drawing any conclusion beyond the recorded evidence.
 
