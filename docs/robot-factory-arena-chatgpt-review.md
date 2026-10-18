@@ -2,7 +2,7 @@
 
 > **Use:** Upload this file to ChatGPT Web and select a high-reasoning model. Then paste the review prompt at the end of this document.
 >
-> **Repository:** `/Users/alejandrobosch/Documents/GitHub/robot-factory-arena`
+> **Repository:** `robot-factory-arena`
 >
 > **Current status:** SDD exploration is complete. The application code has not been implemented yet. The next SDD artifact is the formal proposal.
 
