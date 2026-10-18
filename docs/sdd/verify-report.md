@@ -22,7 +22,7 @@ Initial verification found two CRITICAL findings (C-01 stale Engram tasks checkb
 | Active change | `robot-factory-arena`, proven by `docs/sdd/*` and Engram topic keys `sdd/robot-factory-arena/*`; no competing active change found. |
 | Artifact store | `engram`; native status is explicitly non-authoritative with `nextRecommended: resolve-via-engram`. |
 | Required artifacts | Spec confirmed from Engram observation 6170; tasks from observation 6177; apply progress from observation 6191. The materialized files were also inspected. |
-| Action context | `repo-local`; workspace `/Users/alejandrobosch/Documents/GitHub/robot-factory-arena`; allowed edit root is the repository root. Implementation ownership and target files are inside that root. |
+| Action context | `repo-local`; workspace `the repository root`; allowed edit root is the repository root. Implementation ownership and target files are inside that root. |
 | Dependencies/blockers | Native `dependencies`/`blockedReasons` were not treated as authoritative. Readiness was resolved from the required Engram artifacts. |
 | OpenSpec config | `openspec/config.yaml` is absent; config-specific strict-TDD settings were skipped. Strict-TDD verification was nevertheless applied because the parent/session and apply-progress enabled it. |
 
@@ -147,7 +147,7 @@ These checks demonstrate fail-closed tamper detection, not authentication or tra
 
 ## Strict-TDD verification
 
-Strict-TDD support guidance was loaded from `/Users/alejandrobosch/.pi/agent/gentle-ai/support/strict-tdd-verify.md`. The project-local override path `.pi/gentle-ai/support/strict-tdd-verify.md` does not exist. `apply-progress.md` contains TDD Cycle Evidence tables for B1 through B6, covering all 25 tasks. Every reported test file exists, and the two current full-gate runs remain GREEN.
+Strict-TDD support guidance was loaded from `agent support path strict-tdd-verify.md`. The project-local override path `.pi/gentle-ai/support/strict-tdd-verify.md` does not exist. `apply-progress.md` contains TDD Cycle Evidence tables for B1 through B6, covering all 25 tasks. Every reported test file exists, and the two current full-gate runs remain GREEN.
 
 | Check | Result | Details |
 |---|---|---|
